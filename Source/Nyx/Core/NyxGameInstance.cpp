@@ -12,6 +12,13 @@ void UNyxGameInstance::Init()
 	UE_LOG(LogNyx, Log, TEXT("  SpacetimeDB Host: %s"), *SpacetimeDBHost);
 	UE_LOG(LogNyx, Log, TEXT("  Database: %s"), *SpacetimeDBDatabaseName);
 
+	// Bind login callback once
+	UNyxAuthSubsystem* AuthSub = GetSubsystem<UNyxAuthSubsystem>();
+	if (AuthSub)
+	{
+		AuthSub->OnLoginCompleteBP.AddDynamic(this, &UNyxGameInstance::OnLoginComplete);
+	}
+
 	RegisterConsoleCommands();
 }
 
@@ -33,8 +40,12 @@ void UNyxGameInstance::StartGame(bool bUseMock)
 		return;
 	}
 
-	// Bind to login completion
-	AuthSub->OnLoginCompleteBP.AddDynamic(this, &UNyxGameInstance::OnLoginComplete);
+	// If already authenticated, logout first so we can re-login
+	if (AuthSub->GetAuthState() != ENyxAuthState::NotAuthenticated)
+	{
+		UE_LOG(LogNyx, Log, TEXT("Logging out before re-starting game..."));
+		AuthSub->Logout();
+	}
 
 	// Start the auth flow
 	AuthSub->Login(EOSLoginType, SpacetimeDBHost, SpacetimeDBDatabaseName, bUseMock);

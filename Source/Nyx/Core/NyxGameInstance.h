@@ -50,7 +50,7 @@ public:
 
 	/** EOS login type (e.g., "accountportal", "developer", "persistentauth") */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Config")
-	FString EOSLoginType = TEXT("developer");
+	FString EOSLoginType = TEXT("accountportal");
 
 private:
 	UFUNCTION()
