@@ -1,0 +1,58 @@
+# Unreal Engine 5 .gitignore
+
+# Compiled binaries
+Binaries/
+
+# Build intermediates
+Intermediate/
+DerivedDataCache/
+
+# Saved data (logs, autosaves, local config)
+Saved/
+
+# Build directory (packaging output)
+Build/
+
+# Visual Studio files
+*.sln
+*.suo
+*.opensdf
+*.sdf
+*.VC.db
+*.VC.opendb
+.vs/
+
+# VS Code (keep settings, ignore caches)
+.vscode/*
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/settings.json
+!.vscode/c_cpp_properties.json
+
+# Rider
+.idea/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Content that should not be in source control
+# (Large binary assets — manage via Git LFS if needed)
+# *.uasset
+# *.umap
+
+# Cooked content
+Content/Cooked/
+
+# Shader compilation caches
+ShaderDebugInfo/
+
+# Crash reports
+CrashReportClient/
+
+# SpacetimeDB local data (Spike 2+)
+Server/.spacetime/
