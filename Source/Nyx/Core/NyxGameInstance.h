@@ -4,6 +4,7 @@
 
 #include "CoreMinimal.h"
 #include "Engine/GameInstance.h"
+#include "HAL/IConsoleManager.h"
 #include "NyxGameInstance.generated.h"
 
 /**
@@ -52,5 +53,13 @@ public:
 	FString EOSLoginType = TEXT("developer");
 
 private:
+	UFUNCTION()
 	void OnLoginComplete(bool bSuccess, const FString& ErrorMessage);
+
+	/** Register/unregister development console commands. */
+	void RegisterConsoleCommands();
+	void UnregisterConsoleCommands();
+
+	/** Console command handles. */
+	TArray<IConsoleObject*> ConsoleCommands;
 };

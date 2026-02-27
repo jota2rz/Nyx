@@ -65,8 +65,11 @@ void UNyxNetworkSubsystem::ConnectToServer(const FString& Host, const FString& D
 
 		if (SpacetimeDBConnection)
 		{
+			// Enable auto-ticking so the SDK processes incoming WebSocket messages each frame
+			SpacetimeDBConnection->SetAutoTicking(true);
+
 			HandleConnectionStateChanged(ENyxConnectionState::Connecting);
-			UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB connection builder complete — waiting for connect callback"));
+			UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB connection builder complete — auto-tick enabled, waiting for connect callback"));
 		}
 		else
 		{
@@ -99,6 +102,12 @@ void UNyxNetworkSubsystem::DisconnectFromServer()
 
 ENyxConnectionState UNyxNetworkSubsystem::GetConnectionState() const
 {
+	// Check real SpacetimeDB connection first
+	if (SpacetimeDBConnection && SpacetimeDBConnection->IsActive())
+	{
+		return ENyxConnectionState::Connected;
+	}
+	// Fall back to mock interface
 	if (DatabaseInterface)
 	{
 		return DatabaseInterface->GetConnectionState();

@@ -11,10 +11,13 @@ void UNyxGameInstance::Init()
 	UE_LOG(LogNyx, Log, TEXT("NyxGameInstance initialized"));
 	UE_LOG(LogNyx, Log, TEXT("  SpacetimeDB Host: %s"), *SpacetimeDBHost);
 	UE_LOG(LogNyx, Log, TEXT("  Database: %s"), *SpacetimeDBDatabaseName);
+
+	RegisterConsoleCommands();
 }
 
 void UNyxGameInstance::Shutdown()
 {
+	UnregisterConsoleCommands();
 	UE_LOG(LogNyx, Log, TEXT("NyxGameInstance shutting down"));
 	Super::Shutdown();
 }
@@ -58,4 +61,85 @@ void UNyxGameInstance::OnLoginComplete(bool bSuccess, const FString& ErrorMessag
 		UE_LOG(LogNyx, Error, TEXT("Login failed: %s"), *ErrorMessage);
 		// TODO: Show error UI, offer retry
 	}
+}
+
+void UNyxGameInstance::RegisterConsoleCommands()
+{
+	// Nyx.Connect [Host] [Database] — connect directly to SpacetimeDB (bypasses auth)
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Connect"),
+		TEXT("Connect directly to SpacetimeDB. Usage: Nyx.Connect [Host] [Database]"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			const FString Host = Args.Num() > 0 ? Args[0] : SpacetimeDBHost;
+			const FString DB = Args.Num() > 1 ? Args[1] : SpacetimeDBDatabaseName;
+
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Connect %s %s"), *Host, *DB);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub)
+			{
+				NetworkSub->ConnectToServer(Host, DB, /*bUseMock=*/false);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("NyxNetworkSubsystem not available!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.ConnectMock — connect with mock backend
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.ConnectMock"),
+		TEXT("Connect with mock backend (no SpacetimeDB needed)"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.ConnectMock"));
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub)
+			{
+				NetworkSub->ConnectToServer(SpacetimeDBHost, SpacetimeDBDatabaseName, /*bUseMock=*/true);
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.Disconnect — disconnect from server
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Disconnect"),
+		TEXT("Disconnect from SpacetimeDB"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Disconnect"));
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub)
+			{
+				NetworkSub->DisconnectFromServer();
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.StartGame [mock] — full auth flow
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.StartGame"),
+		TEXT("Start full game flow (EOS + SpacetimeDB). Pass 'mock' for mock mode."),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			bool bMock = Args.Num() > 0 && Args[0].ToLower() == TEXT("mock");
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.StartGame (mock=%s)"), bMock ? TEXT("true") : TEXT("false"));
+			StartGame(bMock);
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame"));
+}
+
+void UNyxGameInstance::UnregisterConsoleCommands()
+{
+	for (IConsoleObject* Cmd : ConsoleCommands)
+	{
+		IConsoleManager::Get().UnregisterConsoleObject(Cmd);
+	}
+	ConsoleCommands.Empty();
 }
