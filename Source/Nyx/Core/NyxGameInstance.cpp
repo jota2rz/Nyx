@@ -4,6 +4,7 @@
 #include "Nyx/Nyx.h"
 #include "Nyx/Online/NyxAuthSubsystem.h"
 #include "Nyx/Core/NyxNetworkSubsystem.h"
+#include "ModuleBindings/SpacetimeDBClient.g.h"
 
 void UNyxGameInstance::Init()
 {
@@ -143,7 +144,85 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame"));
+	// Nyx.Seed <count> — seed world entities for spatial stress testing
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Seed"),
+		TEXT("Seed world entities for testing. Usage: Nyx.Seed <count>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			uint32 Count = 100;
+			if (Args.Num() > 0)
+			{
+				Count = FCString::Atoi(*Args[0]);
+			}
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Seed %d"), Count);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->SeedEntities(Count);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.ClearEntities — remove all world entities
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.ClearEntities"),
+		TEXT("Remove all world entities from the database"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.ClearEntities"));
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->ClearEntities();
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.Move <x> <y> <z> — teleport local player and update spatial subscription
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Move"),
+		TEXT("Move player to position and update spatial subscription. Usage: Nyx.Move <x> <y> <z>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			if (Args.Num() < 3)
+			{
+				UE_LOG(LogNyx, Warning, TEXT("Usage: Nyx.Move <x> <y> <z>"));
+				return;
+			}
+
+			const double X = FCString::Atod(*Args[0]);
+			const double Y = FCString::Atod(*Args[1]);
+			const double Z = FCString::Atod(*Args[2]);
+
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Move %.0f %.0f %.0f"), X, Y, Z);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				// Update server position
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->MovePlayer(X, Y, Z, 0.0f);
+				// Update spatial subscription for new position
+				NetworkSub->UpdateSpatialSubscription(FVector(X, Y, Z));
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()

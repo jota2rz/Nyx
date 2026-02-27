@@ -14,8 +14,10 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "ModuleBindings/ReducerBase.g.h"
 #include "ModuleBindings/Reducers/AuthenticateWithEos.g.h"
+#include "ModuleBindings/Reducers/ClearEntities.g.h"
 #include "ModuleBindings/Reducers/CreatePlayer.g.h"
 #include "ModuleBindings/Reducers/MovePlayer.g.h"
+#include "ModuleBindings/Reducers/SeedEntities.g.h"
 #include "Types/Builtins.h"
 #include "SpacetimeDBClient.g.generated.h"
 
@@ -30,6 +32,7 @@ class USubscriptionHandle;
 /** Forward declaration for tables */
 class UPlayerTable;
 class UPlayerAccountTable;
+class UWorldEntityTable;
 /***/
 
 // Delegates using the generated connection type. These wrap the base
@@ -106,8 +109,10 @@ UENUM(BlueprintType, Category = "SpacetimeDB")
 enum class EReducerTag : uint8
 {
     AuthenticateWithEos,
+    ClearEntities,
     CreatePlayer,
-    MovePlayer
+    MovePlayer,
+    SeedEntities
 };
 
 USTRUCT(BlueprintType)
@@ -119,7 +124,7 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
     EReducerTag Tag = static_cast<EReducerTag>(0);
 
-    TVariant<FAuthenticateWithEosArgs, FCreatePlayerArgs, FMovePlayerArgs> Data;
+    TVariant<FAuthenticateWithEosArgs, FClearEntitiesArgs, FCreatePlayerArgs, FMovePlayerArgs, FSeedEntitiesArgs> Data;
 
     // Optional metadata
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
@@ -141,6 +146,22 @@ public:
     {
         ensureMsgf(IsAuthenticateWithEos(), TEXT("Reducer does not hold AuthenticateWithEos!"));
         return Data.Get<FAuthenticateWithEosArgs>();
+    }
+
+    static FReducer ClearEntities(const FClearEntitiesArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::ClearEntities;
+        Out.Data.Set<FClearEntitiesArgs>(Value);
+        Out.ReducerName = TEXT("clear_entities");
+        return Out;
+    }
+
+    FORCEINLINE bool IsClearEntities() const { return Tag == EReducerTag::ClearEntities; }
+    FORCEINLINE FClearEntitiesArgs GetAsClearEntities() const
+    {
+        ensureMsgf(IsClearEntities(), TEXT("Reducer does not hold ClearEntities!"));
+        return Data.Get<FClearEntitiesArgs>();
     }
 
     static FReducer CreatePlayer(const FCreatePlayerArgs& Value)
@@ -175,6 +196,22 @@ public:
         return Data.Get<FMovePlayerArgs>();
     }
 
+    static FReducer SeedEntities(const FSeedEntitiesArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::SeedEntities;
+        Out.Data.Set<FSeedEntitiesArgs>(Value);
+        Out.ReducerName = TEXT("seed_entities");
+        return Out;
+    }
+
+    FORCEINLINE bool IsSeedEntities() const { return Tag == EReducerTag::SeedEntities; }
+    FORCEINLINE FSeedEntitiesArgs GetAsSeedEntities() const
+    {
+        ensureMsgf(IsSeedEntities(), TEXT("Reducer does not hold SeedEntities!"));
+        return Data.Get<FSeedEntitiesArgs>();
+    }
+
     FORCEINLINE bool operator==(const FReducer& Other) const
     {
         if (Tag != Other.Tag || ReducerId != Other.ReducerId || RequestId != Other.RequestId || ReducerName != Other.ReducerName) return false;
@@ -182,10 +219,14 @@ public:
         {
         case EReducerTag::AuthenticateWithEos:
             return GetAsAuthenticateWithEos() == Other.GetAsAuthenticateWithEos();
+        case EReducerTag::ClearEntities:
+            return GetAsClearEntities() == Other.GetAsClearEntities();
         case EReducerTag::CreatePlayer:
             return GetAsCreatePlayer() == Other.GetAsCreatePlayer();
         case EReducerTag::MovePlayer:
             return GetAsMovePlayer() == Other.GetAsMovePlayer();
+        case EReducerTag::SeedEntities:
+            return GetAsSeedEntities() == Other.GetAsSeedEntities();
         default: return false;
         }
     }
@@ -213,6 +254,19 @@ private:
     }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer ClearEntities(const FClearEntitiesArgs& Value) {
+        return FReducer::ClearEntities(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsClearEntities(const FReducer& Reducer) { return Reducer.IsClearEntities(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FClearEntitiesArgs GetAsClearEntities(const FReducer& Reducer) {
+        return Reducer.GetAsClearEntities();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
     static FReducer CreatePlayer(const FCreatePlayerArgs& Value) {
         return FReducer::CreatePlayer(Value);
     }
@@ -236,6 +290,19 @@ private:
     UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
     static FMovePlayerArgs GetAsMovePlayer(const FReducer& Reducer) {
         return Reducer.GetAsMovePlayer();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer SeedEntities(const FSeedEntitiesArgs& Value) {
+        return FReducer::SeedEntities(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsSeedEntities(const FReducer& Reducer) { return Reducer.IsSeedEntities(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FSeedEntitiesArgs GetAsSeedEntities(const FReducer& Reducer) {
+        return Reducer.GetAsSeedEntities();
     }
 };
 
@@ -620,9 +687,13 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void AuthenticateWithEos(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void ClearEntities(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void CreatePlayer(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void MovePlayer(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void SeedEntities(ECallReducerFlags Flag);
 
 };
 
@@ -640,6 +711,9 @@ public:
 
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     UPlayerAccountTable* PlayerAccount;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UWorldEntityTable* WorldEntity;
 
 };
 
@@ -666,6 +740,19 @@ public:
 
     bool InvokeAuthenticateWithEos(const FReducerEventContext& Context, const UAuthenticateWithEosReducer* Args);
     bool InvokeAuthenticateWithEosWithArgs(const FReducerEventContext& Context, const FAuthenticateWithEosArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FClearEntitiesHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FClearEntitiesHandler OnClearEntities;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void ClearEntities();
+
+    bool InvokeClearEntities(const FReducerEventContext& Context, const UClearEntitiesReducer* Args);
+    bool InvokeClearEntitiesWithArgs(const FReducerEventContext& Context, const FClearEntitiesArgs& Args);
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
         FCreatePlayerHandler,
@@ -697,6 +784,20 @@ public:
 
     bool InvokeMovePlayer(const FReducerEventContext& Context, const UMovePlayerReducer* Args);
     bool InvokeMovePlayerWithArgs(const FReducerEventContext& Context, const FMovePlayerArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FSeedEntitiesHandler,
+        const FReducerEventContext&, Context,
+        uint32, Count
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FSeedEntitiesHandler OnSeedEntities;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void SeedEntities(const uint32 Count);
+
+    bool InvokeSeedEntities(const FReducerEventContext& Context, const USeedEntitiesReducer* Args);
+    bool InvokeSeedEntitiesWithArgs(const FReducerEventContext& Context, const FSeedEntitiesArgs& Args);
 
     // Internal error handling
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FInternalOnUnhandledReducerError, const FReducerEventContext&, Context, const FString&, Error);

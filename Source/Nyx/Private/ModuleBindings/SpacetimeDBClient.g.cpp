@@ -6,6 +6,7 @@
 #include "BSATN/UEBSATNHelpers.h"
 #include "ModuleBindings/Tables/PlayerTable.g.h"
 #include "ModuleBindings/Tables/PlayerAccountTable.g.h"
+#include "ModuleBindings/Tables/WorldEntityTable.g.h"
 
 static FReducer DecodeReducer(const FReducerEvent& Event)
 {
@@ -15,6 +16,12 @@ static FReducer DecodeReducer(const FReducerEvent& Event)
     {
         FAuthenticateWithEosArgs Args = UE::SpacetimeDB::Deserialize<FAuthenticateWithEosArgs>(Event.ReducerCall.Args);
         return FReducer::AuthenticateWithEos(Args);
+    }
+
+    if (ReducerName == TEXT("clear_entities"))
+    {
+        FClearEntitiesArgs Args = UE::SpacetimeDB::Deserialize<FClearEntitiesArgs>(Event.ReducerCall.Args);
+        return FReducer::ClearEntities(Args);
     }
 
     if (ReducerName == TEXT("create_player"))
@@ -27,6 +34,12 @@ static FReducer DecodeReducer(const FReducerEvent& Event)
     {
         FMovePlayerArgs Args = UE::SpacetimeDB::Deserialize<FMovePlayerArgs>(Event.ReducerCall.Args);
         return FReducer::MovePlayer(Args);
+    }
+
+    if (ReducerName == TEXT("seed_entities"))
+    {
+        FSeedEntitiesArgs Args = UE::SpacetimeDB::Deserialize<FSeedEntitiesArgs>(Event.ReducerCall.Args);
+        return FReducer::SeedEntities(Args);
     }
 
     return FReducer();
@@ -48,6 +61,7 @@ UDbConnection::UDbConnection(const FObjectInitializer& ObjectInitializer) : Supe
 
 	RegisterTable<FPlayerType, UPlayerTable, FEventContext>(TEXT("player"), Db->Player);
 	RegisterTable<FPlayerAccountType, UPlayerAccountTable, FEventContext>(TEXT("player_account"), Db->PlayerAccount);
+	RegisterTable<FWorldEntityType, UWorldEntityTable, FEventContext>(TEXT("world_entity"), Db->WorldEntity);
 }
 
 FContextBase::FContextBase(UDbConnection* InConn)
@@ -85,17 +99,23 @@ void URemoteTables::Initialize()
 	/** Creating tables */
 	Player = NewObject<UPlayerTable>(this);
 	PlayerAccount = NewObject<UPlayerAccountTable>(this);
+	WorldEntity = NewObject<UWorldEntityTable>(this);
 	/**/
 
 	/** Initialization */
 	Player->PostInitialize();
 	PlayerAccount->PostInitialize();
+	WorldEntity->PostInitialize();
 	/**/
 }
 
 void USetReducerFlags::AuthenticateWithEos(ECallReducerFlags Flag)
 {
 	FlagMap.Add("AuthenticateWithEos", Flag);
+}
+void USetReducerFlags::ClearEntities(ECallReducerFlags Flag)
+{
+	FlagMap.Add("ClearEntities", Flag);
 }
 void USetReducerFlags::CreatePlayer(ECallReducerFlags Flag)
 {
@@ -104,6 +124,10 @@ void USetReducerFlags::CreatePlayer(ECallReducerFlags Flag)
 void USetReducerFlags::MovePlayer(ECallReducerFlags Flag)
 {
 	FlagMap.Add("MovePlayer", Flag);
+}
+void USetReducerFlags::SeedEntities(ECallReducerFlags Flag)
+{
+	FlagMap.Add("SeedEntities", Flag);
 }
 
 void URemoteReducers::AuthenticateWithEos(const FString& EosProductUserId, const FString& DisplayName, const FString& Platform)
@@ -147,6 +171,50 @@ bool URemoteReducers::InvokeAuthenticateWithEosWithArgs(const FReducerEventConte
     }
 
     OnAuthenticateWithEos.Broadcast(Context, Args.EosProductUserId, Args.DisplayName, Args.Platform);
+    return true;
+}
+
+void URemoteReducers::ClearEntities()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("clear_entities"), FClearEntitiesArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeClearEntities(const FReducerEventContext& Context, const UClearEntitiesReducer* Args)
+{
+    if (!OnClearEntities.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ClearEntities"));
+        }
+        return false;
+    }
+
+    OnClearEntities.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeClearEntitiesWithArgs(const FReducerEventContext& Context, const FClearEntitiesArgs& Args)
+{
+    if (!OnClearEntities.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ClearEntities"));
+        }
+        return false;
+    }
+
+    OnClearEntities.Broadcast(Context);
     return true;
 }
 
@@ -238,6 +306,50 @@ bool URemoteReducers::InvokeMovePlayerWithArgs(const FReducerEventContext& Conte
     return true;
 }
 
+void URemoteReducers::SeedEntities(const uint32 Count)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("seed_entities"), FSeedEntitiesArgs(Count), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeSeedEntities(const FReducerEventContext& Context, const USeedEntitiesReducer* Args)
+{
+    if (!OnSeedEntities.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SeedEntities"));
+        }
+        return false;
+    }
+
+    OnSeedEntities.Broadcast(Context, Args->Count);
+    return true;
+}
+
+bool URemoteReducers::InvokeSeedEntitiesWithArgs(const FReducerEventContext& Context, const FSeedEntitiesArgs& Args)
+{
+    if (!OnSeedEntities.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SeedEntities"));
+        }
+        return false;
+    }
+
+    OnSeedEntities.Broadcast(Context, Args.Count);
+    return true;
+}
+
 void UDbConnection::PostInitProperties()
 {
     Super::PostInitProperties();
@@ -298,6 +410,12 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
         Reducers->InvokeAuthenticateWithEosWithArgs(Context, Args);
         return;
     }
+    if (ReducerName == TEXT("clear_entities"))
+    {
+        FClearEntitiesArgs Args = ReducerEvent.Reducer.GetAsClearEntities();
+        Reducers->InvokeClearEntitiesWithArgs(Context, Args);
+        return;
+    }
     if (ReducerName == TEXT("create_player"))
     {
         FCreatePlayerArgs Args = ReducerEvent.Reducer.GetAsCreatePlayer();
@@ -308,6 +426,12 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
     {
         FMovePlayerArgs Args = ReducerEvent.Reducer.GetAsMovePlayer();
         Reducers->InvokeMovePlayerWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("seed_entities"))
+    {
+        FSeedEntitiesArgs Args = ReducerEvent.Reducer.GetAsSeedEntities();
+        Reducers->InvokeSeedEntitiesWithArgs(Context, Args);
         return;
     }
 

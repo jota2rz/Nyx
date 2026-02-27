@@ -4,6 +4,8 @@
 #include "Nyx/Nyx.h"
 #include "Nyx/Networking/NyxDatabaseInterface.h"
 #include "Nyx/Networking/NyxMockConnection.h"
+#include "ModuleBindings/Tables/PlayerTable.g.h"
+#include "ModuleBindings/Tables/WorldEntityTable.g.h"
 
 void UNyxNetworkSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -96,7 +98,9 @@ void UNyxNetworkSubsystem::DisconnectFromServer()
 	}
 
 	DatabaseConnectionObject = nullptr;
-	CurrentSpatialSubscriptionHandle = INDEX_NONE;
+	GlobalSubscriptionHandle = nullptr;
+	SpatialSubscriptionHandle = nullptr;
+	bSpatialSubscriptionActive = false;
 	LastChunkCoord = FIntPoint(TNumericLimits<int32>::Max(), TNumericLimits<int32>::Max());
 }
 
@@ -117,15 +121,16 @@ ENyxConnectionState UNyxNetworkSubsystem::GetConnectionState() const
 
 void UNyxNetworkSubsystem::UpdateSpatialSubscription(const FVector& PlayerPosition)
 {
-	if (!DatabaseInterface || DatabaseInterface->GetConnectionState() != ENyxConnectionState::Connected)
+	if (!SpacetimeDBConnection)
 	{
+		UE_LOG(LogNyxNet, Warning, TEXT("UpdateSpatialSubscription called but no SpacetimeDB connection"));
 		return;
 	}
 
-	// Calculate current chunk
+	// Calculate current chunk from UE position (cm)
 	FIntPoint CurrentChunk;
-	CurrentChunk.X = FMath::FloorToInt(PlayerPosition.X / ChunkSizeUnreal);
-	CurrentChunk.Y = FMath::FloorToInt(PlayerPosition.Y / ChunkSizeUnreal);
+	CurrentChunk.X = FMath::FloorToInt32(PlayerPosition.X / ChunkSizeUnreal);
+	CurrentChunk.Y = FMath::FloorToInt32(PlayerPosition.Y / ChunkSizeUnreal);
 
 	// Only update subscription if chunk changed
 	if (CurrentChunk == LastChunkCoord)
@@ -133,34 +138,62 @@ void UNyxNetworkSubsystem::UpdateSpatialSubscription(const FVector& PlayerPositi
 		return;
 	}
 
-	UE_LOG(LogNyxNet, Log, TEXT("Player moved to chunk (%d, %d), updating spatial subscription"),
-		CurrentChunk.X, CurrentChunk.Y);
+	UE_LOG(LogNyxNet, Log, TEXT("Player moved to chunk (%d, %d) from (%d, %d), updating spatial subscription"),
+		CurrentChunk.X, CurrentChunk.Y, LastChunkCoord.X, LastChunkCoord.Y);
 
 	LastChunkCoord = CurrentChunk;
 
 	// Unsubscribe from previous spatial query
-	if (CurrentSpatialSubscriptionHandle != INDEX_NONE)
+	if (SpatialSubscriptionHandle && SpatialSubscriptionHandle->IsActive())
 	{
-		DatabaseInterface->Unsubscribe(CurrentSpatialSubscriptionHandle);
+		UE_LOG(LogNyxNet, Log, TEXT("Unsubscribing from previous spatial subscription..."));
+		SpatialSubscriptionHandle->Unsubscribe();
+		SpatialSubscriptionHandle = nullptr;
+		bSpatialSubscriptionActive = false;
 	}
 
-	// Build spatial subscription queries
-	// Subscribe to player table for nearby chunks
-	const int32 MinChunkX = CurrentChunk.X - SubscriptionRadius;
-	const int32 MaxChunkX = CurrentChunk.X + SubscriptionRadius;
-	const int32 MinChunkY = CurrentChunk.Y - SubscriptionRadius;
-	const int32 MaxChunkY = CurrentChunk.Y + SubscriptionRadius;
+	// Subscribe to new chunk range
+	SubscribeToSpatialArea(CurrentChunk.X, CurrentChunk.Y);
+}
+
+void UNyxNetworkSubsystem::SubscribeToSpatialArea(int32 CenterChunkX, int32 CenterChunkY)
+{
+	if (!SpacetimeDBConnection)
+	{
+		return;
+	}
+
+	const int32 MinChunkX = CenterChunkX - SubscriptionRadius;
+	const int32 MaxChunkX = CenterChunkX + SubscriptionRadius;
+	const int32 MinChunkY = CenterChunkY - SubscriptionRadius;
+	const int32 MaxChunkY = CenterChunkY + SubscriptionRadius;
 
 	TArray<FString> Queries;
 
-	// Player positions in nearby chunks
+	// Players in nearby chunks
 	Queries.Add(FString::Printf(
 		TEXT("SELECT * FROM player WHERE chunk_x >= %d AND chunk_x <= %d AND chunk_y >= %d AND chunk_y <= %d"),
 		MinChunkX, MaxChunkX, MinChunkY, MaxChunkY));
 
-	// TODO: Add more table subscriptions as needed (NPCs, items, etc.)
+	// World entities (NPCs, items) in nearby chunks
+	Queries.Add(FString::Printf(
+		TEXT("SELECT * FROM world_entity WHERE chunk_x >= %d AND chunk_x <= %d AND chunk_y >= %d AND chunk_y <= %d"),
+		MinChunkX, MaxChunkX, MinChunkY, MaxChunkY));
 
-	CurrentSpatialSubscriptionHandle = DatabaseInterface->Subscribe(Queries);
+	UE_LOG(LogNyxNet, Log, TEXT("Subscribing to spatial area: chunks X[%d..%d] Y[%d..%d] (radius=%d)"),
+		MinChunkX, MaxChunkX, MinChunkY, MaxChunkY, SubscriptionRadius);
+
+	USubscriptionBuilder* SubBuilder = SpacetimeDBConnection->SubscriptionBuilder();
+
+	FOnSubscriptionApplied OnApplied;
+	OnApplied.BindDynamic(this, &UNyxNetworkSubsystem::HandleSpatialSubscriptionApplied);
+
+	FOnSubscriptionError OnError;
+	OnError.BindDynamic(this, &UNyxNetworkSubsystem::HandleSpatialSubscriptionError);
+
+	SubBuilder->OnApplied(OnApplied);
+	SubBuilder->OnError(OnError);
+	SpatialSubscriptionHandle = SubBuilder->Subscribe(Queries);
 }
 
 void UNyxNetworkSubsystem::HandleConnectionStateChanged(ENyxConnectionState NewState)
@@ -176,23 +209,30 @@ void UNyxNetworkSubsystem::HandleSpacetimeDBConnect(UDbConnection* Connection, F
 
 	HandleConnectionStateChanged(ENyxConnectionState::Connected);
 
-	// Subscribe to all players
-	USubscriptionBuilder* SubBuilder = Connection->SubscriptionBuilder();
+	// ── Global subscription: player_account (always active, no spatial filter) ──
+	{
+		USubscriptionBuilder* SubBuilder = Connection->SubscriptionBuilder();
 
-	FOnSubscriptionApplied OnApplied;
-	OnApplied.BindDynamic(this, &UNyxNetworkSubsystem::HandleSubscriptionApplied);
+		FOnSubscriptionApplied OnApplied;
+		OnApplied.BindDynamic(this, &UNyxNetworkSubsystem::HandleGlobalSubscriptionApplied);
 
-	FOnSubscriptionError OnError;
-	OnError.BindDynamic(this, &UNyxNetworkSubsystem::HandleSubscriptionError);
+		FOnSubscriptionError OnError;
+		OnError.BindDynamic(this, &UNyxNetworkSubsystem::HandleGlobalSubscriptionError);
 
-	SubBuilder->OnApplied(OnApplied);
-	SubBuilder->OnError(OnError);
-	SubBuilder->Subscribe({
-		TEXT("SELECT * FROM player"),
-		TEXT("SELECT * FROM player_account")
-	});
+		SubBuilder->OnApplied(OnApplied);
+		SubBuilder->OnError(OnError);
+		GlobalSubscriptionHandle = SubBuilder->Subscribe({
+			TEXT("SELECT * FROM player_account")
+		});
 
-	UE_LOG(LogNyxNet, Log, TEXT("Subscribed to player and player_account tables"));
+		UE_LOG(LogNyxNet, Log, TEXT("Subscribed to player_account (global, no spatial filter)"));
+	}
+
+	// ── Spatial subscription: player + world_entity (chunk-filtered) ──
+	// Start centered on chunk (0,0). The auth subsystem or game code will
+	// call UpdateSpatialSubscription() once the player position is known.
+	SubscribeToSpatialArea(0, 0);
+	LastChunkCoord = FIntPoint(0, 0);
 }
 
 void UNyxNetworkSubsystem::HandleSpacetimeDBDisconnect(UDbConnection* Connection, const FString& Error)
@@ -217,13 +257,42 @@ void UNyxNetworkSubsystem::HandleSpacetimeDBConnectError(const FString& ErrorMes
 	HandleConnectionStateChanged(ENyxConnectionState::Disconnected);
 }
 
-void UNyxNetworkSubsystem::HandleSubscriptionApplied(FSubscriptionEventContext Context)
+void UNyxNetworkSubsystem::HandleGlobalSubscriptionApplied(FSubscriptionEventContext Context)
 {
-	UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB subscription applied successfully!"));
+	UE_LOG(LogNyxNet, Log, TEXT("Global subscription applied (player_account)"));
+}
+
+void UNyxNetworkSubsystem::HandleGlobalSubscriptionError(FErrorContext Context)
+{
+	UE_LOG(LogNyxNet, Error, TEXT("Global subscription error: %s"), *Context.Error);
+}
+
+void UNyxNetworkSubsystem::HandleSpatialSubscriptionApplied(FSubscriptionEventContext Context)
+{
+	bSpatialSubscriptionActive = true;
+
+	// Count rows in client cache for diagnostics
+	int32 PlayerCount = 0;
+	int32 EntityCount = 0;
+	if (SpacetimeDBConnection && SpacetimeDBConnection->Db)
+	{
+		if (SpacetimeDBConnection->Db->Player)
+		{
+			PlayerCount = SpacetimeDBConnection->Db->Player->Count();
+		}
+		if (SpacetimeDBConnection->Db->WorldEntity)
+		{
+			EntityCount = SpacetimeDBConnection->Db->WorldEntity->Count();
+		}
+	}
+
+	UE_LOG(LogNyxNet, Log, TEXT("Spatial subscription applied — chunk center (%d, %d), radius=%d. Cache: %d players, %d entities"),
+		LastChunkCoord.X, LastChunkCoord.Y, SubscriptionRadius, PlayerCount, EntityCount);
+
 	HandleConnectionStateChanged(ENyxConnectionState::Connected);
 }
 
-void UNyxNetworkSubsystem::HandleSubscriptionError(FErrorContext Context)
+void UNyxNetworkSubsystem::HandleSpatialSubscriptionError(FErrorContext Context)
 {
-	UE_LOG(LogNyxNet, Error, TEXT("SpacetimeDB subscription error: %s"), *Context.Error);
+	UE_LOG(LogNyxNet, Error, TEXT("Spatial subscription error: %s"), *Context.Error);
 }

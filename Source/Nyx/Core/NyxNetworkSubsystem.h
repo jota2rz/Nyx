@@ -11,6 +11,7 @@
 class INyxDatabaseInterface;
 class UNyxMockConnection;
 class UDbConnection;
+class USubscriptionHandle;
 
 /**
  * Core networking subsystem that owns the SpacetimeDB connection.
@@ -88,10 +89,19 @@ private:
 	void HandleSpacetimeDBConnectError(const FString& ErrorMessage);
 
 	UFUNCTION()
-	void HandleSubscriptionApplied(FSubscriptionEventContext Context);
+	void HandleGlobalSubscriptionApplied(FSubscriptionEventContext Context);
 
 	UFUNCTION()
-	void HandleSubscriptionError(FErrorContext Context);
+	void HandleGlobalSubscriptionError(FErrorContext Context);
+
+	UFUNCTION()
+	void HandleSpatialSubscriptionApplied(FSubscriptionEventContext Context);
+
+	UFUNCTION()
+	void HandleSpatialSubscriptionError(FErrorContext Context);
+
+	/** Internal: subscribe to spatial queries for current chunk range. */
+	void SubscribeToSpatialArea(int32 CenterChunkX, int32 CenterChunkY);
 
 	/** The active database connection. Always accessed through INyxDatabaseInterface. */
 	UPROPERTY()
@@ -107,15 +117,23 @@ private:
 	/** Typed pointer to the interface (non-owning, points to DatabaseConnectionObject). */
 	INyxDatabaseInterface* DatabaseInterface = nullptr;
 
-	/** Current spatial subscription handle. */
-	int32 CurrentSpatialSubscriptionHandle = INDEX_NONE;
+	/** Global subscription handle (player_account — always active). */
+	UPROPERTY()
+	TObjectPtr<USubscriptionHandle> GlobalSubscriptionHandle;
+
+	/** Spatial subscription handle (player + world_entity with WHERE clause). */
+	UPROPERTY()
+	TObjectPtr<USubscriptionHandle> SpatialSubscriptionHandle;
 
 	/** Last chunk the player was in (to detect chunk changes). */
 	FIntPoint LastChunkCoord = FIntPoint(TNumericLimits<int32>::Max(), TNumericLimits<int32>::Max());
 
-	/** Chunk size in Unreal units (cm). 10000 = 100 meters. */
+	/** Chunk size in Unreal units (cm). 10000 = 100 meters. Must match server CHUNK_SIZE. */
 	static constexpr float ChunkSizeUnreal = 10000.0f;
 
-	/** How many chunks around the player to subscribe to. */
+	/** How many chunks around the player to subscribe to in each direction. */
 	static constexpr int32 SubscriptionRadius = 2;
+
+	/** Tracks whether the initial spatial subscription has been applied. */
+	bool bSpatialSubscriptionActive = false;
 };
