@@ -52,6 +52,12 @@ public:
 	/** Get the database interface (for other subsystems to use). */
 	INyxDatabaseInterface* GetDatabaseInterface() const { return DatabaseInterface; }
 
+	/** Get the raw SpacetimeDB connection (null when using mock). */
+	UDbConnection* GetSpacetimeDBConnection() const { return SpacetimeDBConnection; }
+
+	/** True when connected via mock (not real SpacetimeDB). */
+	bool IsMockConnection() const { return DatabaseInterface != nullptr && SpacetimeDBConnection == nullptr; }
+
 	/**
 	 * Subscribe to spatial queries for the area around a position.
 	 * Manages chunk-based interest: subscribes to nearby chunks,

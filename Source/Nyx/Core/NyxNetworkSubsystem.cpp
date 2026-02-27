@@ -187,9 +187,12 @@ void UNyxNetworkSubsystem::HandleSpacetimeDBConnect(UDbConnection* Connection, F
 
 	SubBuilder->OnApplied(OnApplied);
 	SubBuilder->OnError(OnError);
-	SubBuilder->Subscribe({TEXT("SELECT * FROM player")});
+	SubBuilder->Subscribe({
+		TEXT("SELECT * FROM player"),
+		TEXT("SELECT * FROM player_account")
+	});
 
-	UE_LOG(LogNyxNet, Log, TEXT("Subscribed to player table"));
+	UE_LOG(LogNyxNet, Log, TEXT("Subscribed to player and player_account tables"));
 }
 
 void UNyxNetworkSubsystem::HandleSpacetimeDBDisconnect(UDbConnection* Connection, const FString& Error)
@@ -217,13 +220,7 @@ void UNyxNetworkSubsystem::HandleSpacetimeDBConnectError(const FString& ErrorMes
 void UNyxNetworkSubsystem::HandleSubscriptionApplied(FSubscriptionEventContext Context)
 {
 	UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB subscription applied successfully!"));
-
-	// Test: call create_player reducer to verify round-trip
-	if (Context.Reducers)
-	{
-		UE_LOG(LogNyxNet, Log, TEXT("Calling create_player reducer..."));
-		Context.Reducers->CreatePlayer(TEXT("NyxTestPlayer"));
-	}
+	HandleConnectionStateChanged(ENyxConnectionState::Connected);
 }
 
 void UNyxNetworkSubsystem::HandleSubscriptionError(FErrorContext Context)

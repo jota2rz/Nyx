@@ -5,9 +5,12 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Nyx/Data/NyxTypes.h"
+#include "Online/Auth.h"
 #include "NyxAuthSubsystem.generated.h"
 
 class UNyxNetworkSubsystem;
+
+namespace UE::Online { class IAuth; }
 
 /**
  * Manages the two-phase authentication flow:
@@ -71,8 +74,11 @@ private:
 	/** Phase 1: Start EOS Login. */
 	void StartEOSLogin(const FString& LoginType);
 
-	/** Phase 1 complete: EOS login succeeded. */
-	void OnEOSLoginSuccess();
+	/** Phase 1 complete: EOS login succeeded — query the external auth token. */
+	void OnEOSLoginSuccess(UE::Online::FAccountId AccountId);
+
+	/** Phase 1b: External auth token received. */
+	void OnExternalAuthTokenReceived(const FString& IdToken);
 
 	/** Phase 1 failed. */
 	void OnEOSLoginFailure(const FString& ErrorMessage);
@@ -83,10 +89,21 @@ private:
 	/** Phase 2: SpacetimeDB connected, call authenticate reducer. */
 	void OnSpacetimeDBConnected(ENyxConnectionState NewState);
 
+	/** Phase 2: BP delegate wrapper for OnSpacetimeDBConnected. */
+	UFUNCTION()
+	void OnSpacetimeDBConnectionStateChanged(ENyxConnectionState NewState);
+
 	/** Phase 2: Auth reducer response. */
 	void OnSpacetimeDBAuthComplete(bool bSuccess);
 
+	/** Phase 2: Real SpacetimeDB reducer callback. */
+	UFUNCTION()
+	void HandleAuthReducerResult(const FReducerEventContext& Context, const FString& EosProductUserId, const FString& DisplayName, const FString& Platform);
+
 	void SetAuthState(ENyxAuthState NewState);
+
+	/** Resolve a login type string to the EOS credential type FName. */
+	static FName ResolveCredentialsType(const FString& LoginType);
 
 	ENyxAuthState AuthState = ENyxAuthState::NotAuthenticated;
 	FNyxPlayerIdentity LocalIdentity;
@@ -95,6 +112,7 @@ private:
 	FString CachedEOSIdToken;
 	FString CachedEOSProductUserId;
 	FString CachedDisplayName;
+	UE::Online::FAccountId CachedAccountId;
 
 	/** SpacetimeDB connection parameters (stored between phases) */
 	FString PendingSpacetimeDBHost;

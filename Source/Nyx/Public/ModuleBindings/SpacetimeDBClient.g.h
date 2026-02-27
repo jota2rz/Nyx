@@ -13,6 +13,7 @@
 #include "Connection/Subscription.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "ModuleBindings/ReducerBase.g.h"
+#include "ModuleBindings/Reducers/AuthenticateWithEos.g.h"
 #include "ModuleBindings/Reducers/CreatePlayer.g.h"
 #include "ModuleBindings/Reducers/MovePlayer.g.h"
 #include "Types/Builtins.h"
@@ -28,6 +29,7 @@ class USubscriptionHandle;
 
 /** Forward declaration for tables */
 class UPlayerTable;
+class UPlayerAccountTable;
 /***/
 
 // Delegates using the generated connection type. These wrap the base
@@ -103,6 +105,7 @@ private:
 UENUM(BlueprintType, Category = "SpacetimeDB")
 enum class EReducerTag : uint8
 {
+    AuthenticateWithEos,
     CreatePlayer,
     MovePlayer
 };
@@ -116,13 +119,29 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
     EReducerTag Tag = static_cast<EReducerTag>(0);
 
-    TVariant<FCreatePlayerArgs, FMovePlayerArgs> Data;
+    TVariant<FAuthenticateWithEosArgs, FCreatePlayerArgs, FMovePlayerArgs> Data;
 
     // Optional metadata
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
     FString ReducerName;
     uint32 ReducerId = 0;
     uint32 RequestId = 0;
+
+    static FReducer AuthenticateWithEos(const FAuthenticateWithEosArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::AuthenticateWithEos;
+        Out.Data.Set<FAuthenticateWithEosArgs>(Value);
+        Out.ReducerName = TEXT("authenticate_with_eos");
+        return Out;
+    }
+
+    FORCEINLINE bool IsAuthenticateWithEos() const { return Tag == EReducerTag::AuthenticateWithEos; }
+    FORCEINLINE FAuthenticateWithEosArgs GetAsAuthenticateWithEos() const
+    {
+        ensureMsgf(IsAuthenticateWithEos(), TEXT("Reducer does not hold AuthenticateWithEos!"));
+        return Data.Get<FAuthenticateWithEosArgs>();
+    }
 
     static FReducer CreatePlayer(const FCreatePlayerArgs& Value)
     {
@@ -161,6 +180,8 @@ public:
         if (Tag != Other.Tag || ReducerId != Other.ReducerId || RequestId != Other.RequestId || ReducerName != Other.ReducerName) return false;
         switch (Tag)
         {
+        case EReducerTag::AuthenticateWithEos:
+            return GetAsAuthenticateWithEos() == Other.GetAsAuthenticateWithEos();
         case EReducerTag::CreatePlayer:
             return GetAsCreatePlayer() == Other.GetAsCreatePlayer();
         case EReducerTag::MovePlayer:
@@ -177,6 +198,19 @@ class NYX_API UReducerBpLib : public UBlueprintFunctionLibrary
     GENERATED_BODY()
 
 private:
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer AuthenticateWithEos(const FAuthenticateWithEosArgs& Value) {
+        return FReducer::AuthenticateWithEos(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsAuthenticateWithEos(const FReducer& Reducer) { return Reducer.IsAuthenticateWithEos(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FAuthenticateWithEosArgs GetAsAuthenticateWithEos(const FReducer& Reducer) {
+        return Reducer.GetAsAuthenticateWithEos();
+    }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
     static FReducer CreatePlayer(const FCreatePlayerArgs& Value) {
@@ -584,6 +618,8 @@ class NYX_API USetReducerFlags : public USetReducerFlagsBase
 
 public:
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void AuthenticateWithEos(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void CreatePlayer(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void MovePlayer(ECallReducerFlags Flag);
@@ -602,6 +638,9 @@ public:
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     UPlayerTable* Player;
 
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UPlayerAccountTable* PlayerAccount;
+
 };
 
 // RemoteReducers class
@@ -611,6 +650,22 @@ class NYX_API URemoteReducers : public UObject
     GENERATED_BODY()
 
 public:
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+        FAuthenticateWithEosHandler,
+        const FReducerEventContext&, Context,
+        const FString&, EosProductUserId,
+        const FString&, DisplayName,
+        const FString&, Platform
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FAuthenticateWithEosHandler OnAuthenticateWithEos;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void AuthenticateWithEos(const FString& EosProductUserId, const FString& DisplayName, const FString& Platform);
+
+    bool InvokeAuthenticateWithEos(const FReducerEventContext& Context, const UAuthenticateWithEosReducer* Args);
+    bool InvokeAuthenticateWithEosWithArgs(const FReducerEventContext& Context, const FAuthenticateWithEosArgs& Args);
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
         FCreatePlayerHandler,

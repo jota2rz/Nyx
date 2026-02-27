@@ -5,10 +5,17 @@
 #include "DBCache/WithBsatn.h"
 #include "BSATN/UEBSATNHelpers.h"
 #include "ModuleBindings/Tables/PlayerTable.g.h"
+#include "ModuleBindings/Tables/PlayerAccountTable.g.h"
 
 static FReducer DecodeReducer(const FReducerEvent& Event)
 {
     const FString& ReducerName = Event.ReducerCall.ReducerName;
+
+    if (ReducerName == TEXT("authenticate_with_eos"))
+    {
+        FAuthenticateWithEosArgs Args = UE::SpacetimeDB::Deserialize<FAuthenticateWithEosArgs>(Event.ReducerCall.Args);
+        return FReducer::AuthenticateWithEos(Args);
+    }
 
     if (ReducerName == TEXT("create_player"))
     {
@@ -40,6 +47,7 @@ UDbConnection::UDbConnection(const FObjectInitializer& ObjectInitializer) : Supe
 	Procedures->Conn = this;
 
 	RegisterTable<FPlayerType, UPlayerTable, FEventContext>(TEXT("player"), Db->Player);
+	RegisterTable<FPlayerAccountType, UPlayerAccountTable, FEventContext>(TEXT("player_account"), Db->PlayerAccount);
 }
 
 FContextBase::FContextBase(UDbConnection* InConn)
@@ -76,13 +84,19 @@ void URemoteTables::Initialize()
 
 	/** Creating tables */
 	Player = NewObject<UPlayerTable>(this);
+	PlayerAccount = NewObject<UPlayerAccountTable>(this);
 	/**/
 
 	/** Initialization */
 	Player->PostInitialize();
+	PlayerAccount->PostInitialize();
 	/**/
 }
 
+void USetReducerFlags::AuthenticateWithEos(ECallReducerFlags Flag)
+{
+	FlagMap.Add("AuthenticateWithEos", Flag);
+}
 void USetReducerFlags::CreatePlayer(ECallReducerFlags Flag)
 {
 	FlagMap.Add("CreatePlayer", Flag);
@@ -90,6 +104,50 @@ void USetReducerFlags::CreatePlayer(ECallReducerFlags Flag)
 void USetReducerFlags::MovePlayer(ECallReducerFlags Flag)
 {
 	FlagMap.Add("MovePlayer", Flag);
+}
+
+void URemoteReducers::AuthenticateWithEos(const FString& EosProductUserId, const FString& DisplayName, const FString& Platform)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("authenticate_with_eos"), FAuthenticateWithEosArgs(EosProductUserId, DisplayName, Platform), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeAuthenticateWithEos(const FReducerEventContext& Context, const UAuthenticateWithEosReducer* Args)
+{
+    if (!OnAuthenticateWithEos.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for AuthenticateWithEos"));
+        }
+        return false;
+    }
+
+    OnAuthenticateWithEos.Broadcast(Context, Args->EosProductUserId, Args->DisplayName, Args->Platform);
+    return true;
+}
+
+bool URemoteReducers::InvokeAuthenticateWithEosWithArgs(const FReducerEventContext& Context, const FAuthenticateWithEosArgs& Args)
+{
+    if (!OnAuthenticateWithEos.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for AuthenticateWithEos"));
+        }
+        return false;
+    }
+
+    OnAuthenticateWithEos.Broadcast(Context, Args.EosProductUserId, Args.DisplayName, Args.Platform);
+    return true;
 }
 
 void URemoteReducers::CreatePlayer(const FString& DisplayName)
@@ -234,6 +292,12 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
     // Use hardcoded string matching for reducer dispatching
     const FString& ReducerName = Event.ReducerCall.ReducerName;
 
+    if (ReducerName == TEXT("authenticate_with_eos"))
+    {
+        FAuthenticateWithEosArgs Args = ReducerEvent.Reducer.GetAsAuthenticateWithEos();
+        Reducers->InvokeAuthenticateWithEosWithArgs(Context, Args);
+        return;
+    }
     if (ReducerName == TEXT("create_player"))
     {
         FCreatePlayerArgs Args = ReducerEvent.Reducer.GetAsCreatePlayer();

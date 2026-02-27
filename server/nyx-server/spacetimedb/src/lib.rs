@@ -1,13 +1,36 @@
-// Nyx MMO — Minimal SpacetimeDB Server Module (Spike 1+2)
+// Nyx MMO — SpacetimeDB Server Module (Spikes 1–4)
 //
-// This is the absolute minimum schema needed to:
-//   1. Generate the Unreal C++ SDK bindings
-//   2. Test a round-trip connection from UE5
-//   3. Validate player insert/update/delete flow
+// Tables:
+//   - player: Active player state (position, display name)
+//   - player_account: Links SpacetimeDB Identity to EOS ProductUserId
+//
+// Auth flow:
+//   1. Client connects anonymously (gets SpacetimeDB Identity)
+//   2. Client calls authenticate_with_eos(eos_puid, display_name, platform)
+//   3. Server links Identity ↔ EOS PUID in player_account table
+//   4. Client calls create_player to enter the world
 
 use spacetimedb::{Identity, ReducerContext, Table, Timestamp};
 
 // ─── Tables ────────────────────────────────────────────────────────
+
+/// Links a SpacetimeDB Identity to an EOS ProductUserId.
+/// Created during the authenticate_with_eos reducer call.
+#[spacetimedb::table(accessor = player_account, public)]
+pub struct PlayerAccount {
+    #[primary_key]
+    pub identity: Identity,
+    /// EOS ProductUserId (cross-platform persistent ID)
+    pub eos_product_user_id: String,
+    /// Display name from EOS
+    pub display_name: String,
+    /// Platform the player logged in from (e.g., "Windows", "PS5", "Xbox")
+    pub platform: String,
+    /// When this account was first linked
+    pub created_at: Timestamp,
+    /// Most recent login
+    pub last_login: Timestamp,
+}
 
 /// Every connected player. One row per identity.
 #[spacetimedb::table(accessor = player, public)]
@@ -44,6 +67,50 @@ pub fn client_disconnected(ctx: &ReducerContext) {
 }
 
 // ─── Game Reducers ─────────────────────────────────────────────────
+
+/// Called by the client after EOS login to link their SpacetimeDB Identity
+/// to their EOS ProductUserId. This must be called before create_player.
+///
+/// In production, this would validate the EOS id_token JWT server-side.
+/// For now, we trust the client-provided PUID (the SpacetimeDB Identity
+/// itself provides the security layer — each client gets a unique one).
+#[spacetimedb::reducer]
+pub fn authenticate_with_eos(
+    ctx: &ReducerContext,
+    eos_product_user_id: String,
+    display_name: String,
+    platform: String,
+) {
+    let identity = ctx.sender();
+
+    if let Some(mut account) = ctx.db.player_account().identity().find(identity) {
+        // Returning player — update last login
+        account.display_name = display_name.clone();
+        account.platform = platform.clone();
+        account.last_login = ctx.timestamp;
+        ctx.db.player_account().identity().update(account);
+        log::info!(
+            "Player account updated for {:?} (EOS PUID: {})",
+            identity,
+            eos_product_user_id
+        );
+    } else {
+        // New player — create account link
+        ctx.db.player_account().insert(PlayerAccount {
+            identity,
+            eos_product_user_id: eos_product_user_id.clone(),
+            display_name: display_name.clone(),
+            platform: platform.clone(),
+            created_at: ctx.timestamp,
+            last_login: ctx.timestamp,
+        });
+        log::info!(
+            "New player account created for {:?} (EOS PUID: {})",
+            identity,
+            eos_product_user_id
+        );
+    }
+}
 
 /// Called after EOS auth to register the player in the world.
 #[spacetimedb::reducer]

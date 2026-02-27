@@ -19,8 +19,9 @@ public class Nyx : ModuleRules
 
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
-			// Online Services (EOS) — uncomment when implementing Spike 4
-			// "OnlineServicesInterface",
+			// Online Services (EOS) — Spike 4
+			"OnlineServicesInterface",
+			"CoreOnline",
 
 			// WebSocket support (for SpacetimeDB fallback / future use)
 			"WebSockets",
