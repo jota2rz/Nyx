@@ -29,6 +29,10 @@
 		{
 			"Name": "OnlineServicesEOSGS",
 			"Enabled": true
+		},
+		{
+			"Name": "SpacetimeDbSdk",
+			"Enabled": true
 		}
 	]
 }

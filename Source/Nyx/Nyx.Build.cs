@@ -30,7 +30,7 @@ public class Nyx : ModuleRules
 			"JsonUtilities"
 		});
 
-		// SpacetimeDB Unreal Plugin — uncomment after completing Research Spike 1
-		// PrivateDependencyModuleNames.Add("SpacetimeDB");
+		// SpacetimeDB Unreal Plugin (Spike 1: confirmed working)
+		PrivateDependencyModuleNames.Add("SpacetimeDbSdk");
 	}
 }

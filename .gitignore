@@ -1,5 +1,8 @@
 # Unreal Engine 5 .gitignore
 
+# Build output logs
+build_output*.txt
+
 # Compiled binaries
 Binaries/
 
@@ -56,3 +59,9 @@ CrashReportClient/
 
 # SpacetimeDB local data (Spike 2+)
 Server/.spacetime/
+
+# Rust build artifacts
+server/**/target/
+
+# SpacetimeDB local config
+spacetime.local.json

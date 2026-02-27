@@ -45,7 +45,7 @@ public:
 
 	/** Get the SpacetimeDB database name. */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Config")
-	FString SpacetimeDBDatabaseName = TEXT("nyx-world");
+	FString SpacetimeDBDatabaseName = TEXT("nyx");
 
 	/** EOS login type (e.g., "accountportal", "developer", "persistentauth") */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Config")

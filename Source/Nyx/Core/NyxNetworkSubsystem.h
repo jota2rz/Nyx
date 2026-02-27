@@ -5,10 +5,12 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Nyx/Data/NyxTypes.h"
+#include "ModuleBindings/SpacetimeDBClient.g.h"
 #include "NyxNetworkSubsystem.generated.h"
 
 class INyxDatabaseInterface;
 class UNyxMockConnection;
+class UDbConnection;
 
 /**
  * Core networking subsystem that owns the SpacetimeDB connection.
@@ -68,9 +70,33 @@ public:
 private:
 	void HandleConnectionStateChanged(ENyxConnectionState NewState);
 
+	// ──── SpacetimeDB connection callbacks ────
+
+	UFUNCTION()
+	void HandleSpacetimeDBConnect(UDbConnection* Connection, FSpacetimeDBIdentity Identity, const FString& Token);
+
+	UFUNCTION()
+	void HandleSpacetimeDBDisconnect(UDbConnection* Connection, const FString& Error);
+
+	UFUNCTION()
+	void HandleSpacetimeDBConnectError(const FString& ErrorMessage);
+
+	UFUNCTION()
+	void HandleSubscriptionApplied(FSubscriptionEventContext Context);
+
+	UFUNCTION()
+	void HandleSubscriptionError(FErrorContext Context);
+
 	/** The active database connection. Always accessed through INyxDatabaseInterface. */
 	UPROPERTY()
 	TObjectPtr<UObject> DatabaseConnectionObject;
+
+	/** SpacetimeDB connection (non-null when using real SpacetimeDB, null when mock). */
+	UPROPERTY()
+	TObjectPtr<UDbConnection> SpacetimeDBConnection;
+
+	/** Auth token from SpacetimeDB for reconnection. */
+	FString SpacetimeDBToken;
 
 	/** Typed pointer to the interface (non-owning, points to DatabaseConnectionObject). */
 	INyxDatabaseInterface* DatabaseInterface = nullptr;

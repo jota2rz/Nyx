@@ -32,26 +32,59 @@ void UNyxNetworkSubsystem::ConnectToServer(const FString& Host, const FString& D
 		UNyxMockConnection* MockConn = NewObject<UNyxMockConnection>(this);
 		DatabaseConnectionObject = MockConn;
 		DatabaseInterface = MockConn;
+
+		// Bind to connection state changes
+		DatabaseInterface->OnConnectionStateChanged().AddUObject(this, &UNyxNetworkSubsystem::HandleConnectionStateChanged);
+
+		// Connect
+		DatabaseInterface->Connect(Host, DatabaseName);
 	}
 	else
 	{
-		// TODO (Spike 1): Create UNyxSpacetimeDBConnection wrapping UDbConnection
-		// For now, fall back to mock with a warning
-		UE_LOG(LogNyxNet, Warning, TEXT("SpacetimeDB connection not yet implemented — falling back to mock. Complete Research Spike 1."));
-		UNyxMockConnection* MockConn = NewObject<UNyxMockConnection>(this);
-		DatabaseConnectionObject = MockConn;
-		DatabaseInterface = MockConn;
+		UE_LOG(LogNyxNet, Log, TEXT("Creating SpacetimeDB connection to ws://%s database=%s"), *Host, *DatabaseName);
+
+		// Build up connect/disconnect delegates
+		FOnConnectDelegate OnConnect;
+		OnConnect.BindDynamic(this, &UNyxNetworkSubsystem::HandleSpacetimeDBConnect);
+
+		FOnDisconnectDelegate OnDisconnect;
+		OnDisconnect.BindDynamic(this, &UNyxNetworkSubsystem::HandleSpacetimeDBDisconnect);
+
+		FOnConnectErrorDelegate OnConnectError;
+		OnConnectError.BindDynamic(this, &UNyxNetworkSubsystem::HandleSpacetimeDBConnectError);
+
+		// Build connection
+		UDbConnectionBuilder* Builder = UDbConnection::Builder();
+		SpacetimeDBConnection = Builder
+			->WithUri(FString::Printf(TEXT("ws://%s"), *Host))
+			->WithDatabaseName(DatabaseName)
+			->OnConnect(OnConnect)
+			->OnConnectError(OnConnectError)
+			->OnDisconnect(OnDisconnect)
+			->Build();
+
+		if (SpacetimeDBConnection)
+		{
+			HandleConnectionStateChanged(ENyxConnectionState::Connecting);
+			UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB connection builder complete — waiting for connect callback"));
+		}
+		else
+		{
+			UE_LOG(LogNyxNet, Error, TEXT("SpacetimeDB connection builder returned null!"));
+			HandleConnectionStateChanged(ENyxConnectionState::Disconnected);
+		}
 	}
-
-	// Bind to connection state changes
-	DatabaseInterface->OnConnectionStateChanged().AddUObject(this, &UNyxNetworkSubsystem::HandleConnectionStateChanged);
-
-	// Connect
-	DatabaseInterface->Connect(Host, DatabaseName);
 }
 
 void UNyxNetworkSubsystem::DisconnectFromServer()
 {
+	if (SpacetimeDBConnection)
+	{
+		SpacetimeDBConnection->Disconnect();
+		SpacetimeDBConnection = nullptr;
+		HandleConnectionStateChanged(ENyxConnectionState::Disconnected);
+	}
+
 	if (DatabaseInterface)
 	{
 		DatabaseInterface->OnConnectionStateChanged().RemoveAll(this);
@@ -125,4 +158,66 @@ void UNyxNetworkSubsystem::HandleConnectionStateChanged(ENyxConnectionState NewS
 {
 	UE_LOG(LogNyxNet, Log, TEXT("Connection state changed to: %d"), static_cast<int32>(NewState));
 	OnConnectionStateChangedBP.Broadcast(NewState);
+}
+
+void UNyxNetworkSubsystem::HandleSpacetimeDBConnect(UDbConnection* Connection, FSpacetimeDBIdentity Identity, const FString& Token)
+{
+	UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB connected! Token length=%d"), Token.Len());
+	SpacetimeDBToken = Token;
+
+	HandleConnectionStateChanged(ENyxConnectionState::Connected);
+
+	// Subscribe to all players
+	USubscriptionBuilder* SubBuilder = Connection->SubscriptionBuilder();
+
+	FOnSubscriptionApplied OnApplied;
+	OnApplied.BindDynamic(this, &UNyxNetworkSubsystem::HandleSubscriptionApplied);
+
+	FOnSubscriptionError OnError;
+	OnError.BindDynamic(this, &UNyxNetworkSubsystem::HandleSubscriptionError);
+
+	SubBuilder->OnApplied(OnApplied);
+	SubBuilder->OnError(OnError);
+	SubBuilder->Subscribe({TEXT("SELECT * FROM player")});
+
+	UE_LOG(LogNyxNet, Log, TEXT("Subscribed to player table"));
+}
+
+void UNyxNetworkSubsystem::HandleSpacetimeDBDisconnect(UDbConnection* Connection, const FString& Error)
+{
+	if (Error.IsEmpty())
+	{
+		UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB disconnected cleanly"));
+	}
+	else
+	{
+		UE_LOG(LogNyxNet, Warning, TEXT("SpacetimeDB disconnected with error: %s"), *Error);
+	}
+
+	SpacetimeDBConnection = nullptr;
+	HandleConnectionStateChanged(ENyxConnectionState::Disconnected);
+}
+
+void UNyxNetworkSubsystem::HandleSpacetimeDBConnectError(const FString& ErrorMessage)
+{
+	UE_LOG(LogNyxNet, Error, TEXT("SpacetimeDB connection error: %s"), *ErrorMessage);
+	SpacetimeDBConnection = nullptr;
+	HandleConnectionStateChanged(ENyxConnectionState::Disconnected);
+}
+
+void UNyxNetworkSubsystem::HandleSubscriptionApplied(FSubscriptionEventContext Context)
+{
+	UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB subscription applied successfully!"));
+
+	// Test: call create_player reducer to verify round-trip
+	if (Context.Reducers)
+	{
+		UE_LOG(LogNyxNet, Log, TEXT("Calling create_player reducer..."));
+		Context.Reducers->CreatePlayer(TEXT("NyxTestPlayer"));
+	}
+}
+
+void UNyxNetworkSubsystem::HandleSubscriptionError(FErrorContext Context)
+{
+	UE_LOG(LogNyxNet, Error, TEXT("SpacetimeDB subscription error: %s"), *Context.Error);
 }
