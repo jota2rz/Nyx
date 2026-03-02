@@ -1059,7 +1059,17 @@ BitCraft Online is a community sandbox MMORPG (crafting, city-building, explorat
 
 **Key difference from Nyx:** BitCraft uses SpacetimeDB **1.12.0** (see `Cargo.toml`), while Nyx targets SpacetimeDB **2.0**. API differences include table accessor syntax, reducer signatures, and scheduling APIs. The architectural patterns remain valid, but code cannot be copy-pasted without adaptation.
 
-**Architectural divergence:** BitCraft runs **all** game logic in WASM with no external physics or simulation processes. Nyx's Spike 8 physics sidecar — a UE5 client subsystem that connects as a second client to run real-time physics — has no equivalent in BitCraft. This is a deliberate divergence: BitCraft's server-authoritative, turn-based movement model doesn't require client-side physics simulation, while Nyx's action-oriented gameplay does. BitCraft validates that a pure-WASM approach scales for slower-paced games; Nyx's sidecar approach addresses the real-time physics gap.
+**Architectural divergence — no physics simulation:** A source code review of BitCraft's server confirms it contains **zero physics simulation**. No gravity, no rigid body dynamics, no velocity/acceleration integration, no collision response, no continuous physics tick loop. The closest physics-adjacent systems are:
+
+| System | File | What it does | What it does NOT do |
+|--------|------|-------------|-------------------|
+| **Projectile delay** | `handlers/attack.rs` | `distance / projectile_speed = delay`, then schedules damage via `AttackImpactTimer` | No trajectory, no arc, no gravity — flat time delay only |
+| **Movement validation** | `reducer_helpers/move_validation_helpers.rs` | Speed-checks client positions (`distance / duration ≤ MAX_SPEED`), validates world bounds, elevation diffs, hitbox footprints, hex-grid raycast | No physics step; much of the comprehensive validation is **commented out** |
+| **Position interpolation** | `entities/location.rs` | `interpolated_location()` — lerp between origin/destination based on elapsed time, used for combat range checks | On-demand estimation, not a simulation loop |
+| **Wind effect on sailing** | `handlers/player/deployable_move.rs` | Sailing direction relative to wind angle adjusts boat speed as a multiplier | Not a force simulation |
+| **Combat math** | `handlers/attack.rs` | Full RPG damage formula (strength, armor, evasion, dodge rolls, `ARMOR_50PCT_REDUCTION`, radius-based multi-targeting) | No physics — pure stat math |
+
+Nyx's Spike 8 physics sidecar — a UE5 client subsystem that connects as a second client to run real-time physics (Euler integration, gravity, floor collision) — has no equivalent in BitCraft. This is a deliberate divergence: BitCraft's sandbox MMORPG gameplay (crafting, building, turn-based hex movement) doesn't require continuous physics. Nyx's action-oriented gameplay does. BitCraft validates that a pure-WASM approach scales for slower-paced games; Nyx's sidecar approach addresses the real-time physics gap that SpacetimeDB alone cannot fill.
 
 ### 1. Project Structure — Monorepo Module Layout
 
