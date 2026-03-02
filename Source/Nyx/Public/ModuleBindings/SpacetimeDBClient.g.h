@@ -27,7 +27,11 @@
 #include "ModuleBindings/Reducers/ClearEntities.g.h"
 #include "ModuleBindings/Reducers/CreatePlayer.g.h"
 #include "ModuleBindings/Reducers/MovePlayer.g.h"
+#include "ModuleBindings/Reducers/PhysicsCleanup.g.h"
+#include "ModuleBindings/Reducers/PhysicsReset.g.h"
+#include "ModuleBindings/Reducers/PhysicsUpdate.g.h"
 #include "ModuleBindings/Reducers/SeedEntities.g.h"
+#include "ModuleBindings/Reducers/SpawnProjectile.g.h"
 #include "Types/Builtins.h"
 #include "SpacetimeDBClient.g.generated.h"
 
@@ -43,6 +47,7 @@ class USubscriptionHandle;
 class UBenchCounterTable;
 class UBenchEntityTable;
 class UBenchTickLogTable;
+class UPhysicsBodyTable;
 class UPlayerTable;
 class UPlayerAccountTable;
 class UWorldEntityTable;
@@ -135,7 +140,11 @@ enum class EReducerTag : uint8
     ClearEntities,
     CreatePlayer,
     MovePlayer,
-    SeedEntities
+    PhysicsCleanup,
+    PhysicsReset,
+    PhysicsUpdate,
+    SeedEntities,
+    SpawnProjectile
 };
 
 USTRUCT(BlueprintType)
@@ -147,7 +156,7 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
     EReducerTag Tag = static_cast<EReducerTag>(0);
 
-    TVariant<FAuthenticateWithEosArgs, FBenchBurstArgs, FBenchBurstUpdateArgs, FBenchComplexArgs, FBenchMediumArgs, FBenchMemoryArgs, FBenchResetArgs, FBenchSeedArgs, FBenchSimpleArgs, FBenchStartTickArgs, FBenchStopTickArgs, FClearEntitiesArgs, FCreatePlayerArgs, FMovePlayerArgs, FSeedEntitiesArgs> Data;
+    TVariant<FAuthenticateWithEosArgs, FBenchBurstArgs, FBenchBurstUpdateArgs, FBenchComplexArgs, FBenchMediumArgs, FBenchMemoryArgs, FBenchResetArgs, FBenchSeedArgs, FBenchSimpleArgs, FBenchStartTickArgs, FBenchStopTickArgs, FClearEntitiesArgs, FCreatePlayerArgs, FMovePlayerArgs, FPhysicsCleanupArgs, FPhysicsResetArgs, FPhysicsUpdateArgs, FSeedEntitiesArgs, FSpawnProjectileArgs> Data;
 
     // Optional metadata
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
@@ -379,6 +388,54 @@ public:
         return Data.Get<FMovePlayerArgs>();
     }
 
+    static FReducer PhysicsCleanup(const FPhysicsCleanupArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::PhysicsCleanup;
+        Out.Data.Set<FPhysicsCleanupArgs>(Value);
+        Out.ReducerName = TEXT("physics_cleanup");
+        return Out;
+    }
+
+    FORCEINLINE bool IsPhysicsCleanup() const { return Tag == EReducerTag::PhysicsCleanup; }
+    FORCEINLINE FPhysicsCleanupArgs GetAsPhysicsCleanup() const
+    {
+        ensureMsgf(IsPhysicsCleanup(), TEXT("Reducer does not hold PhysicsCleanup!"));
+        return Data.Get<FPhysicsCleanupArgs>();
+    }
+
+    static FReducer PhysicsReset(const FPhysicsResetArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::PhysicsReset;
+        Out.Data.Set<FPhysicsResetArgs>(Value);
+        Out.ReducerName = TEXT("physics_reset");
+        return Out;
+    }
+
+    FORCEINLINE bool IsPhysicsReset() const { return Tag == EReducerTag::PhysicsReset; }
+    FORCEINLINE FPhysicsResetArgs GetAsPhysicsReset() const
+    {
+        ensureMsgf(IsPhysicsReset(), TEXT("Reducer does not hold PhysicsReset!"));
+        return Data.Get<FPhysicsResetArgs>();
+    }
+
+    static FReducer PhysicsUpdate(const FPhysicsUpdateArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::PhysicsUpdate;
+        Out.Data.Set<FPhysicsUpdateArgs>(Value);
+        Out.ReducerName = TEXT("physics_update");
+        return Out;
+    }
+
+    FORCEINLINE bool IsPhysicsUpdate() const { return Tag == EReducerTag::PhysicsUpdate; }
+    FORCEINLINE FPhysicsUpdateArgs GetAsPhysicsUpdate() const
+    {
+        ensureMsgf(IsPhysicsUpdate(), TEXT("Reducer does not hold PhysicsUpdate!"));
+        return Data.Get<FPhysicsUpdateArgs>();
+    }
+
     static FReducer SeedEntities(const FSeedEntitiesArgs& Value)
     {
         FReducer Out;
@@ -393,6 +450,22 @@ public:
     {
         ensureMsgf(IsSeedEntities(), TEXT("Reducer does not hold SeedEntities!"));
         return Data.Get<FSeedEntitiesArgs>();
+    }
+
+    static FReducer SpawnProjectile(const FSpawnProjectileArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::SpawnProjectile;
+        Out.Data.Set<FSpawnProjectileArgs>(Value);
+        Out.ReducerName = TEXT("spawn_projectile");
+        return Out;
+    }
+
+    FORCEINLINE bool IsSpawnProjectile() const { return Tag == EReducerTag::SpawnProjectile; }
+    FORCEINLINE FSpawnProjectileArgs GetAsSpawnProjectile() const
+    {
+        ensureMsgf(IsSpawnProjectile(), TEXT("Reducer does not hold SpawnProjectile!"));
+        return Data.Get<FSpawnProjectileArgs>();
     }
 
     FORCEINLINE bool operator==(const FReducer& Other) const
@@ -428,8 +501,16 @@ public:
             return GetAsCreatePlayer() == Other.GetAsCreatePlayer();
         case EReducerTag::MovePlayer:
             return GetAsMovePlayer() == Other.GetAsMovePlayer();
+        case EReducerTag::PhysicsCleanup:
+            return GetAsPhysicsCleanup() == Other.GetAsPhysicsCleanup();
+        case EReducerTag::PhysicsReset:
+            return GetAsPhysicsReset() == Other.GetAsPhysicsReset();
+        case EReducerTag::PhysicsUpdate:
+            return GetAsPhysicsUpdate() == Other.GetAsPhysicsUpdate();
         case EReducerTag::SeedEntities:
             return GetAsSeedEntities() == Other.GetAsSeedEntities();
+        case EReducerTag::SpawnProjectile:
+            return GetAsSpawnProjectile() == Other.GetAsSpawnProjectile();
         default: return false;
         }
     }
@@ -626,6 +707,45 @@ private:
     }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer PhysicsCleanup(const FPhysicsCleanupArgs& Value) {
+        return FReducer::PhysicsCleanup(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsPhysicsCleanup(const FReducer& Reducer) { return Reducer.IsPhysicsCleanup(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FPhysicsCleanupArgs GetAsPhysicsCleanup(const FReducer& Reducer) {
+        return Reducer.GetAsPhysicsCleanup();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer PhysicsReset(const FPhysicsResetArgs& Value) {
+        return FReducer::PhysicsReset(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsPhysicsReset(const FReducer& Reducer) { return Reducer.IsPhysicsReset(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FPhysicsResetArgs GetAsPhysicsReset(const FReducer& Reducer) {
+        return Reducer.GetAsPhysicsReset();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer PhysicsUpdate(const FPhysicsUpdateArgs& Value) {
+        return FReducer::PhysicsUpdate(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsPhysicsUpdate(const FReducer& Reducer) { return Reducer.IsPhysicsUpdate(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FPhysicsUpdateArgs GetAsPhysicsUpdate(const FReducer& Reducer) {
+        return Reducer.GetAsPhysicsUpdate();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
     static FReducer SeedEntities(const FSeedEntitiesArgs& Value) {
         return FReducer::SeedEntities(Value);
     }
@@ -636,6 +756,19 @@ private:
     UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
     static FSeedEntitiesArgs GetAsSeedEntities(const FReducer& Reducer) {
         return Reducer.GetAsSeedEntities();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer SpawnProjectile(const FSpawnProjectileArgs& Value) {
+        return FReducer::SpawnProjectile(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsSpawnProjectile(const FReducer& Reducer) { return Reducer.IsSpawnProjectile(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FSpawnProjectileArgs GetAsSpawnProjectile(const FReducer& Reducer) {
+        return Reducer.GetAsSpawnProjectile();
     }
 };
 
@@ -1046,7 +1179,15 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void MovePlayer(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void PhysicsCleanup(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void PhysicsReset(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void PhysicsUpdate(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void SeedEntities(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void SpawnProjectile(ECallReducerFlags Flag);
 
 };
 
@@ -1067,6 +1208,9 @@ public:
 
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     UBenchTickLogTable* BenchTickLog;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UPhysicsBodyTable* PhysicsBody;
 
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     UPlayerTable* Player;
@@ -1283,6 +1427,53 @@ public:
     bool InvokeMovePlayer(const FReducerEventContext& Context, const UMovePlayerReducer* Args);
     bool InvokeMovePlayerWithArgs(const FReducerEventContext& Context, const FMovePlayerArgs& Args);
 
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FPhysicsCleanupHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FPhysicsCleanupHandler OnPhysicsCleanup;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void PhysicsCleanup();
+
+    bool InvokePhysicsCleanup(const FReducerEventContext& Context, const UPhysicsCleanupReducer* Args);
+    bool InvokePhysicsCleanupWithArgs(const FReducerEventContext& Context, const FPhysicsCleanupArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FPhysicsResetHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FPhysicsResetHandler OnPhysicsReset;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void PhysicsReset();
+
+    bool InvokePhysicsReset(const FReducerEventContext& Context, const UPhysicsResetReducer* Args);
+    bool InvokePhysicsResetWithArgs(const FReducerEventContext& Context, const FPhysicsResetArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_NineParams(
+        FPhysicsUpdateHandler,
+        const FReducerEventContext&, Context,
+        uint64, EntityId,
+        double, PosX,
+        double, PosY,
+        double, PosZ,
+        double, VelX,
+        double, VelY,
+        double, VelZ,
+        bool, Active
+    );
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    FPhysicsUpdateHandler OnPhysicsUpdate;
+
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    void PhysicsUpdate(const uint64 EntityId, const double PosX, const double PosY, const double PosZ, const double VelX, const double VelY, const double VelZ, const bool Active);
+
+    bool InvokePhysicsUpdate(const FReducerEventContext& Context, const UPhysicsUpdateReducer* Args);
+    bool InvokePhysicsUpdateWithArgs(const FReducerEventContext& Context, const FPhysicsUpdateArgs& Args);
+
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
         FSeedEntitiesHandler,
         const FReducerEventContext&, Context,
@@ -1296,6 +1487,25 @@ public:
 
     bool InvokeSeedEntities(const FReducerEventContext& Context, const USeedEntitiesReducer* Args);
     bool InvokeSeedEntitiesWithArgs(const FReducerEventContext& Context, const FSeedEntitiesArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_SevenParams(
+        FSpawnProjectileHandler,
+        const FReducerEventContext&, Context,
+        double, PosX,
+        double, PosY,
+        double, PosZ,
+        double, VelX,
+        double, VelY,
+        double, VelZ
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FSpawnProjectileHandler OnSpawnProjectile;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void SpawnProjectile(const double PosX, const double PosY, const double PosZ, const double VelX, const double VelY, const double VelZ);
+
+    bool InvokeSpawnProjectile(const FReducerEventContext& Context, const USpawnProjectileReducer* Args);
+    bool InvokeSpawnProjectileWithArgs(const FReducerEventContext& Context, const FSpawnProjectileArgs& Args);
 
     // Internal error handling
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FInternalOnUnhandledReducerError, const FReducerEventContext&, Context, const FString&, Error);

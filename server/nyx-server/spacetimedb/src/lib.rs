@@ -1,9 +1,10 @@
-// Nyx MMO — SpacetimeDB Server Module (Spikes 1–7)
+// Nyx MMO — SpacetimeDB Server Module (Spikes 1–8)
 //
 // Tables:
 //   - player: Active player state (position, chunk, display name)
 //   - player_account: Links SpacetimeDB Identity to EOS ProductUserId
 //   - world_entity: Non-player entities for spatial interest testing
+//   - physics_body: Physics-simulated objects managed by the UE5 sidecar
 //   - bench_counter: Simple counter for benchmark throughput
 //   - bench_entity: Entity table for read/write benchmarks
 //   - bench_tick_log: Logs from each scheduled tick
@@ -88,6 +89,32 @@ pub struct WorldEntity {
     /// Spatial chunk coordinate (derived from pos_y / CHUNK_SIZE)
     pub chunk_y: i32,
     pub data: String,
+}
+
+// ─── Spike 8: Physics Body (UE5 Sidecar) ──────────────────────────
+
+/// Physics-simulated objects. Clients insert rows (e.g. spawn_projectile),
+/// the UE5 sidecar picks them up, runs physics, and writes positions
+/// back via the physics_update reducer. Clients see the updates via
+/// OnUpdate subscription callbacks.
+#[spacetimedb::table(accessor = physics_body, public)]
+pub struct PhysicsBody {
+    #[primary_key]
+    #[auto_inc]
+    pub entity_id: u64,
+    /// Type tag: "projectile", "debris", etc.
+    pub body_type: String,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub pos_z: f64,
+    pub vel_x: f64,
+    pub vel_y: f64,
+    pub vel_z: f64,
+    /// False once the body has been deactivated (hit ground, out of range, etc.)
+    pub active: bool,
+    /// Identity of the player who spawned this body
+    pub owner: Identity,
+    pub last_update: Timestamp,
 }
 
 // ─── Lifecycle Reducers ────────────────────────────────────────────
@@ -253,6 +280,95 @@ pub fn clear_entities(ctx: &ReducerContext) {
         removed += 1;
     }
     log::info!("Cleared {} world entities", removed);
+}
+
+// ─── Spike 8: Physics / Sidecar Reducers ──────────────────────────
+
+/// Client spawns a projectile. The UE5 sidecar will pick this up via
+/// OnInsert, simulate physics, and write updated positions back.
+#[spacetimedb::reducer]
+pub fn spawn_projectile(
+    ctx: &ReducerContext,
+    pos_x: f64,
+    pos_y: f64,
+    pos_z: f64,
+    vel_x: f64,
+    vel_y: f64,
+    vel_z: f64,
+) {
+    ctx.db.physics_body().insert(PhysicsBody {
+        entity_id: 0, // auto_inc
+        body_type: "projectile".to_string(),
+        pos_x,
+        pos_y,
+        pos_z,
+        vel_x,
+        vel_y,
+        vel_z,
+        active: true,
+        owner: ctx.sender(),
+        last_update: ctx.timestamp,
+    });
+    log::info!(
+        "Projectile spawned at ({:.0}, {:.0}, {:.0}) vel=({:.0}, {:.0}, {:.0}) by {:?}",
+        pos_x, pos_y, pos_z, vel_x, vel_y, vel_z, ctx.sender()
+    );
+}
+
+/// Sidecar updates a single physics body's position and velocity.
+/// Called every sidecar tick for each active body.
+#[spacetimedb::reducer]
+pub fn physics_update(
+    ctx: &ReducerContext,
+    entity_id: u64,
+    pos_x: f64,
+    pos_y: f64,
+    pos_z: f64,
+    vel_x: f64,
+    vel_y: f64,
+    vel_z: f64,
+    active: bool,
+) {
+    if let Some(mut body) = ctx.db.physics_body().entity_id().find(entity_id) {
+        body.pos_x = pos_x;
+        body.pos_y = pos_y;
+        body.pos_z = pos_z;
+        body.vel_x = vel_x;
+        body.vel_y = vel_y;
+        body.vel_z = vel_z;
+        body.active = active;
+        body.last_update = ctx.timestamp;
+        ctx.db.physics_body().entity_id().update(body);
+    }
+}
+
+/// Remove all inactive physics bodies (cleanup).
+#[spacetimedb::reducer]
+pub fn physics_cleanup(ctx: &ReducerContext) {
+    let mut removed = 0u32;
+    let ids: Vec<u64> = ctx
+        .db
+        .physics_body()
+        .iter()
+        .filter(|b| !b.active)
+        .map(|b| b.entity_id)
+        .collect();
+    for id in ids {
+        ctx.db.physics_body().entity_id().delete(id);
+        removed += 1;
+    }
+    log::info!("physics_cleanup: removed {} inactive bodies", removed);
+}
+
+/// Remove ALL physics bodies (full reset).
+#[spacetimedb::reducer]
+pub fn physics_reset(ctx: &ReducerContext) {
+    let mut removed = 0u32;
+    for body in ctx.db.physics_body().iter() {
+        ctx.db.physics_body().entity_id().delete(body.entity_id);
+        removed += 1;
+    }
+    log::info!("physics_reset: removed {} bodies", removed);
 }
 
 // ─── Spike 7: WASM Module Performance Benchmarks ──────────────────

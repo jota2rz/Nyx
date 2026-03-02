@@ -8,6 +8,7 @@
 #include "Nyx/World/NyxEntityManager.h"
 #include "Nyx/Player/NyxPlayerPawn.h"
 #include "Nyx/Player/NyxMovementComponent.h"
+#include "Nyx/Sidecar/NyxSidecarSubsystem.h"
 #include "ModuleBindings/SpacetimeDBClient.g.h"
 
 void UNyxGameInstance::Init()
@@ -472,7 +473,109 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem"));
+	// ─── Spike 8: Sidecar / Physics Console Commands ─────────────────
+
+	// Nyx.StartSidecar — start the physics sidecar (second SpacetimeDB connection)
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.StartSidecar"),
+		TEXT("Start UE5 physics sidecar. Usage: Nyx.StartSidecar [Host] [Database]"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			const FString Host = Args.Num() > 0 ? Args[0] : SpacetimeDBHost;
+			const FString DB = Args.Num() > 1 ? Args[1] : SpacetimeDBDatabaseName;
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.StartSidecar %s %s"), *Host, *DB);
+
+			UNyxSidecarSubsystem* Sidecar = GetSubsystem<UNyxSidecarSubsystem>();
+			if (Sidecar)
+			{
+				Sidecar->StartSidecar(Host, DB);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("NyxSidecarSubsystem not available!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.StopSidecar — stop the physics sidecar
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.StopSidecar"),
+		TEXT("Stop the UE5 physics sidecar"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.StopSidecar"));
+
+			UNyxSidecarSubsystem* Sidecar = GetSubsystem<UNyxSidecarSubsystem>();
+			if (Sidecar)
+			{
+				Sidecar->StopSidecar();
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.Shoot <vx> <vy> <vz> — spawn a projectile at player's position (or origin)
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Shoot"),
+		TEXT("Spawn a physics projectile. Usage: Nyx.Shoot [vx] [vy] [vz]"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			// Default: shoot forward-up at 45 degrees
+			double VelX = Args.Num() > 0 ? FCString::Atod(*Args[0]) : 500.0;
+			double VelY = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 0.0;
+			double VelZ = Args.Num() > 2 ? FCString::Atod(*Args[2]) : 500.0;
+
+			// Get spawn position from local player pawn, or use default
+			double PosX = 0.0, PosY = 0.0, PosZ = 200.0;
+			UWorld* World = GetWorld();
+			if (World)
+			{
+				UNyxEntityManager* EntityMgr = World->GetSubsystem<UNyxEntityManager>();
+				if (EntityMgr && EntityMgr->GetLocalPlayerPawn())
+				{
+					FVector Loc = EntityMgr->GetLocalPlayerPawn()->GetActorLocation();
+					PosX = Loc.X;
+					PosY = Loc.Y;
+					PosZ = Loc.Z + 50.0; // Slightly above pawn
+				}
+			}
+
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Shoot pos=(%.0f, %.0f, %.0f) vel=(%.0f, %.0f, %.0f)"),
+				PosX, PosY, PosZ, VelX, VelY, VelZ);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->SpawnProjectile(
+					PosX, PosY, PosZ, VelX, VelY, VelZ);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.PhysicsReset — remove all physics bodies
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.PhysicsReset"),
+		TEXT("Remove all physics bodies from the database"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.PhysicsReset"));
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->PhysicsReset();
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()

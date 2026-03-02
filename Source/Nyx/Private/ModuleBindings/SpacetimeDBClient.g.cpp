@@ -7,6 +7,7 @@
 #include "ModuleBindings/Tables/BenchCounterTable.g.h"
 #include "ModuleBindings/Tables/BenchEntityTable.g.h"
 #include "ModuleBindings/Tables/BenchTickLogTable.g.h"
+#include "ModuleBindings/Tables/PhysicsBodyTable.g.h"
 #include "ModuleBindings/Tables/PlayerTable.g.h"
 #include "ModuleBindings/Tables/PlayerAccountTable.g.h"
 #include "ModuleBindings/Tables/WorldEntityTable.g.h"
@@ -99,10 +100,34 @@ static FReducer DecodeReducer(const FReducerEvent& Event)
         return FReducer::MovePlayer(Args);
     }
 
+    if (ReducerName == TEXT("physics_cleanup"))
+    {
+        FPhysicsCleanupArgs Args = UE::SpacetimeDB::Deserialize<FPhysicsCleanupArgs>(Event.ReducerCall.Args);
+        return FReducer::PhysicsCleanup(Args);
+    }
+
+    if (ReducerName == TEXT("physics_reset"))
+    {
+        FPhysicsResetArgs Args = UE::SpacetimeDB::Deserialize<FPhysicsResetArgs>(Event.ReducerCall.Args);
+        return FReducer::PhysicsReset(Args);
+    }
+
+    if (ReducerName == TEXT("physics_update"))
+    {
+        FPhysicsUpdateArgs Args = UE::SpacetimeDB::Deserialize<FPhysicsUpdateArgs>(Event.ReducerCall.Args);
+        return FReducer::PhysicsUpdate(Args);
+    }
+
     if (ReducerName == TEXT("seed_entities"))
     {
         FSeedEntitiesArgs Args = UE::SpacetimeDB::Deserialize<FSeedEntitiesArgs>(Event.ReducerCall.Args);
         return FReducer::SeedEntities(Args);
+    }
+
+    if (ReducerName == TEXT("spawn_projectile"))
+    {
+        FSpawnProjectileArgs Args = UE::SpacetimeDB::Deserialize<FSpawnProjectileArgs>(Event.ReducerCall.Args);
+        return FReducer::SpawnProjectile(Args);
     }
 
     return FReducer();
@@ -125,6 +150,7 @@ UDbConnection::UDbConnection(const FObjectInitializer& ObjectInitializer) : Supe
 	RegisterTable<FBenchCounterType, UBenchCounterTable, FEventContext>(TEXT("bench_counter"), Db->BenchCounter);
 	RegisterTable<FBenchEntityType, UBenchEntityTable, FEventContext>(TEXT("bench_entity"), Db->BenchEntity);
 	RegisterTable<FBenchTickLogType, UBenchTickLogTable, FEventContext>(TEXT("bench_tick_log"), Db->BenchTickLog);
+	RegisterTable<FPhysicsBodyType, UPhysicsBodyTable, FEventContext>(TEXT("physics_body"), Db->PhysicsBody);
 	RegisterTable<FPlayerType, UPlayerTable, FEventContext>(TEXT("player"), Db->Player);
 	RegisterTable<FPlayerAccountType, UPlayerAccountTable, FEventContext>(TEXT("player_account"), Db->PlayerAccount);
 	RegisterTable<FWorldEntityType, UWorldEntityTable, FEventContext>(TEXT("world_entity"), Db->WorldEntity);
@@ -166,6 +192,7 @@ void URemoteTables::Initialize()
 	BenchCounter = NewObject<UBenchCounterTable>(this);
 	BenchEntity = NewObject<UBenchEntityTable>(this);
 	BenchTickLog = NewObject<UBenchTickLogTable>(this);
+	PhysicsBody = NewObject<UPhysicsBodyTable>(this);
 	Player = NewObject<UPlayerTable>(this);
 	PlayerAccount = NewObject<UPlayerAccountTable>(this);
 	WorldEntity = NewObject<UWorldEntityTable>(this);
@@ -175,6 +202,7 @@ void URemoteTables::Initialize()
 	BenchCounter->PostInitialize();
 	BenchEntity->PostInitialize();
 	BenchTickLog->PostInitialize();
+	PhysicsBody->PostInitialize();
 	Player->PostInitialize();
 	PlayerAccount->PostInitialize();
 	WorldEntity->PostInitialize();
@@ -237,9 +265,25 @@ void USetReducerFlags::MovePlayer(ECallReducerFlags Flag)
 {
 	FlagMap.Add("MovePlayer", Flag);
 }
+void USetReducerFlags::PhysicsCleanup(ECallReducerFlags Flag)
+{
+	FlagMap.Add("PhysicsCleanup", Flag);
+}
+void USetReducerFlags::PhysicsReset(ECallReducerFlags Flag)
+{
+	FlagMap.Add("PhysicsReset", Flag);
+}
+void USetReducerFlags::PhysicsUpdate(ECallReducerFlags Flag)
+{
+	FlagMap.Add("PhysicsUpdate", Flag);
+}
 void USetReducerFlags::SeedEntities(ECallReducerFlags Flag)
 {
 	FlagMap.Add("SeedEntities", Flag);
+}
+void USetReducerFlags::SpawnProjectile(ECallReducerFlags Flag)
+{
+	FlagMap.Add("SpawnProjectile", Flag);
 }
 
 void URemoteReducers::AuthenticateWithEos(const FString& EosProductUserId, const FString& DisplayName, const FString& Platform)
@@ -858,6 +902,138 @@ bool URemoteReducers::InvokeMovePlayerWithArgs(const FReducerEventContext& Conte
     return true;
 }
 
+void URemoteReducers::PhysicsCleanup()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("physics_cleanup"), FPhysicsCleanupArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokePhysicsCleanup(const FReducerEventContext& Context, const UPhysicsCleanupReducer* Args)
+{
+    if (!OnPhysicsCleanup.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsCleanup"));
+        }
+        return false;
+    }
+
+    OnPhysicsCleanup.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokePhysicsCleanupWithArgs(const FReducerEventContext& Context, const FPhysicsCleanupArgs& Args)
+{
+    if (!OnPhysicsCleanup.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsCleanup"));
+        }
+        return false;
+    }
+
+    OnPhysicsCleanup.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::PhysicsReset()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("physics_reset"), FPhysicsResetArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokePhysicsReset(const FReducerEventContext& Context, const UPhysicsResetReducer* Args)
+{
+    if (!OnPhysicsReset.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsReset"));
+        }
+        return false;
+    }
+
+    OnPhysicsReset.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokePhysicsResetWithArgs(const FReducerEventContext& Context, const FPhysicsResetArgs& Args)
+{
+    if (!OnPhysicsReset.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsReset"));
+        }
+        return false;
+    }
+
+    OnPhysicsReset.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::PhysicsUpdate(const uint64 EntityId, const double PosX, const double PosY, const double PosZ, const double VelX, const double VelY, const double VelZ, const bool Active)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("physics_update"), FPhysicsUpdateArgs(EntityId, PosX, PosY, PosZ, VelX, VelY, VelZ, Active), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokePhysicsUpdate(const FReducerEventContext& Context, const UPhysicsUpdateReducer* Args)
+{
+    if (!OnPhysicsUpdate.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsUpdate"));
+        }
+        return false;
+    }
+
+    OnPhysicsUpdate.Broadcast(Context, Args->EntityId, Args->PosX, Args->PosY, Args->PosZ, Args->VelX, Args->VelY, Args->VelZ, Args->Active);
+    return true;
+}
+
+bool URemoteReducers::InvokePhysicsUpdateWithArgs(const FReducerEventContext& Context, const FPhysicsUpdateArgs& Args)
+{
+    if (!OnPhysicsUpdate.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsUpdate"));
+        }
+        return false;
+    }
+
+    OnPhysicsUpdate.Broadcast(Context, Args.EntityId, Args.PosX, Args.PosY, Args.PosZ, Args.VelX, Args.VelY, Args.VelZ, Args.Active);
+    return true;
+}
+
 void URemoteReducers::SeedEntities(const uint32 Count)
 {
     if (!Conn)
@@ -899,6 +1075,50 @@ bool URemoteReducers::InvokeSeedEntitiesWithArgs(const FReducerEventContext& Con
     }
 
     OnSeedEntities.Broadcast(Context, Args.Count);
+    return true;
+}
+
+void URemoteReducers::SpawnProjectile(const double PosX, const double PosY, const double PosZ, const double VelX, const double VelY, const double VelZ)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("spawn_projectile"), FSpawnProjectileArgs(PosX, PosY, PosZ, VelX, VelY, VelZ), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeSpawnProjectile(const FReducerEventContext& Context, const USpawnProjectileReducer* Args)
+{
+    if (!OnSpawnProjectile.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SpawnProjectile"));
+        }
+        return false;
+    }
+
+    OnSpawnProjectile.Broadcast(Context, Args->PosX, Args->PosY, Args->PosZ, Args->VelX, Args->VelY, Args->VelZ);
+    return true;
+}
+
+bool URemoteReducers::InvokeSpawnProjectileWithArgs(const FReducerEventContext& Context, const FSpawnProjectileArgs& Args)
+{
+    if (!OnSpawnProjectile.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SpawnProjectile"));
+        }
+        return false;
+    }
+
+    OnSpawnProjectile.Broadcast(Context, Args.PosX, Args.PosY, Args.PosZ, Args.VelX, Args.VelY, Args.VelZ);
     return true;
 }
 
@@ -1040,10 +1260,34 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
         Reducers->InvokeMovePlayerWithArgs(Context, Args);
         return;
     }
+    if (ReducerName == TEXT("physics_cleanup"))
+    {
+        FPhysicsCleanupArgs Args = ReducerEvent.Reducer.GetAsPhysicsCleanup();
+        Reducers->InvokePhysicsCleanupWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("physics_reset"))
+    {
+        FPhysicsResetArgs Args = ReducerEvent.Reducer.GetAsPhysicsReset();
+        Reducers->InvokePhysicsResetWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("physics_update"))
+    {
+        FPhysicsUpdateArgs Args = ReducerEvent.Reducer.GetAsPhysicsUpdate();
+        Reducers->InvokePhysicsUpdateWithArgs(Context, Args);
+        return;
+    }
     if (ReducerName == TEXT("seed_entities"))
     {
         FSeedEntitiesArgs Args = ReducerEvent.Reducer.GetAsSeedEntities();
         Reducers->InvokeSeedEntitiesWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("spawn_projectile"))
+    {
+        FSpawnProjectileArgs Args = ReducerEvent.Reducer.GetAsSpawnProjectile();
+        Reducers->InvokeSpawnProjectileWithArgs(Context, Args);
         return;
     }
 
