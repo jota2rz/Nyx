@@ -919,6 +919,53 @@ Key configuration:
 7. Nyx.StopSidecar       → Disconnect sidecar
 ```
 
+### Actual Test Results
+
+**Full log output from end-to-end test run:**
+
+```
+Cmd: Nyx.Connect
+LogNyx: Console: Nyx.Connect 127.0.0.1:3000 nyx
+LogNyxNet: Creating SpacetimeDB connection to ws://127.0.0.1:3000 database=nyx
+LogNyxNet: Connection state changed to: 1
+LogNyxNet: SpacetimeDB connected! Token length=386
+LogNyxNet: Connection state changed to: 2
+LogNyxNet: Subscribed to player_account (global, no spatial filter)
+LogNyxNet: Subscribing to spatial area: chunks X[-2..2] Y[-2..2] (radius=2)
+LogNyxNet: Global subscription applied (player_account)
+LogNyxNet: Spatial subscription applied — chunk center (0, 0), radius=2. Cache: 0 players, 0 entities
+
+Cmd: Nyx.EnterWorld
+LogNyxWorld: NyxEntityManager now listening for PlayerTable events
+LogNyx: EnterWorld: Called CreatePlayer('Player')
+LogNyxMove: Initialized as LOCAL player (SendRate=20 Hz, Threshold=5.0 cm)
+LogNyxWorld: Local player possessed NyxPlayerPawn
+LogNyxWorld: Player inserted: Player (LOCAL) at (0, 0, 100)
+
+Cmd: Nyx.StartSidecar
+LogNyx: Starting sidecar — connecting to ws://127.0.0.1:3000 database=nyx
+LogNyx: Sidecar connection built — waiting for connect callback
+LogNyx: Sidecar connected to SpacetimeDB (identity: 0xc200...610eb1c2)
+LogNyx: Sidecar subscribed to physics_body table
+LogNyx: Sidecar subscription applied — binding table events
+LogNyx: Sidecar active — simulating 0 bodies at 30 Hz send rate
+
+Cmd: Nyx.Shoot 500 0 500
+LogNyx: Console: Nyx.Shoot pos=(0, 0, 150) vel=(500, 0, 500)
+LogNyx: Sidecar: New body 1 (projectile) at (0, 0, 150) vel=(500, 0, 500)
+LogNyx: Sidecar: Body 1 hit floor at (630, 0, 0)
+LogNyx: Sidecar: Sent deactivation for body 1
+LogNyx: Sidecar: Body 1 deleted
+```
+
+**Analysis:**
+- 45° launch from Z=150 with v₀=500 cm/s, gravity=-980 cm/s² → expected X landing ≈ **630 cm** ✅
+- Sidecar picked up the body via `OnInsert` within 1 frame of the `spawn_projectile` reducer call
+- Floor collision detected at Z=0, deactivation sent immediately
+- Body deleted from subscription (no longer matches `WHERE active = true`)
+- No feedback loops, no errors, no duplicate events
+- Benign SDK warning `UCredentials::Init has not been called before SaveToken` — the SpacetimeDB SDK saves a token before credentials are initialized; harmless, present since Spike 1
+
 ### What This Validates
 
 | Validation Point | Result |
