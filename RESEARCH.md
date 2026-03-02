@@ -226,12 +226,17 @@ Context.Reducers->CreatePlayer(TEXT("NyxTestPlayer"));
 ```
 
 ### Console Commands (for editor testing)
-| Command | Description |
-|---------|-------------|
-| `Nyx.Connect [Host] [Database]` | Connect to real SpacetimeDB (default: 127.0.0.1:3000 / nyx) |
-| `Nyx.ConnectMock` | Connect using mock backend |
-| `Nyx.Disconnect` | Disconnect current connection |
-| `Nyx.StartGame [mock]` | Full login flow (auth → connect) |
+| Command | Description | Added |
+|---------|-------------|-------|
+| `Nyx.Connect [Host] [Database]` | Connect to real SpacetimeDB (default: 127.0.0.1:3000 / nyx) | Spike 3 |
+| `Nyx.ConnectMock` | Connect using mock backend | Spike 3 |
+| `Nyx.Disconnect` | Disconnect current connection | Spike 3 |
+| `Nyx.StartGame [mock]` | Full login flow (auth → connect) | Spike 4 |
+| `Nyx.Seed <count>` | Seed world with N entities for spatial testing | Spike 5 |
+| `Nyx.ClearEntities` | Remove all world entities | Spike 5 |
+| `Nyx.Move <x> <y> <z>` | Teleport player (debug — raw reducer call) | Spike 5 |
+| `Nyx.EnterWorld` | Set up subscriptions + create player + spawn pawn | Spike 6 |
+| `Nyx.Walk <dx> <dy> [dz]` | Apply movement input to local pawn (prediction test) | Spike 6 |
 
 ### Verified Output Log (editor PIE session)
 ```
@@ -252,10 +257,10 @@ spacetime sql --server local nyx "SELECT * FROM player"
 ### Deliverable
 - [x] UE5 connects to local SpacetimeDB
 - [x] Reducer calls work (create_player verified, move_player defined)
-- [ ] OnInsert / OnUpdate / OnDelete callbacks — not yet wired to table events (deferred)
-- [ ] Subscription queries with filters — not tested yet
-- [ ] Latency numbers — not measured yet
-- [ ] Subscription update (change query at runtime) — not tested yet
+- [x] OnInsert / OnUpdate / OnDelete callbacks — wired in Spike 6 via `PlayerTable::OnInsert/OnUpdate/OnDelete`
+- [x] Subscription queries with filters — verified in Spike 5 (`WHERE chunk_x BETWEEN ...`)
+- [ ] Latency numbers — not formally measured (qualitatively instant on localhost)
+- [x] Subscription update (change query at runtime) — verified in Spike 5 (`Unsubscribe()` + re-`Subscribe()`)
 
 ### Answers to Key Questions
 - **What is the round-trip latency?** Not formally measured yet. Qualitatively instant on localhost.
