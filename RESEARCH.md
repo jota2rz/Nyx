@@ -1059,6 +1059,8 @@ BitCraft Online is a community sandbox MMORPG (crafting, city-building, explorat
 
 **Key difference from Nyx:** BitCraft uses SpacetimeDB **1.12.0** (see `Cargo.toml`), while Nyx targets SpacetimeDB **2.0**. API differences include table accessor syntax, reducer signatures, and scheduling APIs. The architectural patterns remain valid, but code cannot be copy-pasted without adaptation.
 
+**Architectural divergence:** BitCraft runs **all** game logic in WASM with no external physics or simulation processes. Nyx's Spike 8 physics sidecar — a UE5 client subsystem that connects as a second client to run real-time physics — has no equivalent in BitCraft. This is a deliberate divergence: BitCraft's server-authoritative, turn-based movement model doesn't require client-side physics simulation, while Nyx's action-oriented gameplay does. BitCraft validates that a pure-WASM approach scales for slower-paced games; Nyx's sidecar approach addresses the real-time physics gap.
+
 ### 1. Project Structure — Monorepo Module Layout
 
 BitCraft's server is a **single `cdylib` crate** compiled to WASM, organized into well-separated submodules:
@@ -1128,6 +1130,8 @@ BitCraft uses an **ECS-like architecture** where entities are identified by a `u
 
 **Takeaway for Nyx:** Our current `Player` table is monolithic. As features grow, split into focused component tables (`position`, `stats`, `inventory`, etc.) all sharing the same `entity_id`. This allows spatial subscriptions to include only the components needed (e.g., subscribe to `mobile_entity_state` for position updates but not `inventory_state`).
 
+**Trade-off:** More component tables means more subscription queries per client and more initial state transfer overhead on connection. In SpacetimeDB 2.0, each table requires a separate `SELECT ... WHERE` subscription. Split only when different clients genuinely need different subsets of components — premature decomposition adds join complexity (no real JOINs in SpacetimeDB; you query each table separately and stitch client-side) before we know which components Nyx actually needs.
+
 ### 4. Movement & Spatial System
 
 BitCraft uses a **hex-grid coordinate system** with multiple granularity levels:
@@ -1143,7 +1147,7 @@ Movement is handled server-side:
 - The server validates that both origin and destination are within world bounds using dimension descriptions.
 - Chunk transitions trigger exploration logic and potential herd spawns.
 
-**Contrast with Nyx:** Nyx uses client-side prediction with server echo (Spike 6). BitCraft appears to use a more server-authoritative approach where the server validates and executes moves. Both approaches are viable — Nyx's prediction model is better suited for action-oriented gameplay, while BitCraft's works for its slower-paced sandbox style.
+**Contrast with Nyx:** Nyx uses client-side prediction with server echo (Spike 6). BitCraft uses a fully server-authoritative approach — `move_player_and_explore()` validates bounds and executes the move server-side; the client does not predict. Both approaches are viable — Nyx's prediction model is better suited for action-oriented gameplay, while BitCraft's server-authoritative model works for its slower-paced sandbox style.
 
 **Takeaway for Nyx:** Consider adding server-side bounds checking to `move_player`. Currently Nyx trusts client-reported positions. Add validation like BitCraft does: check that the target position is within world bounds and that the movement speed doesn't exceed maximum.
 
@@ -1217,6 +1221,8 @@ The `LocationCache` is a single-row table that stores pre-computed spatial data 
 
 **Takeaway for Nyx:** For large worlds, consider building spatial caches at world generation time rather than computing spatial queries on every tick. A single-row "cache table" with pre-sorted location arrays is an effective SpacetimeDB pattern.
 
+**Caveat:** Any client subscribing to the cache table receives the **entire** row in the initial sync. For BitCraft's hex grid this is manageable, but for Nyx's free-form 3D world this could mean megabytes of data per connection. SpacetimeDB 2.0 subscriptions are row-level — you cannot subscribe to a subset of columns within a row. Keep cache rows small, or use server-only tables (private tables not exposed to client subscriptions) if the cache is only needed by scheduled agents.
+
 ### 9. Inter-Module Communication (Multi-Region)
 
 BitCraft supports **multi-region architecture** through the `inter_module/` system:
@@ -1229,7 +1235,7 @@ BitCraft supports **multi-region architecture** through the `inter_module/` syst
 
 The `global_module` package is a separate SpacetimeDB module that provides region-agnostic services (likely authentication, user management).
 
-**Takeaway for Nyx:** SpacetimeDB supports multiple modules communicating via inter-module calls. Plan for this architecture if Nyx needs multi-region scaling: one "game" module per region + one "global" module for auth/accounts. The player transfer pattern (serialize all component state → transfer → deserialize) validates our sidecar architecture approach from Spike 8.
+**Takeaway for Nyx:** SpacetimeDB supports multiple modules communicating via inter-module calls. Plan for this architecture if Nyx needs multi-region scaling: one "game" module per region + one "global" module for auth/accounts. The player transfer pattern (serialize all component state → transfer → deserialize) is relevant to future multi-region scaling but is **not** related to our Spike 8 sidecar architecture. BitCraft's inter-module system is server-to-server RPC between separate SpacetimeDB modules; Spike 8's sidecar is a UE5 client subsystem connecting as a second client to the **same** module to run physics simulation. These solve entirely different problems.
 
 ### 10. Data-Driven Design (Static Data via CSV → Rust)
 
@@ -1246,31 +1252,32 @@ At build time, CSV data files are parsed and embedded into the WASM module. This
 
 ### 11. SpacetimeDB API Patterns (v1.12 → v2.0 Translation)
 
-BitCraft reveals idiomatic SpacetimeDB usage patterns that translate to v2.0 with minor syntax changes:
+BitCraft reveals idiomatic SpacetimeDB usage patterns. Most translate to v2.0, but the table attribute macro change (`name` → `accessor`) affects every table definition, and `ctx.sender` became a method call. The table below notes actual differences:
 
-| Pattern | BitCraft (v1.12) | Nyx (v2.0) |
-|---------|-----------------|------------|
-| Table lookup | `ctx.db.player_state().entity_id().find(&id)` | Same syntax |
-| Table insert | `ctx.db.table().try_insert(row).is_err()` | Same pattern |
-| Table update | `ctx.db.table().entity_id().update(row)` | Same syntax |
-| Table delete | `ctx.db.table().entity_id().delete(&id)` | Same syntax |
-| Filter iteration | `ctx.db.table().field().filter(val)` | Same syntax |
-| Identity access | `ctx.sender` (field) | `ctx.sender()` (method in v2.0) |
-| Timestamp | `ctx.timestamp` | `ctx.timestamp` (same) |
-| Logging | `spacetimedb::log::info!(...)` | Same |
-| Lifecycle reducers | `#[reducer(init)]`, `#[reducer(client_connected)]` | Same |
-| Error handling | `-> Result<(), String>` | Same |
-| Random | `ctx.rng().gen_range(min..max)` | Same |
-| Scheduled reducers | Scheduled table pattern | Same pattern (verified in Spike 7) |
+| Pattern | BitCraft (v1.12) | Nyx (v2.0) | Changed? |
+|---------|-----------------|------------|----------|
+| **Table attribute** | `#[spacetimedb::table(name = X)]` | `#[spacetimedb::table(accessor = X)]` | **Yes** — every table definition |
+| **Identity access** | `ctx.sender` (field) | `ctx.sender()` (method) | **Yes** — every reducer using sender |
+| Table lookup | `ctx.db.table().key().find(&id)` | Same syntax | No |
+| Table insert | `ctx.db.table().try_insert(row)` | Same pattern | No |
+| Table update | `ctx.db.table().key().update(row)` | Same syntax | No |
+| Table delete | `ctx.db.table().key().delete(&id)` | Same syntax | No |
+| Filter iteration | `ctx.db.table().field().filter(val)` | Same syntax | No |
+| Timestamp | `ctx.timestamp` (field) | `ctx.timestamp` (field) | No |
+| Logging | `spacetimedb::log::info!(...)` | Same | No |
+| Lifecycle reducers | `#[reducer(init)]`, `#[reducer(client_connected)]` | Same | No |
+| Error handling | `-> Result<(), String>` | Same | No |
+| Random | `ctx.rng().gen_range(min..max)` | Same | No |
+| Scheduled reducers | Scheduled table pattern | Same (verified in Spike 7) | No |
 
-**Important:** BitCraft uses `#[spacetimedb::table(name = X)]` while Nyx uses `#[spacetimedb::table(accessor = X)]` — the v2.0 syntax changed the attribute name.
+**Bottom line:** The CRUD query API is stable across versions. The breaking changes are the table attribute macro and `ctx.sender` → `ctx.sender()`. Any BitCraft code ported to v2.0 requires a mechanical find-and-replace for these two patterns.
 
 ### 12. Key Architectural Patterns to Adopt
 
 | # | Pattern | Description | Priority |
 |---|---------|-------------|----------|
 | 1 | **Domain-organized reducers** | Group handlers by feature (player/, combat/, inventory/) not by action | High — do before module exceeds ~500 lines |
-| 2 | **Component tables per entity** | Split `Player` into `position`, `stats`, `inventory` tables sharing `entity_id` | High — do before adding inventory/combat |
+| 2 | **Component tables per entity** | Split `Player` into `position`, `stats`, `inventory` tables sharing `entity_id` | Medium — do when 3+ features share entity_id and subscription overhead is measurable |
 | 3 | **Input sanitization on all text** | Sanitize + validate + length-check all user text inputs | High — security requirement |
 | 4 | **Rate limiting on player actions** | Count actions within time windows, reject over threshold | Medium — needed before public testing |
 | 5 | **Computed stats from components** | Never store derived stats directly; recompute from equipment + buffs | Medium — adopt with equipment system |
