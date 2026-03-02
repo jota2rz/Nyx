@@ -1046,6 +1046,242 @@ After completing these spikes, we'll have clarity on:
 
 ---
 
+## BitCraft Online — Reference Architecture Analysis
+
+> **Source:** https://github.com/clockworklabs/BitCraftPublic  
+> **License:** Apache 2.0  
+> **Engine:** Unity (client not open-sourced), SpacetimeDB 1.x server  
+> **Relevance:** BitCraft is the production MMO built by the SpacetimeDB creators. Although it targets Unity (not UE5), the server-side patterns are engine-agnostic and directly applicable to Nyx.
+
+### Overview
+
+BitCraft Online is a community sandbox MMORPG (crafting, city-building, exploration, PvE combat, governance) running entirely on SpacetimeDB. The open-sourced server code (`BitCraftServer/packages/game`) is a single SpacetimeDB Rust module (~250+ source files) that handles **all** game logic server-side. Examining it reveals production-proven patterns for the same systems Nyx will need.
+
+**Key difference from Nyx:** BitCraft uses SpacetimeDB **1.12.0** (see `Cargo.toml`), while Nyx targets SpacetimeDB **2.0**. API differences include table accessor syntax, reducer signatures, and scheduling APIs. The architectural patterns remain valid, but code cannot be copy-pasted without adaptation.
+
+### 1. Project Structure — Monorepo Module Layout
+
+BitCraft's server is a **single `cdylib` crate** compiled to WASM, organized into well-separated submodules:
+
+```
+BitCraftServer/packages/game/src/
+├── lib.rs                  # Entry point: init, client_connected/disconnected, world gen
+├── agents/                 # Server-side scheduled agents (ticks)
+├── game/
+│   ├── autogen/            # Generated code (CSV → Rust data)
+│   ├── coordinates/        # Hex-grid coordinate systems (6+ coordinate types)
+│   ├── discovery/          # Exploration / fog-of-war tracking
+│   ├── entities/           # ~80 entity/component state tables (ECS-like)
+│   ├── game_state/         # Core state helpers (entity creation, filtering)
+│   ├── handlers/           # Reducers grouped by domain (player, buildings, combat, etc.)
+│   ├── location_cache.rs   # In-WASM spatial cache (built at world gen)
+│   ├── reducer_helpers/    # Shared reducer logic (building, interior, etc.)
+│   ├── static_data/        # Game design data descriptors (items, skills, recipes)
+│   ├── terrain_chunk.rs    # Terrain chunk state + cache
+│   └── world_gen/          # Procedural world generation
+├── inter_module/           # Cross-module RPC (multi-region player transfer)
+├── messages/               # Table definitions (components, auth, static data, etc.)
+├── table_caches/           # In-memory caches for hot tables
+├── macros/                 # Procedural macros (shared_table_reducer)
+└── utils/                  # Math, helpers
+```
+
+**Takeaway for Nyx:** As the module grows, adopt a similar domain-based directory structure under `server/nyx-server/spacetimedb/src/`. Group reducers by feature (`handlers/player/`, `handlers/combat/`, `handlers/inventory/`) rather than putting everything in `lib.rs`.
+
+### 2. Authentication & Identity
+
+BitCraft separates **authentication** from **sign-in**:
+
+- **`identity_connected`** (lifecycle reducer): Checks if the connecting identity is a developer, has skip-queue privileges, is blocked, or has a valid `user_authentication_state` entry (expires after 24 hours). Unauthorized identities are rejected at connection time.
+- **`sign_in`** (game reducer): Called after connection. Validates queue position, checks moderation bans, restores player state, unlocks inventory, restarts buff timers, refreshes traveler tasks, and marks the player as `signed_in`.
+- **Role-based access control**: `IdentityRole` table maps `Identity → Role` (Admin, Gm, SkipQueue). Helper `has_role(ctx, &identity, Role::Admin)` gates admin reducers.
+- **User moderation**: `user_moderation_state` table stores per-identity moderation actions (permanent block, temporary block with expiration, chat suspension).
+
+**Takeaway for Nyx:** Our current `authenticate_with_eos` reducer is equivalent to BitCraft's `identity_connected` + auth state insertion. As we add features, split into:
+1. Connection-level auth check (in `client_connected`)
+2. Game-level sign-in reducer (queue, bans, state restore)
+3. Role table for admin/GM permissions
+
+### 3. Entity-Component Pattern via SpacetimeDB Tables
+
+BitCraft uses an **ECS-like architecture** where entities are identified by a `u64 entity_id` and components are separate SpacetimeDB tables, each keyed by `entity_id`:
+
+| Component Table | Purpose |
+|----------------|---------|
+| `player_state` | Core player data (signed_in, session timestamps, traveler tasks) |
+| `mobile_entity_state` | Position, destination, chunk_index, walking state, timestamps |
+| `inventory_state` | Item stacks with pocket-based slots |
+| `equipment_state` | Equipped items (armor, weapons, tools) |
+| `character_stats_state` | Computed stats (HP, damage, speed, etc.) |
+| `active_buff_state` | Active buff timers (per entity) |
+| `ability_state` | Abilities and cooldowns |
+| `experience_state` | Skill XP stacks per skill type |
+| `stamina_state` | Stamina (consumed by sprinting, actions) |
+| `vault_state` | Collectibles, achievements, cosmetics |
+| `signed_in_player_state` | Presence table (entity_id only — fast "who is online?" queries) |
+| `player_action_state` | Current action (gathering, crafting, attacking) with timestamps |
+| `player_username_state` | Username (separate from identity for rename support) |
+| `alert_state` | In-game notifications |
+| `threat_state` | Aggro/threat table for combat AI |
+
+**Global entity counter:** `Globals.entity_pk_counter` is incremented atomically via `create_entity(ctx)` to generate unique IDs.
+
+**Takeaway for Nyx:** Our current `Player` table is monolithic. As features grow, split into focused component tables (`position`, `stats`, `inventory`, etc.) all sharing the same `entity_id`. This allows spatial subscriptions to include only the components needed (e.g., subscribe to `mobile_entity_state` for position updates but not `inventory_state`).
+
+### 4. Movement & Spatial System
+
+BitCraft uses a **hex-grid coordinate system** with multiple granularity levels:
+
+- `OffsetCoordinatesSmall` / `SmallHexTile` — finest granularity
+- `OffsetCoordinatesLarge` / `LargeHexTile` — chunk-level
+- `ChunkCoordinates` — for spatial partitioning
+- `RegionCoordinates` — for region-level operations
+- `FloatHexTile` / `OffsetCoordinatesFloat` — for smooth interpolation
+
+Movement is handled server-side:
+- `move_player_and_explore()` validates bounds (refuses out-of-world moves), calculates chunk transitions, triggers exploration discovery, and updates the `mobile_entity_state` table.
+- The server validates that both origin and destination are within world bounds using dimension descriptions.
+- Chunk transitions trigger exploration logic and potential herd spawns.
+
+**Contrast with Nyx:** Nyx uses client-side prediction with server echo (Spike 6). BitCraft appears to use a more server-authoritative approach where the server validates and executes moves. Both approaches are viable — Nyx's prediction model is better suited for action-oriented gameplay, while BitCraft's works for its slower-paced sandbox style.
+
+**Takeaway for Nyx:** Consider adding server-side bounds checking to `move_player`. Currently Nyx trusts client-reported positions. Add validation like BitCraft does: check that the target position is within world bounds and that the movement speed doesn't exceed maximum.
+
+### 5. Scheduled Agents (Server-Side Ticks)
+
+BitCraft implements **16 server-side agents** as scheduled reducers, each handling a specific background task:
+
+| Agent | Interval | Purpose |
+|-------|----------|---------|
+| `auto_logout_agent` | Periodic | Kicks idle players after inactivity timeout |
+| `building_decay_agent` | Periodic | Decays unattended buildings over time |
+| `chat_cleanup_agent` | Periodic | Deletes old chat messages to save space |
+| `crumb_trail_clean_up_agent` | Periodic | Cleans expired trail markers |
+| `day_night_agent` | Periodic | Advances the day/night cycle clock |
+| `duel_agent` | Periodic | Manages duel timeouts and resolution |
+| `enemy_regen_agent` | Periodic | Regenerates enemy HP/respawns |
+| `herd_regen_agent` | Periodic | Repopulates animal herds |
+| `npc_agent` | Periodic | NPC AI behavior ticks |
+| `rent_collector_agent` | Periodic | Collects rent from player-owned plots |
+| `resources_regen` | Periodic | Regenerates harvestable resources (trees, ore) |
+| `starving_agent` | Periodic | Applies hunger damage to starving players |
+| `storage_log_cleanup_agent` | Periodic | Cleans old storage logs |
+| `teleportation_energy_regen_agent` | Periodic | Regens teleportation energy |
+| `trade_sessions_agent` | Periodic | Times out stale trade sessions |
+| `traveler_task_agent` | Periodic | Rotates NPC traveler tasks |
+
+Agents are enabled/disabled via the `Config.agents_enabled` flag and initialized after world generation. Admin reducers `stop_agents` / `start_agents` allow runtime control.
+
+**Takeaway for Nyx:** Spike 7 validated scheduled ticks with 1000 entities at 100ms. BitCraft's agent pattern confirms this scales to production. Plan for these agent types early:
+- **Auto-logout** — essential for cleaning up disconnected players
+- **Resource regeneration** — if Nyx has harvestable resources
+- **Day/night cycle** — if time-of-day is server-authoritative
+- **Chat cleanup** — prevent unbounded chat table growth
+
+### 6. Chat System
+
+BitCraft's `chat_post_message` reducer demonstrates several production patterns:
+
+- **Input sanitization:** `sanitize_user_inputs()` + `is_user_text_input_valid()` with a 250-char limit
+- **Moderation checks:** `UserModerationState::validate_chat_privileges()` blocks suspended users
+- **Rate limiting:** Region chat counts recent messages within a time window (`rate_limit_window_sec`) and rejects if over `max_messages_per_time_period`
+- **Minimum playtime gate:** New accounts must play for `min_playtime` seconds before using Region chat
+- **Username requirement:** Players must set a username (not default `"player"`) to post in Region chat
+- **Channel system:** Multiple channels (`Local`, `Region`) with different rules. Local chat allows targeting specific players
+- **I18N support:** Messages store a language code prefix for client-side localization
+
+**Takeaway for Nyx:** When implementing chat, build in rate limiting and moderation from day one. Use a similar pattern: sanitize input → check moderation state → rate limit → insert message entity.
+
+### 7. Inventory & Equipment System
+
+BitCraft's inventory uses a **pocket-based slot system** with rich item stack management:
+
+- `InventoryState` contains item stacks organized into pockets (unlock progression)
+- `EquipmentState` tracks equipped items in specific slots
+- `VaultState` stores collectibles, titles, and cosmetics (account-level, persists across sessions)
+- `CharacterStatsState` is **computed** from equipment + buffs + knowledge — never stored directly. On any change (equip, buff, knowledge unlock), `collect_stats()` recomputes all stats from scratch and updates the table only if values changed.
+
+**Takeaway for Nyx:** The "compute stats from components" pattern is powerful. Instead of storing derived stats directly, define them as functions of equipped items + buffs + passive bonuses. This eliminates desync bugs where stats don't match equipment.
+
+### 8. World Generation
+
+BitCraft generates the entire world server-side in a single reducer call (`generate_world`):
+
+- Reads a `WorldGenWorldDefinition` configuration
+- Generates terrain chunks, resources, buildings (ruins), enemies, herds, NPCs, dropped inventories
+- Builds a `LocationCache` — an in-WASM spatial index of key locations (trading posts, ruins, spawn points)
+- Populates `TerrainChunkState` for all terrain data
+- Enables agents after world gen completes
+
+The `LocationCache` is a single-row table that stores pre-computed spatial data as `Vec<SmallHexTile>` arrays. This avoids expensive spatial queries at runtime — agents can look up nearest ruins, spawn points, etc. from the cached vectors.
+
+**Takeaway for Nyx:** For large worlds, consider building spatial caches at world generation time rather than computing spatial queries on every tick. A single-row "cache table" with pre-sorted location arrays is an effective SpacetimeDB pattern.
+
+### 9. Inter-Module Communication (Multi-Region)
+
+BitCraft supports **multi-region architecture** through the `inter_module/` system:
+
+- `transfer_player.rs` (24KB) — full player state serialization for cross-region transfers
+- `replace_identity.rs` — identity migration between regions
+- `user_update_region.rs` — region-level state updates
+- `restore_skills.rs` — skill recovery after transfer
+- Multiple empire/claim cross-region reducers
+
+The `global_module` package is a separate SpacetimeDB module that provides region-agnostic services (likely authentication, user management).
+
+**Takeaway for Nyx:** SpacetimeDB supports multiple modules communicating via inter-module calls. Plan for this architecture if Nyx needs multi-region scaling: one "game" module per region + one "global" module for auth/accounts. The player transfer pattern (serialize all component state → transfer → deserialize) validates our sidecar architecture approach from Spike 8.
+
+### 10. Data-Driven Design (Static Data via CSV → Rust)
+
+BitCraft separates **mutable game state** from **immutable game design data**:
+
+- `messages/static_data.rs` (72KB) — defines descriptor tables for items, recipes, buildings, enemies, skills, etc.
+- `game/static_data/` — loading and validation logic
+- `config/` directory contains CSV files that are compiled into Rust code via `build.rs` (18KB build script)
+- `build_shared.rs` (20KB) — shared CSV parsing and code generation utilities
+
+At build time, CSV data files are parsed and embedded into the WASM module. This means game designers can edit CSV files, rebuild the module, and deploy balance changes without modifying Rust code.
+
+**Takeaway for Nyx:** Adopt a data-driven approach early. Define item stats, skill trees, enemy parameters, etc. in external data files (CSV, JSON, or TOML) and load them at module initialization. This separates game design iteration from code changes.
+
+### 11. SpacetimeDB API Patterns (v1.12 → v2.0 Translation)
+
+BitCraft reveals idiomatic SpacetimeDB usage patterns that translate to v2.0 with minor syntax changes:
+
+| Pattern | BitCraft (v1.12) | Nyx (v2.0) |
+|---------|-----------------|------------|
+| Table lookup | `ctx.db.player_state().entity_id().find(&id)` | Same syntax |
+| Table insert | `ctx.db.table().try_insert(row).is_err()` | Same pattern |
+| Table update | `ctx.db.table().entity_id().update(row)` | Same syntax |
+| Table delete | `ctx.db.table().entity_id().delete(&id)` | Same syntax |
+| Filter iteration | `ctx.db.table().field().filter(val)` | Same syntax |
+| Identity access | `ctx.sender` (field) | `ctx.sender()` (method in v2.0) |
+| Timestamp | `ctx.timestamp` | `ctx.timestamp` (same) |
+| Logging | `spacetimedb::log::info!(...)` | Same |
+| Lifecycle reducers | `#[reducer(init)]`, `#[reducer(client_connected)]` | Same |
+| Error handling | `-> Result<(), String>` | Same |
+| Random | `ctx.rng().gen_range(min..max)` | Same |
+| Scheduled reducers | Scheduled table pattern | Same pattern (verified in Spike 7) |
+
+**Important:** BitCraft uses `#[spacetimedb::table(name = X)]` while Nyx uses `#[spacetimedb::table(accessor = X)]` — the v2.0 syntax changed the attribute name.
+
+### 12. Key Architectural Patterns to Adopt
+
+| # | Pattern | Description | Priority |
+|---|---------|-------------|----------|
+| 1 | **Domain-organized reducers** | Group handlers by feature (player/, combat/, inventory/) not by action | High — do before module exceeds ~500 lines |
+| 2 | **Component tables per entity** | Split `Player` into `position`, `stats`, `inventory` tables sharing `entity_id` | High — do before adding inventory/combat |
+| 3 | **Input sanitization on all text** | Sanitize + validate + length-check all user text inputs | High — security requirement |
+| 4 | **Rate limiting on player actions** | Count actions within time windows, reject over threshold | Medium — needed before public testing |
+| 5 | **Computed stats from components** | Never store derived stats directly; recompute from equipment + buffs | Medium — adopt with equipment system |
+| 6 | **Server-side position validation** | Validate move targets are within world bounds, speed within limits | Medium — reduces cheat surface |
+| 7 | **Auto-logout agent** | Scheduled agent to clean up idle/disconnected players | Medium — needed for any public server |
+| 8 | **Data-driven design data** | Load game balance from CSV/JSON, not hardcoded Rust constants | Medium — enables designer iteration |
+| 9 | **Location cache table** | Pre-compute spatial data at world gen, store in single-row cache table | Low — optimization for large worlds |
+| 10 | **Moderation system** | `user_moderation_state` table for bans, mutes, with expiration timestamps | Low — needed before community features |
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
@@ -1055,5 +1291,6 @@ After completing these spikes, we'll have clarity on:
 - EOS Developer Portal: https://dev.epicgames.com/portal/
 - UE5.7 Documentation: https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-5-7-documentation
 - BitCraft (reference game built with SpacetimeDB): https://www.bitcraftonline.com/
+- BitCraft Server Source Code (Apache 2.0): https://github.com/clockworklabs/BitCraftPublic
 - MultiServer Replication Plugin (Experimental): https://dev.epicgames.com/community/learning/knowledge-base/xBvk/unreal-engine-experimental-an-introduction-to-the-multiserver-replication-plugin
 - MultiServer Replication API: https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Plugins/MultiServerReplication
