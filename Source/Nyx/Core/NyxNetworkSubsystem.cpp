@@ -206,6 +206,7 @@ void UNyxNetworkSubsystem::HandleSpacetimeDBConnect(UDbConnection* Connection, F
 {
 	UE_LOG(LogNyxNet, Log, TEXT("SpacetimeDB connected! Token length=%d"), Token.Len());
 	SpacetimeDBToken = Token;
+	LocalIdentity = Identity;
 
 	HandleConnectionStateChanged(ENyxConnectionState::Connected);
 

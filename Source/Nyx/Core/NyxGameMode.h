@@ -41,7 +41,7 @@ public:
 	 * Set to true for development without SpacetimeDB running.
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Debug")
-	bool bAutoLoginMock = true;
+	bool bAutoLoginMock = false;
 
 private:
 	void OnAuthStateChanged(ENyxAuthState NewState);

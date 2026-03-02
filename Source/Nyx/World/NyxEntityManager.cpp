@@ -3,8 +3,12 @@
 #include "NyxEntityManager.h"
 #include "Nyx/Nyx.h"
 #include "Nyx/Core/NyxNetworkSubsystem.h"
-#include "Nyx/Networking/NyxDatabaseInterface.h"
+#include "Nyx/Player/NyxPlayerPawn.h"
+#include "Nyx/Player/NyxMovementComponent.h"
+#include "ModuleBindings/Tables/PlayerTable.g.h"
+#include "ModuleBindings/SpacetimeDBClient.g.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
 
 void UNyxEntityManager::Initialize(FSubsystemCollectionBase& Collection)
 {
@@ -21,197 +25,253 @@ void UNyxEntityManager::Deinitialize()
 
 bool UNyxEntityManager::ShouldCreateSubsystem(UObject* Outer) const
 {
-	// Only create in game worlds, not in editor preview worlds
 	UWorld* World = Cast<UWorld>(Outer);
-	if (!World)
-	{
-		return false;
-	}
+	if (!World) return false;
 	return World->WorldType == EWorldType::Game || World->WorldType == EWorldType::PIE;
 }
 
+// ─── Listening ─────────────────────────────────────────────────────
+
 void UNyxEntityManager::StartListening()
 {
-	if (bIsListening)
-	{
-		return;
-	}
+	if (bIsListening) return;
 
 	UGameInstance* GI = GetWorld()->GetGameInstance();
-	if (!GI)
-	{
-		UE_LOG(LogNyxWorld, Error, TEXT("No GameInstance available"));
-		return;
-	}
+	if (!GI) return;
 
 	UNyxNetworkSubsystem* NetworkSub = GI->GetSubsystem<UNyxNetworkSubsystem>();
-	if (!NetworkSub || !NetworkSub->GetDatabaseInterface())
+	if (!NetworkSub) return;
+
+	UDbConnection* Conn = NetworkSub->GetSpacetimeDBConnection();
+	if (!Conn || !Conn->Db || !Conn->Db->Player)
 	{
-		UE_LOG(LogNyxWorld, Error, TEXT("NyxNetworkSubsystem or database interface not available"));
+		UE_LOG(LogNyxWorld, Error, TEXT("Cannot start listening — SpacetimeDB connection or Player table not available"));
 		return;
 	}
 
-	INyxDatabaseInterface* Db = NetworkSub->GetDatabaseInterface();
+	UPlayerTable* PlayerTable = Conn->Db->Player;
 
-	InsertHandle = Db->OnPlayerInserted().AddUObject(this, &UNyxEntityManager::HandlePlayerInserted);
-	UpdateHandle = Db->OnPlayerUpdated().AddUObject(this, &UNyxEntityManager::HandlePlayerUpdated);
-	DeleteHandle = Db->OnPlayerDeleted().AddUObject(this, &UNyxEntityManager::HandlePlayerDeleted);
+	PlayerTable->OnInsert.AddDynamic(this, &UNyxEntityManager::HandlePlayerInsert);
+	PlayerTable->OnUpdate.AddDynamic(this, &UNyxEntityManager::HandlePlayerUpdate);
+	PlayerTable->OnDelete.AddDynamic(this, &UNyxEntityManager::HandlePlayerDelete);
 
 	bIsListening = true;
-	UE_LOG(LogNyxWorld, Log, TEXT("NyxEntityManager now listening for database events"));
+	UE_LOG(LogNyxWorld, Log, TEXT("NyxEntityManager now listening for PlayerTable events"));
+
+	// Spawn actors for any players already in the cache (subscription snapshot)
+	TArray<FPlayerType> ExistingPlayers = PlayerTable->Iter();
+	for (const FPlayerType& Player : ExistingPlayers)
+	{
+		bool bLocal = NetworkSub->IsLocalIdentity(Player.Identity);
+		SpawnPlayerActor(Player, bLocal);
+		UE_LOG(LogNyxWorld, Log, TEXT("Spawned existing player: %s (%s)"),
+			*Player.DisplayName, bLocal ? TEXT("local") : TEXT("remote"));
+	}
 }
 
 void UNyxEntityManager::StopListening()
 {
-	if (!bIsListening)
-	{
-		return;
-	}
+	if (!bIsListening) return;
 
+	// Unbind table events
 	UGameInstance* GI = GetWorld() ? GetWorld()->GetGameInstance() : nullptr;
 	if (GI)
 	{
 		UNyxNetworkSubsystem* NetworkSub = GI->GetSubsystem<UNyxNetworkSubsystem>();
-		if (NetworkSub && NetworkSub->GetDatabaseInterface())
+		if (NetworkSub)
 		{
-			INyxDatabaseInterface* Db = NetworkSub->GetDatabaseInterface();
-			Db->OnPlayerInserted().Remove(InsertHandle);
-			Db->OnPlayerUpdated().Remove(UpdateHandle);
-			Db->OnPlayerDeleted().Remove(DeleteHandle);
+			UDbConnection* Conn = NetworkSub->GetSpacetimeDBConnection();
+			if (Conn && Conn->Db && Conn->Db->Player)
+			{
+				Conn->Db->Player->OnInsert.RemoveDynamic(this, &UNyxEntityManager::HandlePlayerInsert);
+				Conn->Db->Player->OnUpdate.RemoveDynamic(this, &UNyxEntityManager::HandlePlayerUpdate);
+				Conn->Db->Player->OnDelete.RemoveDynamic(this, &UNyxEntityManager::HandlePlayerDelete);
+			}
 		}
 	}
 
-	// Destroy all managed entities
-	for (auto& Pair : ManagedEntities)
+	// Destroy all managed actors
+	for (auto& Pair : ManagedPlayers)
 	{
 		if (Pair.Value && IsValid(Pair.Value))
 		{
 			Pair.Value->Destroy();
 		}
 	}
-	ManagedEntities.Empty();
-	LocalPlayerEntityId = FNyxEntityId();
+	ManagedPlayers.Empty();
+	LocalPlayerPawn = nullptr;
 
 	bIsListening = false;
 	UE_LOG(LogNyxWorld, Log, TEXT("NyxEntityManager stopped listening"));
 }
 
-AActor* UNyxEntityManager::GetEntityActor(FNyxEntityId EntityId) const
+// ─── Accessors ─────────────────────────────────────────────────────
+
+AActor* UNyxEntityManager::GetPlayerActor(const FSpacetimeDBIdentity& Identity) const
 {
-	const TObjectPtr<AActor>* Found = ManagedEntities.Find(EntityId.Value);
+	const FString Key = IdentityKey(Identity);
+	const TObjectPtr<AActor>* Found = ManagedPlayers.Find(Key);
 	return Found ? Found->Get() : nullptr;
 }
 
-void UNyxEntityManager::HandlePlayerInserted(const FNyxPlayerData& PlayerData)
+FString UNyxEntityManager::IdentityKey(const FSpacetimeDBIdentity& Id)
 {
-	UE_LOG(LogNyxWorld, Log, TEXT("Player inserted: EntityId=%s, Name=%s"),
-		*PlayerData.EntityId.ToString(), *PlayerData.Identity.DisplayName);
+	return Id.ToHex();
+}
 
-	// Check if we already have this entity (shouldn't happen, but guard)
-	if (ManagedEntities.Contains(PlayerData.EntityId.Value))
+// ─── Table Event Handlers ──────────────────────────────────────────
+
+void UNyxEntityManager::HandlePlayerInsert(const FEventContext& Context, const FPlayerType& NewRow)
+{
+	const FString Key = IdentityKey(NewRow.Identity);
+
+	// Guard against duplicates (can happen on subscription re-apply)
+	if (ManagedPlayers.Contains(Key))
 	{
-		UE_LOG(LogNyxWorld, Warning, TEXT("Entity %s already exists, updating instead"),
-			*PlayerData.EntityId.ToString());
-		HandlePlayerUpdated(PlayerData, PlayerData);
+		UE_LOG(LogNyxWorld, Verbose, TEXT("Player %s already managed, skipping insert"), *NewRow.DisplayName);
 		return;
 	}
 
-	AActor* NewActor = SpawnEntityActor(PlayerData);
-	if (NewActor)
+	UGameInstance* GI = GetWorld()->GetGameInstance();
+	UNyxNetworkSubsystem* NetworkSub = GI ? GI->GetSubsystem<UNyxNetworkSubsystem>() : nullptr;
+	bool bIsLocal = NetworkSub && NetworkSub->IsLocalIdentity(NewRow.Identity);
+
+	AActor* Actor = SpawnPlayerActor(NewRow, bIsLocal);
+	if (Actor)
 	{
-		ManagedEntities.Add(PlayerData.EntityId.Value, NewActor);
-		OnEntitySpawnedBP.Broadcast(PlayerData.EntityId, NewActor);
+		UE_LOG(LogNyxWorld, Log, TEXT("Player inserted: %s (%s) at (%.0f, %.0f, %.0f)"),
+			*NewRow.DisplayName, bIsLocal ? TEXT("LOCAL") : TEXT("REMOTE"),
+			NewRow.PosX, NewRow.PosY, NewRow.PosZ);
 	}
 }
 
-void UNyxEntityManager::HandlePlayerUpdated(const FNyxPlayerData& OldData, const FNyxPlayerData& NewData)
+void UNyxEntityManager::HandlePlayerUpdate(const FEventContext& Context, const FPlayerType& OldRow, const FPlayerType& NewRow)
 {
-	TObjectPtr<AActor>* ActorPtr = ManagedEntities.Find(NewData.EntityId.Value);
+	const FString Key = IdentityKey(NewRow.Identity);
+	TObjectPtr<AActor>* ActorPtr = ManagedPlayers.Find(Key);
+
 	if (!ActorPtr || !IsValid(*ActorPtr))
 	{
-		UE_LOG(LogNyxWorld, Warning, TEXT("Update for unknown entity %s, spawning"),
-			*NewData.EntityId.ToString());
-		HandlePlayerInserted(NewData);
+		// Actor doesn't exist — spawn it (can happen if insert was missed)
+		UE_LOG(LogNyxWorld, Warning, TEXT("Update for unknown player %s, spawning"), *NewRow.DisplayName);
+
+		UGameInstance* GI = GetWorld()->GetGameInstance();
+		UNyxNetworkSubsystem* NetworkSub = GI ? GI->GetSubsystem<UNyxNetworkSubsystem>() : nullptr;
+		bool bIsLocal = NetworkSub && NetworkSub->IsLocalIdentity(NewRow.Identity);
+		SpawnPlayerActor(NewRow, bIsLocal);
 		return;
 	}
 
-	AActor* Actor = ActorPtr->Get();
-	UpdateEntityActor(Actor, NewData);
-	OnEntityUpdatedBP.Broadcast(NewData.EntityId, Actor);
+	// Route the update to the movement component
+	UNyxMovementComponent* MoveComp = (*ActorPtr)->FindComponentByClass<UNyxMovementComponent>();
+	if (MoveComp)
+	{
+		MoveComp->OnServerUpdate(OldRow, NewRow);
+	}
+	else
+	{
+		// No movement component — direct position set (fallback)
+		(*ActorPtr)->SetActorLocation(FVector(NewRow.PosX, NewRow.PosY, NewRow.PosZ));
+		(*ActorPtr)->SetActorRotation(FRotator(0.f, NewRow.RotYaw, 0.f));
+	}
 }
 
-void UNyxEntityManager::HandlePlayerDeleted(const FNyxPlayerData& PlayerData)
+void UNyxEntityManager::HandlePlayerDelete(const FEventContext& Context, const FPlayerType& DeletedRow)
 {
-	UE_LOG(LogNyxWorld, Log, TEXT("Player deleted: EntityId=%s"), *PlayerData.EntityId.ToString());
+	const FString Key = IdentityKey(DeletedRow.Identity);
 
-	TObjectPtr<AActor>* ActorPtr = ManagedEntities.Find(PlayerData.EntityId.Value);
+	TObjectPtr<AActor>* ActorPtr = ManagedPlayers.Find(Key);
 	if (ActorPtr && IsValid(*ActorPtr))
 	{
-		(*ActorPtr)->Destroy();
+		AActor* Actor = ActorPtr->Get();
+		OnPlayerRemovedBP.Broadcast(Actor);
+
+		// If this is the local player pawn, unpossess first
+		if (Actor == LocalPlayerPawn)
+		{
+			LocalPlayerPawn = nullptr;
+		}
+
+		Actor->Destroy();
+		UE_LOG(LogNyxWorld, Log, TEXT("Player deleted: %s"), *DeletedRow.DisplayName);
 	}
 
-	ManagedEntities.Remove(PlayerData.EntityId.Value);
-	OnEntityDestroyedBP.Broadcast(PlayerData.EntityId);
+	ManagedPlayers.Remove(Key);
 }
 
-AActor* UNyxEntityManager::SpawnEntityActor(const FNyxPlayerData& Data)
+// ─── Spawning ──────────────────────────────────────────────────────
+
+AActor* UNyxEntityManager::SpawnPlayerActor(const FPlayerType& PlayerData, bool bIsLocal)
 {
 	UWorld* World = GetWorld();
-	if (!World)
-	{
-		UE_LOG(LogNyxWorld, Error, TEXT("No world available for spawning"));
-		return nullptr;
-	}
+	if (!World) return nullptr;
 
-	// Determine the class to spawn
-	UClass* SpawnClass = RemotePlayerActorClass.Get();
-	if (!SpawnClass)
-	{
-		// Fallback: spawn a basic actor. In production, this should always be configured.
-		UE_LOG(LogNyxWorld, Warning, TEXT("No RemotePlayerActorClass set, spawning default AActor"));
-		SpawnClass = AActor::StaticClass();
-	}
+	const FString Key = IdentityKey(PlayerData.Identity);
+
+	FVector SpawnPos(PlayerData.PosX, PlayerData.PosY, PlayerData.PosZ);
+	FRotator SpawnRot(0.f, PlayerData.RotYaw, 0.f);
 
 	FActorSpawnParameters SpawnParams;
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
-	FTransform SpawnTransform;
-	SpawnTransform.SetLocation(Data.Position.Location);
-	SpawnTransform.SetRotation(Data.Position.Rotation.Quaternion());
+	AActor* SpawnedActor = nullptr;
 
-	AActor* SpawnedActor = World->SpawnActor<AActor>(SpawnClass, SpawnTransform, SpawnParams);
-	if (SpawnedActor)
+	if (bIsLocal)
 	{
-		UE_LOG(LogNyxWorld, Log, TEXT("Spawned entity %s at %s"),
-			*Data.EntityId.ToString(), *Data.Position.Location.ToString());
-	}
+		// Spawn the local player pawn
+		UClass* PawnClass = LocalPlayerPawnClass.Get();
+		if (!PawnClass)
+		{
+			PawnClass = ANyxPlayerPawn::StaticClass();
+		}
 
-	return SpawnedActor;
-}
+		ANyxPlayerPawn* Pawn = World->SpawnActor<ANyxPlayerPawn>(PawnClass, SpawnPos, SpawnRot, SpawnParams);
+		if (Pawn)
+		{
+			LocalPlayerPawn = Pawn;
 
-void UNyxEntityManager::UpdateEntityActor(AActor* Actor, const FNyxPlayerData& NewData)
-{
-	if (!Actor)
-	{
-		return;
-	}
+			// Init movement component for local prediction
+			UGameInstance* GI = World->GetGameInstance();
+			UNyxNetworkSubsystem* NetworkSub = GI ? GI->GetSubsystem<UNyxNetworkSubsystem>() : nullptr;
+			UDbConnection* Conn = NetworkSub ? NetworkSub->GetSpacetimeDBConnection() : nullptr;
 
-	// For remote players: interpolate to new position
-	// For local player: reconcile with server state (prediction)
-	// TODO (Spike 6): Implement proper interpolation and prediction
+			if (UNyxMovementComponent* MoveComp = Pawn->GetNyxMovement())
+			{
+				MoveComp->InitAsLocalPlayer(Conn);
+			}
 
-	if (IsLocalPlayer(NewData.EntityId))
-	{
-		// Server reconciliation for local player
-		// For now, just log the server position — prediction system comes in Spike 6
-		UE_LOG(LogNyxWorld, Verbose, TEXT("Server position for local player: %s"),
-			*NewData.Position.Location.ToString());
+			// Have the first player controller possess this pawn
+			APlayerController* PC = World->GetFirstPlayerController();
+			if (PC)
+			{
+				PC->Possess(Pawn);
+				UE_LOG(LogNyxWorld, Log, TEXT("Local player possessed NyxPlayerPawn"));
+			}
+
+			SpawnedActor = Pawn;
+		}
 	}
 	else
 	{
-		// Remote player: set position directly for now (interpolation comes in Spike 6)
-		Actor->SetActorLocationAndRotation(
-			NewData.Position.Location,
-			NewData.Position.Rotation);
+		// Spawn a remote player actor — use NyxPlayerPawn with remote movement
+		UClass* PawnClass = ANyxPlayerPawn::StaticClass();
+		AActor* RemoteActor = World->SpawnActor<AActor>(PawnClass, SpawnPos, SpawnRot, SpawnParams);
+
+		if (RemoteActor)
+		{
+			if (UNyxMovementComponent* MoveComp = RemoteActor->FindComponentByClass<UNyxMovementComponent>())
+			{
+				MoveComp->InitAsRemotePlayer();
+			}
+			SpawnedActor = RemoteActor;
+		}
 	}
+
+	if (SpawnedActor)
+	{
+		ManagedPlayers.Add(Key, SpawnedActor);
+		OnPlayerSpawnedBP.Broadcast(SpawnedActor, bIsLocal);
+	}
+
+	return SpawnedActor;
 }

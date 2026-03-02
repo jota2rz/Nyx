@@ -36,12 +36,15 @@ struct NYX_API FPlayerType
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SpacetimeDB")
     int32 ChunkY = 0;
 
+    // NOTE: uint32 field not exposed to Blueprint due to non-blueprintable elements
+    uint32 Seq = 0;
+
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SpacetimeDB")
     FSpacetimeDBTimestamp LastUpdate;
 
     FORCEINLINE bool operator==(const FPlayerType& Other) const
     {
-        return Identity == Other.Identity && DisplayName == Other.DisplayName && PosX == Other.PosX && PosY == Other.PosY && PosZ == Other.PosZ && RotYaw == Other.RotYaw && ChunkX == Other.ChunkX && ChunkY == Other.ChunkY && LastUpdate == Other.LastUpdate;
+        return Identity == Other.Identity && DisplayName == Other.DisplayName && PosX == Other.PosX && PosY == Other.PosY && PosZ == Other.PosZ && RotYaw == Other.RotYaw && ChunkX == Other.ChunkX && ChunkY == Other.ChunkY && Seq == Other.Seq && LastUpdate == Other.LastUpdate;
     }
 
     FORCEINLINE bool operator!=(const FPlayerType& Other) const
@@ -66,6 +69,7 @@ FORCEINLINE uint32 GetTypeHash(const FPlayerType& PlayerType)
     Hash = HashCombine(Hash, GetTypeHash(PlayerType.RotYaw));
     Hash = HashCombine(Hash, GetTypeHash(PlayerType.ChunkX));
     Hash = HashCombine(Hash, GetTypeHash(PlayerType.ChunkY));
+    Hash = HashCombine(Hash, GetTypeHash(PlayerType.Seq));
     Hash = HashCombine(Hash, GetTypeHash(PlayerType.LastUpdate));
     return Hash;
 }
@@ -74,5 +78,5 @@ namespace UE::SpacetimeDB
 {
     UE_SPACETIMEDB_ENABLE_TARRAY(FPlayerType);
 
-    UE_SPACETIMEDB_STRUCT(FPlayerType, Identity, DisplayName, PosX, PosY, PosZ, RotYaw, ChunkX, ChunkY, LastUpdate);
+    UE_SPACETIMEDB_STRUCT(FPlayerType, Identity, DisplayName, PosX, PosY, PosZ, RotYaw, ChunkX, ChunkY, Seq, LastUpdate);
 }

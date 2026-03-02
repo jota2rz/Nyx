@@ -262,7 +262,7 @@ bool URemoteReducers::InvokeCreatePlayerWithArgs(const FReducerEventContext& Con
     return true;
 }
 
-void URemoteReducers::MovePlayer(const double X, const double Y, const double Z, const float Yaw)
+void URemoteReducers::MovePlayer(const double X, const double Y, const double Z, const float Yaw, const uint32 Seq)
 {
     if (!Conn)
     {
@@ -270,7 +270,7 @@ void URemoteReducers::MovePlayer(const double X, const double Y, const double Z,
         return;
     }
 
-	Conn->CallReducerTyped(TEXT("move_player"), FMovePlayerArgs(X, Y, Z, Yaw), SetCallReducerFlags);
+	Conn->CallReducerTyped(TEXT("move_player"), FMovePlayerArgs(X, Y, Z, Yaw, Seq), SetCallReducerFlags);
 }
 
 bool URemoteReducers::InvokeMovePlayer(const FReducerEventContext& Context, const UMovePlayerReducer* Args)
@@ -287,7 +287,7 @@ bool URemoteReducers::InvokeMovePlayer(const FReducerEventContext& Context, cons
         return false;
     }
 
-    OnMovePlayer.Broadcast(Context, Args->X, Args->Y, Args->Z, Args->Yaw);
+    OnMovePlayer.Broadcast(Context, Args->X, Args->Y, Args->Z, Args->Yaw, Args->Seq);
     return true;
 }
 
@@ -302,7 +302,7 @@ bool URemoteReducers::InvokeMovePlayerWithArgs(const FReducerEventContext& Conte
         return false;
     }
 
-    OnMovePlayer.Broadcast(Context, Args.X, Args.Y, Args.Z, Args.Yaw);
+    OnMovePlayer.Broadcast(Context, Args.X, Args.Y, Args.Z, Args.Yaw, Args.Seq);
     return true;
 }
 

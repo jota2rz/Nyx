@@ -768,19 +768,20 @@ public:
     bool InvokeCreatePlayer(const FReducerEventContext& Context, const UCreatePlayerReducer* Args);
     bool InvokeCreatePlayerWithArgs(const FReducerEventContext& Context, const FCreatePlayerArgs& Args);
 
-    DECLARE_DYNAMIC_MULTICAST_DELEGATE_FiveParams(
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(
         FMovePlayerHandler,
         const FReducerEventContext&, Context,
         double, X,
         double, Y,
         double, Z,
-        float, Yaw
+        float, Yaw,
+        uint32, Seq
     );
-    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
     FMovePlayerHandler OnMovePlayer;
 
-    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
-    void MovePlayer(const double X, const double Y, const double Z, const float Yaw);
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void MovePlayer(const double X, const double Y, const double Z, const float Yaw, const uint32 Seq);
 
     bool InvokeMovePlayer(const FReducerEventContext& Context, const UMovePlayerReducer* Args);
     bool InvokeMovePlayerWithArgs(const FReducerEventContext& Context, const FMovePlayerArgs& Args);

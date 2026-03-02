@@ -4,6 +4,10 @@
 #include "Nyx/Nyx.h"
 #include "Nyx/Online/NyxAuthSubsystem.h"
 #include "Nyx/Core/NyxNetworkSubsystem.h"
+#include "Nyx/Core/NyxGameMode.h"
+#include "Nyx/World/NyxEntityManager.h"
+#include "Nyx/Player/NyxPlayerPawn.h"
+#include "Nyx/Player/NyxMovementComponent.h"
 #include "ModuleBindings/SpacetimeDBClient.g.h"
 
 void UNyxGameInstance::Init()
@@ -210,8 +214,8 @@ void UNyxGameInstance::RegisterConsoleCommands()
 			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
 			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
 			{
-				// Update server position
-				NetworkSub->GetSpacetimeDBConnection()->Reducers->MovePlayer(X, Y, Z, 0.0f);
+				// Update server position (seq=0 for debug teleport)
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->MovePlayer(X, Y, Z, 0.0f, 0);
 				// Update spatial subscription for new position
 				NetworkSub->UpdateSpatialSubscription(FVector(X, Y, Z));
 			}
@@ -222,7 +226,70 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move"));
+	// Nyx.Walk <dx> <dy> <dz> — relative movement for testing prediction
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Walk"),
+		TEXT("Apply relative movement to local player pawn. Usage: Nyx.Walk <dx> <dy> <dz>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			if (Args.Num() < 2)
+			{
+				UE_LOG(LogNyx, Warning, TEXT("Usage: Nyx.Walk <dx> <dy> [dz]"));
+				return;
+			}
+
+			const float DX = FCString::Atof(*Args[0]);
+			const float DY = FCString::Atof(*Args[1]);
+			const float DZ = Args.Num() > 2 ? FCString::Atof(*Args[2]) : 0.f;
+
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Walk %.0f %.0f %.0f"), DX, DY, DZ);
+
+			// Find the local player pawn's movement component and add input
+			UWorld* World = GetWorld();
+			if (!World) return;
+
+			UNyxEntityManager* EntityMgr = World->GetSubsystem<UNyxEntityManager>();
+			if (EntityMgr && EntityMgr->GetLocalPlayerPawn())
+			{
+				if (UNyxMovementComponent* MoveComp = EntityMgr->GetLocalPlayerPawn()->GetNyxMovement())
+				{
+					FVector Dir(DX, DY, DZ);
+					Dir.Normalize();
+					MoveComp->AddMovementInput(Dir);
+					UE_LOG(LogNyx, Log, TEXT("Walk input applied: (%.1f, %.1f, %.1f)"), Dir.X, Dir.Y, Dir.Z);
+				}
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("No local player pawn available! Call Nyx.EnterWorld first."));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.EnterWorld — create player and start entity listening (bypasses auth flow)
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.EnterWorld"),
+		TEXT("Create player and start entity listening (use after Nyx.Connect)"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.EnterWorld"));
+
+			UWorld* World = GetWorld();
+			if (!World) return;
+
+			ANyxGameMode* GM = Cast<ANyxGameMode>(World->GetAuthGameMode());
+			if (GM)
+			{
+				GM->EnterWorld();
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("GameMode is not ANyxGameMode!"));
+			}
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.EnterWorld"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()

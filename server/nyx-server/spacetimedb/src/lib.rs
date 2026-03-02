@@ -1,4 +1,4 @@
-// Nyx MMO — SpacetimeDB Server Module (Spikes 1–5)
+// Nyx MMO — SpacetimeDB Server Module (Spikes 1–6)
 //
 // Tables:
 //   - player: Active player state (position, chunk, display name)
@@ -62,6 +62,9 @@ pub struct Player {
     pub chunk_x: i32,
     /// Spatial chunk coordinate (derived from pos_y / CHUNK_SIZE)
     pub chunk_y: i32,
+    /// Move sequence number for client-side prediction reconciliation.
+    /// Echoed back in OnUpdate so the client can discard confirmed predictions.
+    pub seq: u32,
     pub last_update: Timestamp,
 }
 
@@ -171,6 +174,7 @@ pub fn create_player(ctx: &ReducerContext, display_name: String) {
         rot_yaw: 0.0,
         chunk_x: pos_to_chunk(spawn_x),
         chunk_y: pos_to_chunk(spawn_y),
+        seq: 0,
         last_update: ctx.timestamp,
     });
 
@@ -178,8 +182,9 @@ pub fn create_player(ctx: &ReducerContext, display_name: String) {
 }
 
 /// Move the calling player to a new position.
+/// `seq` is the client's prediction sequence number, echoed back for reconciliation.
 #[spacetimedb::reducer]
-pub fn move_player(ctx: &ReducerContext, x: f64, y: f64, z: f64, yaw: f32) {
+pub fn move_player(ctx: &ReducerContext, x: f64, y: f64, z: f64, yaw: f32, seq: u32) {
     if let Some(mut player) = ctx.db.player().identity().find(ctx.sender()) {
         player.pos_x = x;
         player.pos_y = y;
@@ -187,6 +192,7 @@ pub fn move_player(ctx: &ReducerContext, x: f64, y: f64, z: f64, yaw: f32) {
         player.rot_yaw = yaw;
         player.chunk_x = pos_to_chunk(x);
         player.chunk_y = pos_to_chunk(y);
+        player.seq = seq;
         player.last_update = ctx.timestamp;
         ctx.db.player().identity().update(player);
     } else {

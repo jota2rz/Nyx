@@ -6,6 +6,7 @@
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "Nyx/Data/NyxTypes.h"
 #include "ModuleBindings/SpacetimeDBClient.g.h"
+#include "ModuleBindings/Types/PlayerType.g.h"
 #include "NyxNetworkSubsystem.generated.h"
 
 class INyxDatabaseInterface;
@@ -58,6 +59,12 @@ public:
 
 	/** True when connected via mock (not real SpacetimeDB). */
 	bool IsMockConnection() const { return DatabaseInterface != nullptr && SpacetimeDBConnection == nullptr; }
+
+	/** Get the local player's SpacetimeDB identity (set on connect). */
+	const FSpacetimeDBIdentity& GetLocalIdentity() const { return LocalIdentity; }
+
+	/** Check if a given identity is the local player. */
+	bool IsLocalIdentity(const FSpacetimeDBIdentity& Identity) const { return Identity == LocalIdentity; }
 
 	/**
 	 * Subscribe to spatial queries for the area around a position.
@@ -113,6 +120,9 @@ private:
 
 	/** Auth token from SpacetimeDB for reconnection. */
 	FString SpacetimeDBToken;
+
+	/** Local player's SpacetimeDB identity (set on connect). */
+	FSpacetimeDBIdentity LocalIdentity;
 
 	/** Typed pointer to the interface (non-owning, points to DatabaseConnectionObject). */
 	INyxDatabaseInterface* DatabaseInterface = nullptr;

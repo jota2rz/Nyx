@@ -5,25 +5,21 @@
 #include "CoreMinimal.h"
 #include "Subsystems/WorldSubsystem.h"
 #include "Nyx/Data/NyxTypes.h"
+#include "ModuleBindings/Types/PlayerType.g.h"
 #include "NyxEntityManager.generated.h"
+
+class UNyxMovementComponent;
+class ANyxPlayerPawn;
+struct FEventContext;
 
 /**
  * World subsystem that manages actor lifecycle based on SpacetimeDB table events.
  *
- * Replaces UE5's built-in replication. Instead of:
- *   - UPROPERTY(Replicated)
- *   - UFUNCTION(Server/Client)
- *   - APlayerState
- *
- * We use:
- *   - SpacetimeDB table rows → Actor spawn/update/destroy
- *   - Reducer calls → Server RPCs
- *   - Subscription queries → Interest management
- *
- * Flow:
- *   1. SpacetimeDB row inserted → OnPlayerInserted → Spawn actor
- *   2. SpacetimeDB row updated  → OnPlayerUpdated  → Update actor transform
- *   3. SpacetimeDB row deleted  → OnPlayerDeleted  → Destroy actor
+ * Spike 6 update:
+ *  - Wires directly to PlayerTable::OnInsert/OnUpdate/OnDelete
+ *  - Spawns ANyxPlayerPawn for local player (with prediction)
+ *  - Spawns basic actors for remote players (with interpolation)
+ *  - Routes server updates to UNyxMovementComponent for reconciliation
  */
 UCLASS()
 class NYX_API UNyxEntityManager : public UWorldSubsystem
@@ -36,8 +32,8 @@ public:
 	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
 
 	/**
-	 * Start listening for database events from the network subsystem.
-	 * Call this after authentication is complete.
+	 * Start listening for SpacetimeDB table events.
+	 * Call this after the spatial subscription is applied.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Nyx|World")
 	void StartListening();
@@ -46,62 +42,56 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "Nyx|World")
 	void StopListening();
 
-	/** Get the actor for a given entity ID. */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|World")
-	AActor* GetEntityActor(FNyxEntityId EntityId) const;
+	/** Get the actor for a given player identity. */
+	AActor* GetPlayerActor(const FSpacetimeDBIdentity& Identity) const;
 
-	/** Get the entity ID associated with a local player. */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|World")
-	FNyxEntityId GetLocalPlayerEntityId() const { return LocalPlayerEntityId; }
-
-	/** Check if an entity is the local player. */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|World")
-	bool IsLocalPlayer(FNyxEntityId EntityId) const { return EntityId == LocalPlayerEntityId; }
+	/** Get the local player's pawn (null until spawned). */
+	ANyxPlayerPawn* GetLocalPlayerPawn() const { return LocalPlayerPawn; }
 
 	// ──── Delegates ────
 
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEntitySpawnedBP, FNyxEntityId, EntityId, AActor*, Actor);
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnEntityUpdatedBP, FNyxEntityId, EntityId, AActor*, Actor);
-	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnEntityDestroyedBP, FNyxEntityId, EntityId);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOnPlayerSpawnedBP, AActor*, Actor, bool, bIsLocal);
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnPlayerRemovedBP, AActor*, Actor);
 
 	UPROPERTY(BlueprintAssignable, Category = "Nyx|World")
-	FOnEntitySpawnedBP OnEntitySpawnedBP;
+	FOnPlayerSpawnedBP OnPlayerSpawnedBP;
 
 	UPROPERTY(BlueprintAssignable, Category = "Nyx|World")
-	FOnEntityUpdatedBP OnEntityUpdatedBP;
-
-	UPROPERTY(BlueprintAssignable, Category = "Nyx|World")
-	FOnEntityDestroyedBP OnEntityDestroyedBP;
+	FOnPlayerRemovedBP OnPlayerRemovedBP;
 
 	/**
-	 * The actor class to spawn for remote players.
-	 * TODO: Make this configurable via data asset.
+	 * The pawn class to spawn for the local player.
+	 * Should be ANyxPlayerPawn or subclass.
 	 */
 	UPROPERTY(EditAnywhere, Category = "Nyx|World")
-	TSubclassOf<AActor> RemotePlayerActorClass;
+	TSubclassOf<ANyxPlayerPawn> LocalPlayerPawnClass;
 
 private:
-	void HandlePlayerInserted(const FNyxPlayerData& PlayerData);
-	void HandlePlayerUpdated(const FNyxPlayerData& OldData, const FNyxPlayerData& NewData);
-	void HandlePlayerDeleted(const FNyxPlayerData& PlayerData);
+	// ──── SpacetimeDB table callbacks (AddDynamic-compatible) ────
 
-	/** Spawns an actor for an entity */
-	AActor* SpawnEntityActor(const FNyxPlayerData& Data);
+	UFUNCTION()
+	void HandlePlayerInsert(const FEventContext& Context, const FPlayerType& NewRow);
 
-	/** Updates an existing actor's transform and state */
-	void UpdateEntityActor(AActor* Actor, const FNyxPlayerData& NewData);
+	UFUNCTION()
+	void HandlePlayerUpdate(const FEventContext& Context, const FPlayerType& OldRow, const FPlayerType& NewRow);
 
-	/** Maps SpacetimeDB entity IDs to spawned UE5 actors */
+	UFUNCTION()
+	void HandlePlayerDelete(const FEventContext& Context, const FPlayerType& DeletedRow);
+
+	/** Spawn an actor for a player. Returns the spawned actor. */
+	AActor* SpawnPlayerActor(const FPlayerType& PlayerData, bool bIsLocal);
+
+	/** Maps SpacetimeDB identities (as hex string) to spawned actors */
 	UPROPERTY()
-	TMap<int64, TObjectPtr<AActor>> ManagedEntities;
+	TMap<FString, TObjectPtr<AActor>> ManagedPlayers;
 
-	/** The local player's entity ID (set when our CreatePlayer reducer succeeds) */
-	FNyxEntityId LocalPlayerEntityId;
+	/** The local player's pawn (kept as typed reference for convenience) */
+	UPROPERTY()
+	TObjectPtr<ANyxPlayerPawn> LocalPlayerPawn;
 
 	/** Whether we're actively listening for DB events */
 	bool bIsListening = false;
 
-	FDelegateHandle InsertHandle;
-	FDelegateHandle UpdateHandle;
-	FDelegateHandle DeleteHandle;
+	/** Helper to convert FSpacetimeDBIdentity to map key */
+	static FString IdentityKey(const FSpacetimeDBIdentity& Id);
 };

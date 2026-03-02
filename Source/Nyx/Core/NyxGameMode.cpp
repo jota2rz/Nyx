@@ -5,8 +5,8 @@
 #include "Nyx/Core/NyxGameInstance.h"
 #include "Nyx/Online/NyxAuthSubsystem.h"
 #include "Nyx/Core/NyxNetworkSubsystem.h"
-#include "Nyx/Networking/NyxDatabaseInterface.h"
 #include "Nyx/World/NyxEntityManager.h"
+#include "ModuleBindings/SpacetimeDBClient.g.h"
 
 ANyxGameMode::ANyxGameMode()
 {
@@ -51,34 +51,38 @@ void ANyxGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void ANyxGameMode::EnterWorld()
 {
-	UE_LOG(LogNyx, Log, TEXT("EnterWorld: Starting entity listening and world subscription"));
+	UE_LOG(LogNyx, Log, TEXT("EnterWorld: Setting up world subscription and creating player"));
 
-	// Start entity manager
+	UGameInstance* GI = GetGameInstance();
+	if (!GI) return;
+
+	UNyxNetworkSubsystem* NetworkSub = GI->GetSubsystem<UNyxNetworkSubsystem>();
+	if (!NetworkSub) return;
+
+	// Subscribe to spawn area (0, 0, 0 for now)
+	NetworkSub->UpdateSpatialSubscription(FVector::ZeroVector);
+
+	// Start entity manager FIRST so it catches the OnInsert from CreatePlayer
 	UNyxEntityManager* EntityMgr = GetWorld()->GetSubsystem<UNyxEntityManager>();
 	if (EntityMgr)
 	{
 		EntityMgr->StartListening();
 	}
 
-	// Subscribe to world data around spawn point
-	UGameInstance* GI = GetGameInstance();
-	if (GI)
+	// Now create the player — the OnInsert will be caught by EntityManager
+	UDbConnection* Conn = NetworkSub->GetSpacetimeDBConnection();
+	if (Conn && Conn->Reducers)
 	{
-		UNyxNetworkSubsystem* NetworkSub = GI->GetSubsystem<UNyxNetworkSubsystem>();
-		if (NetworkSub)
-		{
-			// Subscribe to spawn area (0, 0, 0 for now)
-			NetworkSub->UpdateSpatialSubscription(FVector::ZeroVector);
+		UNyxAuthSubsystem* AuthSub = GI->GetSubsystem<UNyxAuthSubsystem>();
+		FString PlayerName = AuthSub ? AuthSub->GetLocalPlayerIdentity().DisplayName : TEXT("Player");
+		if (PlayerName.IsEmpty()) PlayerName = TEXT("Player");
 
-			// Create the local player in the world
-			INyxDatabaseInterface* Db = NetworkSub->GetDatabaseInterface();
-			if (Db)
-			{
-				UNyxAuthSubsystem* AuthSub = GI->GetSubsystem<UNyxAuthSubsystem>();
-				FString PlayerName = AuthSub ? AuthSub->GetLocalPlayerIdentity().DisplayName : TEXT("Player");
-				Db->CallCreatePlayer(PlayerName);
-			}
-		}
+		Conn->Reducers->CreatePlayer(PlayerName);
+		UE_LOG(LogNyx, Log, TEXT("EnterWorld: Called CreatePlayer('%s')"), *PlayerName);
+	}
+	else
+	{
+		UE_LOG(LogNyx, Warning, TEXT("EnterWorld: No SpacetimeDB connection available for CreatePlayer"));
 	}
 }
 

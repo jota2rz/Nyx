@@ -25,16 +25,19 @@ struct NYX_API FMovePlayerArgs
     UPROPERTY(BlueprintReadWrite, Category="SpacetimeDB")
     float Yaw = 0.0f;
 
+    // NOTE: uint32 field not exposed to Blueprint due to non-blueprintable elements
+    uint32 Seq = 0;
+
     FMovePlayerArgs() = default;
 
-    FMovePlayerArgs(const double& InX, const double& InY, const double& InZ, const float& InYaw)
-        : X(InX), Y(InY), Z(InZ), Yaw(InYaw)
+    FMovePlayerArgs(const double& InX, const double& InY, const double& InZ, const float& InYaw, const uint32& InSeq)
+        : X(InX), Y(InY), Z(InZ), Yaw(InYaw), Seq(InSeq)
     {}
 
 
     FORCEINLINE bool operator==(const FMovePlayerArgs& Other) const
     {
-        return X == Other.X && Y == Other.Y && Z == Other.Z && Yaw == Other.Yaw;
+        return X == Other.X && Y == Other.Y && Z == Other.Z && Yaw == Other.Yaw && Seq == Other.Seq;
     }
     FORCEINLINE bool operator!=(const FMovePlayerArgs& Other) const
     {
@@ -44,7 +47,7 @@ struct NYX_API FMovePlayerArgs
 
 namespace UE::SpacetimeDB
 {
-    UE_SPACETIMEDB_STRUCT(FMovePlayerArgs, X, Y, Z, Yaw);
+    UE_SPACETIMEDB_STRUCT(FMovePlayerArgs, X, Y, Z, Yaw, Seq);
 }
 
 // Reducer class for internal dispatching
@@ -62,6 +65,8 @@ public:
     double Z = 0.0;
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     float Yaw = 0.0f;
+    // NOTE: uint32 field not exposed to Blueprint due to non-blueprintable elements
+    uint32 Seq = 0;
 
 };
 
