@@ -289,7 +289,190 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.EnterWorld"));
+	// ─── Spike 7: Benchmark Console Commands ──────────────────────────
+
+	// Nyx.Bench <simple|medium|complex|burst|burstupdate> <count>
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Bench"),
+		TEXT("Run benchmark. Usage: Nyx.Bench <simple|medium|complex|burst|burstupdate> <count>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			if (Args.Num() < 2)
+			{
+				UE_LOG(LogNyx, Warning, TEXT("Usage: Nyx.Bench <simple|medium|complex|burst|burstupdate> <count>"));
+				return;
+			}
+
+			const FString Type = Args[0].ToLower();
+			const int32 Count = FCString::Atoi(*Args[1]);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (!NetworkSub || !NetworkSub->GetSpacetimeDBConnection())
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+				return;
+			}
+
+			UDbConnection* Conn = NetworkSub->GetSpacetimeDBConnection();
+			const double StartTime = FPlatformTime::Seconds();
+
+			if (Type == TEXT("burst"))
+			{
+				// Single reducer call that does N operations internally
+				UE_LOG(LogNyx, Log, TEXT("Bench BURST: %d ops in one reducer call"), Count);
+				Conn->Reducers->BenchBurst(Count);
+			}
+			else if (Type == TEXT("burstupdate"))
+			{
+				// Single reducer call that updates N entity rows
+				UE_LOG(LogNyx, Log, TEXT("Bench BURST UPDATE: %d entity updates in one reducer call"), Count);
+				Conn->Reducers->BenchBurstUpdate(Count);
+			}
+			else if (Type == TEXT("simple"))
+			{
+				// Fire N individual reducer calls
+				UE_LOG(LogNyx, Log, TEXT("Bench SIMPLE: firing %d individual reducer calls..."), Count);
+				for (int32 i = 0; i < Count; ++i)
+				{
+					Conn->Reducers->BenchSimple();
+				}
+				const double Elapsed = FPlatformTime::Seconds() - StartTime;
+				UE_LOG(LogNyx, Log, TEXT("Bench SIMPLE: %d calls dispatched in %.3f sec (%.0f calls/sec dispatch rate)"),
+					Count, Elapsed, Count / FMath::Max(Elapsed, 0.001));
+			}
+			else if (Type == TEXT("medium"))
+			{
+				UE_LOG(LogNyx, Log, TEXT("Bench MEDIUM: firing %d individual reducer calls..."), Count);
+				for (int32 i = 0; i < Count; ++i)
+				{
+					Conn->Reducers->BenchMedium();
+				}
+				const double Elapsed = FPlatformTime::Seconds() - StartTime;
+				UE_LOG(LogNyx, Log, TEXT("Bench MEDIUM: %d calls dispatched in %.3f sec (%.0f calls/sec dispatch rate)"),
+					Count, Elapsed, Count / FMath::Max(Elapsed, 0.001));
+			}
+			else if (Type == TEXT("complex"))
+			{
+				UE_LOG(LogNyx, Log, TEXT("Bench COMPLEX: firing %d individual reducer calls..."), Count);
+				for (int32 i = 0; i < Count; ++i)
+				{
+					Conn->Reducers->BenchComplex();
+				}
+				const double Elapsed = FPlatformTime::Seconds() - StartTime;
+				UE_LOG(LogNyx, Log, TEXT("Bench COMPLEX: %d calls dispatched in %.3f sec (%.0f calls/sec dispatch rate)"),
+					Count, Elapsed, Count / FMath::Max(Elapsed, 0.001));
+			}
+			else
+			{
+				UE_LOG(LogNyx, Warning, TEXT("Unknown bench type '%s'. Use: simple, medium, complex, burst, burstupdate"), *Type);
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.BenchSeed <count> — seed bench entities
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.BenchSeed"),
+		TEXT("Seed bench entities. Usage: Nyx.BenchSeed <count>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			const uint32 Count = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 100;
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.BenchSeed %d"), Count);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->BenchSeed(Count);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.BenchReset — clear all benchmark data
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.BenchReset"),
+		TEXT("Clear all benchmark data"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.BenchReset"));
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->BenchReset();
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.BenchTick <interval_ms> — start scheduled game tick
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.BenchTick"),
+		TEXT("Start scheduled game tick. Usage: Nyx.BenchTick <interval_ms>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			const uint64 IntervalMs = Args.Num() > 0 ? FCString::Atoi64(*Args[0]) : 100;
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.BenchTick %llu ms"), IntervalMs);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->BenchStartTick(IntervalMs);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.BenchTickStop — stop scheduled game tick
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.BenchTickStop"),
+		TEXT("Stop the scheduled game tick"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.BenchTickStop"));
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->BenchStopTick();
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.BenchMem <megabytes> — test WASM memory limits
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.BenchMem"),
+		TEXT("Test WASM memory limits. Usage: Nyx.BenchMem <megabytes>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			const uint32 MB = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 1;
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.BenchMem %d MB"), MB);
+
+			UNyxNetworkSubsystem* NetworkSub = GetSubsystem<UNyxNetworkSubsystem>();
+			if (NetworkSub && NetworkSub->GetSpacetimeDBConnection())
+			{
+				NetworkSub->GetSpacetimeDBConnection()->Reducers->BenchMemory(MB);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Error, TEXT("Not connected to SpacetimeDB!"));
+			}
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()

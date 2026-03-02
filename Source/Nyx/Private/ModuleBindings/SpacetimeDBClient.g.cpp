@@ -4,6 +4,9 @@
 #include "ModuleBindings/SpacetimeDBClient.g.h"
 #include "DBCache/WithBsatn.h"
 #include "BSATN/UEBSATNHelpers.h"
+#include "ModuleBindings/Tables/BenchCounterTable.g.h"
+#include "ModuleBindings/Tables/BenchEntityTable.g.h"
+#include "ModuleBindings/Tables/BenchTickLogTable.g.h"
 #include "ModuleBindings/Tables/PlayerTable.g.h"
 #include "ModuleBindings/Tables/PlayerAccountTable.g.h"
 #include "ModuleBindings/Tables/WorldEntityTable.g.h"
@@ -16,6 +19,66 @@ static FReducer DecodeReducer(const FReducerEvent& Event)
     {
         FAuthenticateWithEosArgs Args = UE::SpacetimeDB::Deserialize<FAuthenticateWithEosArgs>(Event.ReducerCall.Args);
         return FReducer::AuthenticateWithEos(Args);
+    }
+
+    if (ReducerName == TEXT("bench_burst"))
+    {
+        FBenchBurstArgs Args = UE::SpacetimeDB::Deserialize<FBenchBurstArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchBurst(Args);
+    }
+
+    if (ReducerName == TEXT("bench_burst_update"))
+    {
+        FBenchBurstUpdateArgs Args = UE::SpacetimeDB::Deserialize<FBenchBurstUpdateArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchBurstUpdate(Args);
+    }
+
+    if (ReducerName == TEXT("bench_complex"))
+    {
+        FBenchComplexArgs Args = UE::SpacetimeDB::Deserialize<FBenchComplexArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchComplex(Args);
+    }
+
+    if (ReducerName == TEXT("bench_medium"))
+    {
+        FBenchMediumArgs Args = UE::SpacetimeDB::Deserialize<FBenchMediumArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchMedium(Args);
+    }
+
+    if (ReducerName == TEXT("bench_memory"))
+    {
+        FBenchMemoryArgs Args = UE::SpacetimeDB::Deserialize<FBenchMemoryArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchMemory(Args);
+    }
+
+    if (ReducerName == TEXT("bench_reset"))
+    {
+        FBenchResetArgs Args = UE::SpacetimeDB::Deserialize<FBenchResetArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchReset(Args);
+    }
+
+    if (ReducerName == TEXT("bench_seed"))
+    {
+        FBenchSeedArgs Args = UE::SpacetimeDB::Deserialize<FBenchSeedArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchSeed(Args);
+    }
+
+    if (ReducerName == TEXT("bench_simple"))
+    {
+        FBenchSimpleArgs Args = UE::SpacetimeDB::Deserialize<FBenchSimpleArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchSimple(Args);
+    }
+
+    if (ReducerName == TEXT("bench_start_tick"))
+    {
+        FBenchStartTickArgs Args = UE::SpacetimeDB::Deserialize<FBenchStartTickArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchStartTick(Args);
+    }
+
+    if (ReducerName == TEXT("bench_stop_tick"))
+    {
+        FBenchStopTickArgs Args = UE::SpacetimeDB::Deserialize<FBenchStopTickArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchStopTick(Args);
     }
 
     if (ReducerName == TEXT("clear_entities"))
@@ -59,6 +122,9 @@ UDbConnection::UDbConnection(const FObjectInitializer& ObjectInitializer) : Supe
 	Procedures = ObjectInitializer.CreateDefaultSubobject<URemoteProcedures>(this, TEXT("RemoteProcedures"));
 	Procedures->Conn = this;
 
+	RegisterTable<FBenchCounterType, UBenchCounterTable, FEventContext>(TEXT("bench_counter"), Db->BenchCounter);
+	RegisterTable<FBenchEntityType, UBenchEntityTable, FEventContext>(TEXT("bench_entity"), Db->BenchEntity);
+	RegisterTable<FBenchTickLogType, UBenchTickLogTable, FEventContext>(TEXT("bench_tick_log"), Db->BenchTickLog);
 	RegisterTable<FPlayerType, UPlayerTable, FEventContext>(TEXT("player"), Db->Player);
 	RegisterTable<FPlayerAccountType, UPlayerAccountTable, FEventContext>(TEXT("player_account"), Db->PlayerAccount);
 	RegisterTable<FWorldEntityType, UWorldEntityTable, FEventContext>(TEXT("world_entity"), Db->WorldEntity);
@@ -97,12 +163,18 @@ void URemoteTables::Initialize()
 {
 
 	/** Creating tables */
+	BenchCounter = NewObject<UBenchCounterTable>(this);
+	BenchEntity = NewObject<UBenchEntityTable>(this);
+	BenchTickLog = NewObject<UBenchTickLogTable>(this);
 	Player = NewObject<UPlayerTable>(this);
 	PlayerAccount = NewObject<UPlayerAccountTable>(this);
 	WorldEntity = NewObject<UWorldEntityTable>(this);
 	/**/
 
 	/** Initialization */
+	BenchCounter->PostInitialize();
+	BenchEntity->PostInitialize();
+	BenchTickLog->PostInitialize();
 	Player->PostInitialize();
 	PlayerAccount->PostInitialize();
 	WorldEntity->PostInitialize();
@@ -112,6 +184,46 @@ void URemoteTables::Initialize()
 void USetReducerFlags::AuthenticateWithEos(ECallReducerFlags Flag)
 {
 	FlagMap.Add("AuthenticateWithEos", Flag);
+}
+void USetReducerFlags::BenchBurst(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchBurst", Flag);
+}
+void USetReducerFlags::BenchBurstUpdate(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchBurstUpdate", Flag);
+}
+void USetReducerFlags::BenchComplex(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchComplex", Flag);
+}
+void USetReducerFlags::BenchMedium(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchMedium", Flag);
+}
+void USetReducerFlags::BenchMemory(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchMemory", Flag);
+}
+void USetReducerFlags::BenchReset(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchReset", Flag);
+}
+void USetReducerFlags::BenchSeed(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchSeed", Flag);
+}
+void USetReducerFlags::BenchSimple(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchSimple", Flag);
+}
+void USetReducerFlags::BenchStartTick(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchStartTick", Flag);
+}
+void USetReducerFlags::BenchStopTick(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchStopTick", Flag);
 }
 void USetReducerFlags::ClearEntities(ECallReducerFlags Flag)
 {
@@ -171,6 +283,446 @@ bool URemoteReducers::InvokeAuthenticateWithEosWithArgs(const FReducerEventConte
     }
 
     OnAuthenticateWithEos.Broadcast(Context, Args.EosProductUserId, Args.DisplayName, Args.Platform);
+    return true;
+}
+
+void URemoteReducers::BenchBurst(const uint32 Count)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_burst"), FBenchBurstArgs(Count), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchBurst(const FReducerEventContext& Context, const UBenchBurstReducer* Args)
+{
+    if (!OnBenchBurst.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchBurst"));
+        }
+        return false;
+    }
+
+    OnBenchBurst.Broadcast(Context, Args->Count);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchBurstWithArgs(const FReducerEventContext& Context, const FBenchBurstArgs& Args)
+{
+    if (!OnBenchBurst.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchBurst"));
+        }
+        return false;
+    }
+
+    OnBenchBurst.Broadcast(Context, Args.Count);
+    return true;
+}
+
+void URemoteReducers::BenchBurstUpdate(const uint32 Count)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_burst_update"), FBenchBurstUpdateArgs(Count), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchBurstUpdate(const FReducerEventContext& Context, const UBenchBurstUpdateReducer* Args)
+{
+    if (!OnBenchBurstUpdate.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchBurstUpdate"));
+        }
+        return false;
+    }
+
+    OnBenchBurstUpdate.Broadcast(Context, Args->Count);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchBurstUpdateWithArgs(const FReducerEventContext& Context, const FBenchBurstUpdateArgs& Args)
+{
+    if (!OnBenchBurstUpdate.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchBurstUpdate"));
+        }
+        return false;
+    }
+
+    OnBenchBurstUpdate.Broadcast(Context, Args.Count);
+    return true;
+}
+
+void URemoteReducers::BenchComplex()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_complex"), FBenchComplexArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchComplex(const FReducerEventContext& Context, const UBenchComplexReducer* Args)
+{
+    if (!OnBenchComplex.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchComplex"));
+        }
+        return false;
+    }
+
+    OnBenchComplex.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchComplexWithArgs(const FReducerEventContext& Context, const FBenchComplexArgs& Args)
+{
+    if (!OnBenchComplex.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchComplex"));
+        }
+        return false;
+    }
+
+    OnBenchComplex.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::BenchMedium()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_medium"), FBenchMediumArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchMedium(const FReducerEventContext& Context, const UBenchMediumReducer* Args)
+{
+    if (!OnBenchMedium.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchMedium"));
+        }
+        return false;
+    }
+
+    OnBenchMedium.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchMediumWithArgs(const FReducerEventContext& Context, const FBenchMediumArgs& Args)
+{
+    if (!OnBenchMedium.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchMedium"));
+        }
+        return false;
+    }
+
+    OnBenchMedium.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::BenchMemory(const uint32 Megabytes)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_memory"), FBenchMemoryArgs(Megabytes), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchMemory(const FReducerEventContext& Context, const UBenchMemoryReducer* Args)
+{
+    if (!OnBenchMemory.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchMemory"));
+        }
+        return false;
+    }
+
+    OnBenchMemory.Broadcast(Context, Args->Megabytes);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchMemoryWithArgs(const FReducerEventContext& Context, const FBenchMemoryArgs& Args)
+{
+    if (!OnBenchMemory.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchMemory"));
+        }
+        return false;
+    }
+
+    OnBenchMemory.Broadcast(Context, Args.Megabytes);
+    return true;
+}
+
+void URemoteReducers::BenchReset()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_reset"), FBenchResetArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchReset(const FReducerEventContext& Context, const UBenchResetReducer* Args)
+{
+    if (!OnBenchReset.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchReset"));
+        }
+        return false;
+    }
+
+    OnBenchReset.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchResetWithArgs(const FReducerEventContext& Context, const FBenchResetArgs& Args)
+{
+    if (!OnBenchReset.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchReset"));
+        }
+        return false;
+    }
+
+    OnBenchReset.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::BenchSeed(const uint32 Count)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_seed"), FBenchSeedArgs(Count), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchSeed(const FReducerEventContext& Context, const UBenchSeedReducer* Args)
+{
+    if (!OnBenchSeed.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchSeed"));
+        }
+        return false;
+    }
+
+    OnBenchSeed.Broadcast(Context, Args->Count);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchSeedWithArgs(const FReducerEventContext& Context, const FBenchSeedArgs& Args)
+{
+    if (!OnBenchSeed.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchSeed"));
+        }
+        return false;
+    }
+
+    OnBenchSeed.Broadcast(Context, Args.Count);
+    return true;
+}
+
+void URemoteReducers::BenchSimple()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_simple"), FBenchSimpleArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchSimple(const FReducerEventContext& Context, const UBenchSimpleReducer* Args)
+{
+    if (!OnBenchSimple.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchSimple"));
+        }
+        return false;
+    }
+
+    OnBenchSimple.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchSimpleWithArgs(const FReducerEventContext& Context, const FBenchSimpleArgs& Args)
+{
+    if (!OnBenchSimple.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchSimple"));
+        }
+        return false;
+    }
+
+    OnBenchSimple.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::BenchStartTick(const uint64 IntervalMs)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_start_tick"), FBenchStartTickArgs(IntervalMs), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchStartTick(const FReducerEventContext& Context, const UBenchStartTickReducer* Args)
+{
+    if (!OnBenchStartTick.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchStartTick"));
+        }
+        return false;
+    }
+
+    OnBenchStartTick.Broadcast(Context, Args->IntervalMs);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchStartTickWithArgs(const FReducerEventContext& Context, const FBenchStartTickArgs& Args)
+{
+    if (!OnBenchStartTick.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchStartTick"));
+        }
+        return false;
+    }
+
+    OnBenchStartTick.Broadcast(Context, Args.IntervalMs);
+    return true;
+}
+
+void URemoteReducers::BenchStopTick()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_stop_tick"), FBenchStopTickArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchStopTick(const FReducerEventContext& Context, const UBenchStopTickReducer* Args)
+{
+    if (!OnBenchStopTick.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchStopTick"));
+        }
+        return false;
+    }
+
+    OnBenchStopTick.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchStopTickWithArgs(const FReducerEventContext& Context, const FBenchStopTickArgs& Args)
+{
+    if (!OnBenchStopTick.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchStopTick"));
+        }
+        return false;
+    }
+
+    OnBenchStopTick.Broadcast(Context);
     return true;
 }
 
@@ -408,6 +960,66 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
     {
         FAuthenticateWithEosArgs Args = ReducerEvent.Reducer.GetAsAuthenticateWithEos();
         Reducers->InvokeAuthenticateWithEosWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_burst"))
+    {
+        FBenchBurstArgs Args = ReducerEvent.Reducer.GetAsBenchBurst();
+        Reducers->InvokeBenchBurstWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_burst_update"))
+    {
+        FBenchBurstUpdateArgs Args = ReducerEvent.Reducer.GetAsBenchBurstUpdate();
+        Reducers->InvokeBenchBurstUpdateWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_complex"))
+    {
+        FBenchComplexArgs Args = ReducerEvent.Reducer.GetAsBenchComplex();
+        Reducers->InvokeBenchComplexWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_medium"))
+    {
+        FBenchMediumArgs Args = ReducerEvent.Reducer.GetAsBenchMedium();
+        Reducers->InvokeBenchMediumWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_memory"))
+    {
+        FBenchMemoryArgs Args = ReducerEvent.Reducer.GetAsBenchMemory();
+        Reducers->InvokeBenchMemoryWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_reset"))
+    {
+        FBenchResetArgs Args = ReducerEvent.Reducer.GetAsBenchReset();
+        Reducers->InvokeBenchResetWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_seed"))
+    {
+        FBenchSeedArgs Args = ReducerEvent.Reducer.GetAsBenchSeed();
+        Reducers->InvokeBenchSeedWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_simple"))
+    {
+        FBenchSimpleArgs Args = ReducerEvent.Reducer.GetAsBenchSimple();
+        Reducers->InvokeBenchSimpleWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_start_tick"))
+    {
+        FBenchStartTickArgs Args = ReducerEvent.Reducer.GetAsBenchStartTick();
+        Reducers->InvokeBenchStartTickWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_stop_tick"))
+    {
+        FBenchStopTickArgs Args = ReducerEvent.Reducer.GetAsBenchStopTick();
+        Reducers->InvokeBenchStopTickWithArgs(Context, Args);
         return;
     }
     if (ReducerName == TEXT("clear_entities"))

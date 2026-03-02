@@ -14,6 +14,16 @@
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "ModuleBindings/ReducerBase.g.h"
 #include "ModuleBindings/Reducers/AuthenticateWithEos.g.h"
+#include "ModuleBindings/Reducers/BenchBurst.g.h"
+#include "ModuleBindings/Reducers/BenchBurstUpdate.g.h"
+#include "ModuleBindings/Reducers/BenchComplex.g.h"
+#include "ModuleBindings/Reducers/BenchMedium.g.h"
+#include "ModuleBindings/Reducers/BenchMemory.g.h"
+#include "ModuleBindings/Reducers/BenchReset.g.h"
+#include "ModuleBindings/Reducers/BenchSeed.g.h"
+#include "ModuleBindings/Reducers/BenchSimple.g.h"
+#include "ModuleBindings/Reducers/BenchStartTick.g.h"
+#include "ModuleBindings/Reducers/BenchStopTick.g.h"
 #include "ModuleBindings/Reducers/ClearEntities.g.h"
 #include "ModuleBindings/Reducers/CreatePlayer.g.h"
 #include "ModuleBindings/Reducers/MovePlayer.g.h"
@@ -30,6 +40,9 @@ class USubscriptionBuilder;
 class USubscriptionHandle;
 
 /** Forward declaration for tables */
+class UBenchCounterTable;
+class UBenchEntityTable;
+class UBenchTickLogTable;
 class UPlayerTable;
 class UPlayerAccountTable;
 class UWorldEntityTable;
@@ -109,6 +122,16 @@ UENUM(BlueprintType, Category = "SpacetimeDB")
 enum class EReducerTag : uint8
 {
     AuthenticateWithEos,
+    BenchBurst,
+    BenchBurstUpdate,
+    BenchComplex,
+    BenchMedium,
+    BenchMemory,
+    BenchReset,
+    BenchSeed,
+    BenchSimple,
+    BenchStartTick,
+    BenchStopTick,
     ClearEntities,
     CreatePlayer,
     MovePlayer,
@@ -124,7 +147,7 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
     EReducerTag Tag = static_cast<EReducerTag>(0);
 
-    TVariant<FAuthenticateWithEosArgs, FClearEntitiesArgs, FCreatePlayerArgs, FMovePlayerArgs, FSeedEntitiesArgs> Data;
+    TVariant<FAuthenticateWithEosArgs, FBenchBurstArgs, FBenchBurstUpdateArgs, FBenchComplexArgs, FBenchMediumArgs, FBenchMemoryArgs, FBenchResetArgs, FBenchSeedArgs, FBenchSimpleArgs, FBenchStartTickArgs, FBenchStopTickArgs, FClearEntitiesArgs, FCreatePlayerArgs, FMovePlayerArgs, FSeedEntitiesArgs> Data;
 
     // Optional metadata
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
@@ -146,6 +169,166 @@ public:
     {
         ensureMsgf(IsAuthenticateWithEos(), TEXT("Reducer does not hold AuthenticateWithEos!"));
         return Data.Get<FAuthenticateWithEosArgs>();
+    }
+
+    static FReducer BenchBurst(const FBenchBurstArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchBurst;
+        Out.Data.Set<FBenchBurstArgs>(Value);
+        Out.ReducerName = TEXT("bench_burst");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchBurst() const { return Tag == EReducerTag::BenchBurst; }
+    FORCEINLINE FBenchBurstArgs GetAsBenchBurst() const
+    {
+        ensureMsgf(IsBenchBurst(), TEXT("Reducer does not hold BenchBurst!"));
+        return Data.Get<FBenchBurstArgs>();
+    }
+
+    static FReducer BenchBurstUpdate(const FBenchBurstUpdateArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchBurstUpdate;
+        Out.Data.Set<FBenchBurstUpdateArgs>(Value);
+        Out.ReducerName = TEXT("bench_burst_update");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchBurstUpdate() const { return Tag == EReducerTag::BenchBurstUpdate; }
+    FORCEINLINE FBenchBurstUpdateArgs GetAsBenchBurstUpdate() const
+    {
+        ensureMsgf(IsBenchBurstUpdate(), TEXT("Reducer does not hold BenchBurstUpdate!"));
+        return Data.Get<FBenchBurstUpdateArgs>();
+    }
+
+    static FReducer BenchComplex(const FBenchComplexArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchComplex;
+        Out.Data.Set<FBenchComplexArgs>(Value);
+        Out.ReducerName = TEXT("bench_complex");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchComplex() const { return Tag == EReducerTag::BenchComplex; }
+    FORCEINLINE FBenchComplexArgs GetAsBenchComplex() const
+    {
+        ensureMsgf(IsBenchComplex(), TEXT("Reducer does not hold BenchComplex!"));
+        return Data.Get<FBenchComplexArgs>();
+    }
+
+    static FReducer BenchMedium(const FBenchMediumArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchMedium;
+        Out.Data.Set<FBenchMediumArgs>(Value);
+        Out.ReducerName = TEXT("bench_medium");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchMedium() const { return Tag == EReducerTag::BenchMedium; }
+    FORCEINLINE FBenchMediumArgs GetAsBenchMedium() const
+    {
+        ensureMsgf(IsBenchMedium(), TEXT("Reducer does not hold BenchMedium!"));
+        return Data.Get<FBenchMediumArgs>();
+    }
+
+    static FReducer BenchMemory(const FBenchMemoryArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchMemory;
+        Out.Data.Set<FBenchMemoryArgs>(Value);
+        Out.ReducerName = TEXT("bench_memory");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchMemory() const { return Tag == EReducerTag::BenchMemory; }
+    FORCEINLINE FBenchMemoryArgs GetAsBenchMemory() const
+    {
+        ensureMsgf(IsBenchMemory(), TEXT("Reducer does not hold BenchMemory!"));
+        return Data.Get<FBenchMemoryArgs>();
+    }
+
+    static FReducer BenchReset(const FBenchResetArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchReset;
+        Out.Data.Set<FBenchResetArgs>(Value);
+        Out.ReducerName = TEXT("bench_reset");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchReset() const { return Tag == EReducerTag::BenchReset; }
+    FORCEINLINE FBenchResetArgs GetAsBenchReset() const
+    {
+        ensureMsgf(IsBenchReset(), TEXT("Reducer does not hold BenchReset!"));
+        return Data.Get<FBenchResetArgs>();
+    }
+
+    static FReducer BenchSeed(const FBenchSeedArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchSeed;
+        Out.Data.Set<FBenchSeedArgs>(Value);
+        Out.ReducerName = TEXT("bench_seed");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchSeed() const { return Tag == EReducerTag::BenchSeed; }
+    FORCEINLINE FBenchSeedArgs GetAsBenchSeed() const
+    {
+        ensureMsgf(IsBenchSeed(), TEXT("Reducer does not hold BenchSeed!"));
+        return Data.Get<FBenchSeedArgs>();
+    }
+
+    static FReducer BenchSimple(const FBenchSimpleArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchSimple;
+        Out.Data.Set<FBenchSimpleArgs>(Value);
+        Out.ReducerName = TEXT("bench_simple");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchSimple() const { return Tag == EReducerTag::BenchSimple; }
+    FORCEINLINE FBenchSimpleArgs GetAsBenchSimple() const
+    {
+        ensureMsgf(IsBenchSimple(), TEXT("Reducer does not hold BenchSimple!"));
+        return Data.Get<FBenchSimpleArgs>();
+    }
+
+    static FReducer BenchStartTick(const FBenchStartTickArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchStartTick;
+        Out.Data.Set<FBenchStartTickArgs>(Value);
+        Out.ReducerName = TEXT("bench_start_tick");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchStartTick() const { return Tag == EReducerTag::BenchStartTick; }
+    FORCEINLINE FBenchStartTickArgs GetAsBenchStartTick() const
+    {
+        ensureMsgf(IsBenchStartTick(), TEXT("Reducer does not hold BenchStartTick!"));
+        return Data.Get<FBenchStartTickArgs>();
+    }
+
+    static FReducer BenchStopTick(const FBenchStopTickArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchStopTick;
+        Out.Data.Set<FBenchStopTickArgs>(Value);
+        Out.ReducerName = TEXT("bench_stop_tick");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchStopTick() const { return Tag == EReducerTag::BenchStopTick; }
+    FORCEINLINE FBenchStopTickArgs GetAsBenchStopTick() const
+    {
+        ensureMsgf(IsBenchStopTick(), TEXT("Reducer does not hold BenchStopTick!"));
+        return Data.Get<FBenchStopTickArgs>();
     }
 
     static FReducer ClearEntities(const FClearEntitiesArgs& Value)
@@ -219,6 +402,26 @@ public:
         {
         case EReducerTag::AuthenticateWithEos:
             return GetAsAuthenticateWithEos() == Other.GetAsAuthenticateWithEos();
+        case EReducerTag::BenchBurst:
+            return GetAsBenchBurst() == Other.GetAsBenchBurst();
+        case EReducerTag::BenchBurstUpdate:
+            return GetAsBenchBurstUpdate() == Other.GetAsBenchBurstUpdate();
+        case EReducerTag::BenchComplex:
+            return GetAsBenchComplex() == Other.GetAsBenchComplex();
+        case EReducerTag::BenchMedium:
+            return GetAsBenchMedium() == Other.GetAsBenchMedium();
+        case EReducerTag::BenchMemory:
+            return GetAsBenchMemory() == Other.GetAsBenchMemory();
+        case EReducerTag::BenchReset:
+            return GetAsBenchReset() == Other.GetAsBenchReset();
+        case EReducerTag::BenchSeed:
+            return GetAsBenchSeed() == Other.GetAsBenchSeed();
+        case EReducerTag::BenchSimple:
+            return GetAsBenchSimple() == Other.GetAsBenchSimple();
+        case EReducerTag::BenchStartTick:
+            return GetAsBenchStartTick() == Other.GetAsBenchStartTick();
+        case EReducerTag::BenchStopTick:
+            return GetAsBenchStopTick() == Other.GetAsBenchStopTick();
         case EReducerTag::ClearEntities:
             return GetAsClearEntities() == Other.GetAsClearEntities();
         case EReducerTag::CreatePlayer:
@@ -251,6 +454,136 @@ private:
     UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
     static FAuthenticateWithEosArgs GetAsAuthenticateWithEos(const FReducer& Reducer) {
         return Reducer.GetAsAuthenticateWithEos();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchBurst(const FBenchBurstArgs& Value) {
+        return FReducer::BenchBurst(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchBurst(const FReducer& Reducer) { return Reducer.IsBenchBurst(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchBurstArgs GetAsBenchBurst(const FReducer& Reducer) {
+        return Reducer.GetAsBenchBurst();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchBurstUpdate(const FBenchBurstUpdateArgs& Value) {
+        return FReducer::BenchBurstUpdate(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchBurstUpdate(const FReducer& Reducer) { return Reducer.IsBenchBurstUpdate(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchBurstUpdateArgs GetAsBenchBurstUpdate(const FReducer& Reducer) {
+        return Reducer.GetAsBenchBurstUpdate();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchComplex(const FBenchComplexArgs& Value) {
+        return FReducer::BenchComplex(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchComplex(const FReducer& Reducer) { return Reducer.IsBenchComplex(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchComplexArgs GetAsBenchComplex(const FReducer& Reducer) {
+        return Reducer.GetAsBenchComplex();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchMedium(const FBenchMediumArgs& Value) {
+        return FReducer::BenchMedium(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchMedium(const FReducer& Reducer) { return Reducer.IsBenchMedium(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchMediumArgs GetAsBenchMedium(const FReducer& Reducer) {
+        return Reducer.GetAsBenchMedium();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchMemory(const FBenchMemoryArgs& Value) {
+        return FReducer::BenchMemory(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchMemory(const FReducer& Reducer) { return Reducer.IsBenchMemory(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchMemoryArgs GetAsBenchMemory(const FReducer& Reducer) {
+        return Reducer.GetAsBenchMemory();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchReset(const FBenchResetArgs& Value) {
+        return FReducer::BenchReset(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchReset(const FReducer& Reducer) { return Reducer.IsBenchReset(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchResetArgs GetAsBenchReset(const FReducer& Reducer) {
+        return Reducer.GetAsBenchReset();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchSeed(const FBenchSeedArgs& Value) {
+        return FReducer::BenchSeed(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchSeed(const FReducer& Reducer) { return Reducer.IsBenchSeed(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchSeedArgs GetAsBenchSeed(const FReducer& Reducer) {
+        return Reducer.GetAsBenchSeed();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchSimple(const FBenchSimpleArgs& Value) {
+        return FReducer::BenchSimple(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchSimple(const FReducer& Reducer) { return Reducer.IsBenchSimple(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchSimpleArgs GetAsBenchSimple(const FReducer& Reducer) {
+        return Reducer.GetAsBenchSimple();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchStartTick(const FBenchStartTickArgs& Value) {
+        return FReducer::BenchStartTick(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchStartTick(const FReducer& Reducer) { return Reducer.IsBenchStartTick(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchStartTickArgs GetAsBenchStartTick(const FReducer& Reducer) {
+        return Reducer.GetAsBenchStartTick();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchStopTick(const FBenchStopTickArgs& Value) {
+        return FReducer::BenchStopTick(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchStopTick(const FReducer& Reducer) { return Reducer.IsBenchStopTick(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchStopTickArgs GetAsBenchStopTick(const FReducer& Reducer) {
+        return Reducer.GetAsBenchStopTick();
     }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
@@ -687,6 +1020,26 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void AuthenticateWithEos(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchBurst(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchBurstUpdate(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchComplex(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchMedium(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchMemory(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchReset(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchSeed(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchSimple(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchStartTick(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchStopTick(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void ClearEntities(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void CreatePlayer(ECallReducerFlags Flag);
@@ -705,6 +1058,15 @@ class NYX_API URemoteTables : public UObject
 
 public:
     void Initialize();
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UBenchCounterTable* BenchCounter;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UBenchEntityTable* BenchEntity;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UBenchTickLogTable* BenchTickLog;
 
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     UPlayerTable* Player;
@@ -740,6 +1102,141 @@ public:
 
     bool InvokeAuthenticateWithEos(const FReducerEventContext& Context, const UAuthenticateWithEosReducer* Args);
     bool InvokeAuthenticateWithEosWithArgs(const FReducerEventContext& Context, const FAuthenticateWithEosArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FBenchBurstHandler,
+        const FReducerEventContext&, Context,
+        uint32, Count
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FBenchBurstHandler OnBenchBurst;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void BenchBurst(const uint32 Count);
+
+    bool InvokeBenchBurst(const FReducerEventContext& Context, const UBenchBurstReducer* Args);
+    bool InvokeBenchBurstWithArgs(const FReducerEventContext& Context, const FBenchBurstArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FBenchBurstUpdateHandler,
+        const FReducerEventContext&, Context,
+        uint32, Count
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FBenchBurstUpdateHandler OnBenchBurstUpdate;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void BenchBurstUpdate(const uint32 Count);
+
+    bool InvokeBenchBurstUpdate(const FReducerEventContext& Context, const UBenchBurstUpdateReducer* Args);
+    bool InvokeBenchBurstUpdateWithArgs(const FReducerEventContext& Context, const FBenchBurstUpdateArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FBenchComplexHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FBenchComplexHandler OnBenchComplex;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void BenchComplex();
+
+    bool InvokeBenchComplex(const FReducerEventContext& Context, const UBenchComplexReducer* Args);
+    bool InvokeBenchComplexWithArgs(const FReducerEventContext& Context, const FBenchComplexArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FBenchMediumHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FBenchMediumHandler OnBenchMedium;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void BenchMedium();
+
+    bool InvokeBenchMedium(const FReducerEventContext& Context, const UBenchMediumReducer* Args);
+    bool InvokeBenchMediumWithArgs(const FReducerEventContext& Context, const FBenchMediumArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FBenchMemoryHandler,
+        const FReducerEventContext&, Context,
+        uint32, Megabytes
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FBenchMemoryHandler OnBenchMemory;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void BenchMemory(const uint32 Megabytes);
+
+    bool InvokeBenchMemory(const FReducerEventContext& Context, const UBenchMemoryReducer* Args);
+    bool InvokeBenchMemoryWithArgs(const FReducerEventContext& Context, const FBenchMemoryArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FBenchResetHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FBenchResetHandler OnBenchReset;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void BenchReset();
+
+    bool InvokeBenchReset(const FReducerEventContext& Context, const UBenchResetReducer* Args);
+    bool InvokeBenchResetWithArgs(const FReducerEventContext& Context, const FBenchResetArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FBenchSeedHandler,
+        const FReducerEventContext&, Context,
+        uint32, Count
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FBenchSeedHandler OnBenchSeed;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void BenchSeed(const uint32 Count);
+
+    bool InvokeBenchSeed(const FReducerEventContext& Context, const UBenchSeedReducer* Args);
+    bool InvokeBenchSeedWithArgs(const FReducerEventContext& Context, const FBenchSeedArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FBenchSimpleHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FBenchSimpleHandler OnBenchSimple;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void BenchSimple();
+
+    bool InvokeBenchSimple(const FReducerEventContext& Context, const UBenchSimpleReducer* Args);
+    bool InvokeBenchSimpleWithArgs(const FReducerEventContext& Context, const FBenchSimpleArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FBenchStartTickHandler,
+        const FReducerEventContext&, Context,
+        uint64, IntervalMs
+    );
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    FBenchStartTickHandler OnBenchStartTick;
+
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    void BenchStartTick(const uint64 IntervalMs);
+
+    bool InvokeBenchStartTick(const FReducerEventContext& Context, const UBenchStartTickReducer* Args);
+    bool InvokeBenchStartTickWithArgs(const FReducerEventContext& Context, const FBenchStartTickArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FBenchStopTickHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FBenchStopTickHandler OnBenchStopTick;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void BenchStopTick();
+
+    bool InvokeBenchStopTick(const FReducerEventContext& Context, const UBenchStopTickReducer* Args);
+    bool InvokeBenchStopTickWithArgs(const FReducerEventContext& Context, const FBenchStopTickArgs& Args);
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
         FClearEntitiesHandler,

@@ -1,9 +1,13 @@
-// Nyx MMO — SpacetimeDB Server Module (Spikes 1–6)
+// Nyx MMO — SpacetimeDB Server Module (Spikes 1–7)
 //
 // Tables:
 //   - player: Active player state (position, chunk, display name)
 //   - player_account: Links SpacetimeDB Identity to EOS ProductUserId
 //   - world_entity: Non-player entities for spatial interest testing
+//   - bench_counter: Simple counter for benchmark throughput
+//   - bench_entity: Entity table for read/write benchmarks
+//   - bench_tick_log: Logs from each scheduled tick
+//   - tick_schedule: Scheduled table driving the game tick loop
 //
 // Auth flow:
 //   1. Client connects anonymously (gets SpacetimeDB Identity)
@@ -17,7 +21,7 @@
 //   - Clients subscribe with WHERE chunk_x/chunk_y BETWEEN min AND max
 //   - On movement, server recomputes chunk from position
 
-use spacetimedb::{Identity, ReducerContext, Table, Timestamp};
+use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Timestamp};
 
 /// Chunk size in world units (matches UE5 cm: 10000 = 100 meters).
 const CHUNK_SIZE: f64 = 10000.0;
@@ -249,4 +253,341 @@ pub fn clear_entities(ctx: &ReducerContext) {
         removed += 1;
     }
     log::info!("Cleared {} world entities", removed);
+}
+
+// ─── Spike 7: WASM Module Performance Benchmarks ──────────────────
+
+/// Simple counter for benchmark throughput measurement.
+#[spacetimedb::table(accessor = bench_counter, public)]
+pub struct BenchCounter {
+    #[primary_key]
+    pub id: u32,
+    pub value: u64,
+    pub last_updated: Timestamp,
+}
+
+/// Entity table for read/write benchmark operations.
+#[spacetimedb::table(accessor = bench_entity, public)]
+pub struct BenchEntity {
+    #[primary_key]
+    #[auto_inc]
+    pub id: u64,
+    pub health: f32,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub updated_at: Timestamp,
+}
+
+/// Logs from each scheduled tick — records tick number, entity count, and timing.
+#[spacetimedb::table(accessor = bench_tick_log, public)]
+pub struct BenchTickLog {
+    #[primary_key]
+    #[auto_inc]
+    pub id: u64,
+    pub tick_number: u64,
+    pub entities_updated: u32,
+    pub timestamp: Timestamp,
+}
+
+/// Scheduling table for the game tick loop. Insert a row to start ticking,
+/// delete it to stop. The `scheduled_at` field controls the repeat interval.
+#[spacetimedb::table(accessor = tick_schedule, scheduled(game_tick))]
+pub struct TickSchedule {
+    #[primary_key]
+    #[auto_inc]
+    pub scheduled_id: u64,
+    pub scheduled_at: ScheduleAt,
+}
+
+// ─── Benchmark Reducers: Throughput Testing ────────────────────────
+
+/// SIMPLE: Increment a single counter row.
+/// Tests: single-row read + update overhead.
+#[spacetimedb::reducer]
+pub fn bench_simple(ctx: &ReducerContext) {
+    if let Some(mut c) = ctx.db.bench_counter().id().find(1) {
+        c.value += 1;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 1,
+            value: 1,
+            last_updated: ctx.timestamp,
+        });
+    }
+}
+
+/// MEDIUM: Read up to 10 entities + update the first one.
+/// Tests: multi-row iteration + single update.
+#[spacetimedb::reducer]
+pub fn bench_medium(ctx: &ReducerContext) {
+    let mut count = 0u32;
+    let mut first_id: Option<u64> = None;
+    for entity in ctx.db.bench_entity().iter() {
+        if first_id.is_none() {
+            first_id = Some(entity.id);
+        }
+        count += 1;
+        if count >= 10 {
+            break;
+        }
+    }
+    if let Some(fid) = first_id {
+        if let Some(mut e) = ctx.db.bench_entity().id().find(fid) {
+            e.health = (e.health + 1.0) % 100.0;
+            e.updated_at = ctx.timestamp;
+            ctx.db.bench_entity().id().update(e);
+        }
+    }
+    // Record iteration count
+    if let Some(mut c) = ctx.db.bench_counter().id().find(3) {
+        c.value += 1;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 3,
+            value: 1,
+            last_updated: ctx.timestamp,
+        });
+    }
+}
+
+/// COMPLEX: Iterate ALL bench entities, sum their health, store result.
+/// Tests: full-table scan + aggregation overhead.
+#[spacetimedb::reducer]
+pub fn bench_complex(ctx: &ReducerContext) {
+    let mut _total_health: f64 = 0.0;
+    let mut count: u32 = 0;
+    for entity in ctx.db.bench_entity().iter() {
+        _total_health += entity.health as f64;
+        count += 1;
+    }
+    // Store result in counter id=2
+    if let Some(mut c) = ctx.db.bench_counter().id().find(2) {
+        c.value = count as u64;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 2,
+            value: count as u64,
+            last_updated: ctx.timestamp,
+        });
+    }
+}
+
+/// BURST: Perform `count` single-row updates inside one reducer call.
+/// Tests: raw DB operation throughput within a single reducer invocation.
+#[spacetimedb::reducer]
+pub fn bench_burst(ctx: &ReducerContext, count: u32) {
+    // Ensure counter exists
+    if ctx.db.bench_counter().id().find(10).is_none() {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 10,
+            value: 0,
+            last_updated: ctx.timestamp,
+        });
+    }
+    for _ in 0..count {
+        if let Some(mut c) = ctx.db.bench_counter().id().find(10) {
+            c.value += 1;
+            c.last_updated = ctx.timestamp;
+            ctx.db.bench_counter().id().update(c);
+        }
+    }
+    log::info!(
+        "bench_burst: {} operations completed",
+        count
+    );
+}
+
+/// BURST UPDATE: Update `count` bench_entity rows in one reducer call.
+/// Tests: multi-row update throughput (simulates game tick updating N entities).
+#[spacetimedb::reducer]
+pub fn bench_burst_update(ctx: &ReducerContext, count: u32) {
+    let mut updated: u32 = 0;
+    for entity in ctx.db.bench_entity().iter() {
+        if updated >= count {
+            break;
+        }
+        let id = entity.id;
+        if let Some(mut e) = ctx.db.bench_entity().id().find(id) {
+            e.pos_x += 1.0;
+            e.pos_y += 0.5;
+            e.health = (e.health - 0.1).max(0.0);
+            e.updated_at = ctx.timestamp;
+            ctx.db.bench_entity().id().update(e);
+            updated += 1;
+        }
+    }
+    log::info!(
+        "bench_burst_update: updated {} / {} requested entities",
+        updated,
+        count
+    );
+}
+
+// ─── Benchmark Reducers: Scheduled Tick ────────────────────────────
+
+/// Scheduled game tick reducer. Fired by the TickSchedule table.
+/// Updates ALL bench_entity rows each tick and logs stats.
+#[spacetimedb::reducer]
+pub fn game_tick(ctx: &ReducerContext, _arg: TickSchedule) -> Result<(), String> {
+    // Read current tick number from counter id=100
+    let tick_num = if let Some(mut c) = ctx.db.bench_counter().id().find(100) {
+        c.value += 1;
+        c.last_updated = ctx.timestamp;
+        let n = c.value;
+        ctx.db.bench_counter().id().update(c);
+        n
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 100,
+            value: 1,
+            last_updated: ctx.timestamp,
+        });
+        1
+    };
+
+    // Update all bench entities (simulate NPC AI tick)
+    let mut updated: u32 = 0;
+    let ids: Vec<u64> = ctx.db.bench_entity().iter().map(|e| e.id).collect();
+    for id in &ids {
+        if let Some(mut e) = ctx.db.bench_entity().id().find(*id) {
+            // Simple movement simulation
+            e.pos_x += 0.1;
+            e.pos_y += 0.05;
+            e.health = (e.health - 0.001).max(0.0);
+            e.updated_at = ctx.timestamp;
+            ctx.db.bench_entity().id().update(e);
+            updated += 1;
+        }
+    }
+
+    // Log this tick (keep only last 100 logs to avoid unbounded growth)
+    ctx.db.bench_tick_log().insert(BenchTickLog {
+        id: 0,
+        tick_number: tick_num,
+        entities_updated: updated,
+        timestamp: ctx.timestamp,
+    });
+
+    // Prune old logs (keep last 100)
+    if tick_num > 100 {
+        let cutoff = tick_num - 100;
+        for row in ctx.db.bench_tick_log().iter() {
+            if row.tick_number <= cutoff {
+                ctx.db.bench_tick_log().id().delete(row.id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Start the scheduled game tick at the given interval (in milliseconds).
+#[spacetimedb::reducer]
+pub fn bench_start_tick(ctx: &ReducerContext, interval_ms: u64) {
+    // Stop any existing ticks first
+    for row in ctx.db.tick_schedule().iter() {
+        ctx.db.tick_schedule().scheduled_id().delete(row.scheduled_id);
+    }
+    // Reset tick counter
+    if let Some(mut c) = ctx.db.bench_counter().id().find(100) {
+        c.value = 0;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    }
+    // Clear tick logs
+    for row in ctx.db.bench_tick_log().iter() {
+        ctx.db.bench_tick_log().id().delete(row.id);
+    }
+
+    let interval = TimeDuration::from_micros((interval_ms * 1000) as i64);
+    ctx.db.tick_schedule().insert(TickSchedule {
+        scheduled_id: 0,
+        scheduled_at: interval.into(),
+    });
+    log::info!("Game tick started at {}ms interval", interval_ms);
+}
+
+/// Stop the scheduled game tick.
+#[spacetimedb::reducer]
+pub fn bench_stop_tick(ctx: &ReducerContext) {
+    let mut stopped = 0u32;
+    for row in ctx.db.tick_schedule().iter() {
+        ctx.db.tick_schedule().scheduled_id().delete(row.scheduled_id);
+        stopped += 1;
+    }
+    log::info!("Game tick stopped ({} schedules removed)", stopped);
+}
+
+// ─── Benchmark Reducers: Memory Stress Test ────────────────────────
+
+/// Allocate `megabytes` MB of memory inside a reducer and write to it.
+/// Tests WASM module memory limits.
+#[spacetimedb::reducer]
+pub fn bench_memory(ctx: &ReducerContext, megabytes: u32) {
+    let bytes = (megabytes as usize) * 1024 * 1024;
+    let mut data: Vec<u8> = Vec::with_capacity(bytes);
+    // Actually write to force allocation (not just reserve)
+    for i in 0..bytes {
+        data.push((i & 0xFF) as u8);
+    }
+    // Store something to prevent optimization
+    let checksum: u64 = data.iter().map(|b| *b as u64).sum();
+    if let Some(mut c) = ctx.db.bench_counter().id().find(200) {
+        c.value = checksum;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 200,
+            value: checksum,
+            last_updated: ctx.timestamp,
+        });
+    }
+    log::info!(
+        "bench_memory: allocated {} MB, checksum={}, ok",
+        megabytes,
+        checksum
+    );
+}
+
+// ─── Benchmark Utility Reducers ────────────────────────────────────
+
+/// Seed `count` bench entities for read/write benchmarks.
+#[spacetimedb::reducer]
+pub fn bench_seed(ctx: &ReducerContext, count: u32) {
+    for i in 0..count {
+        ctx.db.bench_entity().insert(BenchEntity {
+            id: 0,
+            health: 100.0,
+            pos_x: (i as f64) * 10.0,
+            pos_y: (i as f64) * 5.0,
+            updated_at: ctx.timestamp,
+        });
+    }
+    log::info!("Seeded {} bench entities", count);
+}
+
+/// Clear all benchmark data (counters, entities, tick logs, schedules).
+#[spacetimedb::reducer]
+pub fn bench_reset(ctx: &ReducerContext) {
+    // Stop ticks
+    for row in ctx.db.tick_schedule().iter() {
+        ctx.db.tick_schedule().scheduled_id().delete(row.scheduled_id);
+    }
+    for e in ctx.db.bench_entity().iter() {
+        ctx.db.bench_entity().id().delete(e.id);
+    }
+    for c in ctx.db.bench_counter().iter() {
+        ctx.db.bench_counter().id().delete(c.id);
+    }
+    for s in ctx.db.bench_tick_log().iter() {
+        ctx.db.bench_tick_log().id().delete(s.id);
+    }
+    log::info!("Bench data reset");
 }
