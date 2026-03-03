@@ -1929,6 +1929,173 @@ However, OWS's **hard zone boundaries** (no cross-zone visibility, loading scree
 
 ---
 
+## Redwood MMO — Reference Architecture Analysis
+
+> **Source:** https://redwoodmmo.com/docs/  
+> **License:** Source-available (paid license, royalty-free tier available)  
+> **Engine:** Unreal Engine 5 (any version)  
+> **Creator:** Incanta Games  
+> **Relevance:** Redwood is a self-hosted, source-available alternative to Epic Online Services / Steamworks / Playfab, purpose-built for UE5 multiplayer games including MMOs. It provides the full backend infrastructure (auth, matchmaking, persistence, game server orchestration, sharding, zones, chat) that Nyx's SpacetimeDB architecture must eventually replicate or replace.
+
+### Overview
+
+Redwood is a **microservice-based game backend** that wraps standard UE5 dedicated servers with orchestration, persistence, and matchmaking. Unlike SpacetimeDB (which is a single database-as-server), Redwood is a traditional distributed architecture: NodeJS microservices + PostgreSQL + Redis + Kubernetes + Agones/Hathora for game server hosting.
+
+**Key difference from Nyx's approach:** Redwood uses **standard UE5 dedicated servers** with UE5's built-in replication for real-time gameplay. The backend handles everything *except* the gameplay tick loop — auth, character persistence, matchmaking, server lifecycle, chat. SpacetimeDB in Nyx tries to be both the database AND the real-time state synchronization layer.
+
+### 1. Architecture — Director / Realm / Sidecar
+
+Redwood splits into three tiers:
+
+| Component | Role | Scaling |
+|-----------|------|---------|
+| **Director** | Central entry point. Player authentication, realm listing, identity management. One per title. | Single instance (lightweight) |
+| **Realm** | Per-world/region unit. Character data, ticketing/matchmaking, game server management. Multiple Realms possible (PvP, PvE, Europe, etc.) | Horizontally scalable (Frontend + Backend split) |
+| **Sidecar** | NodeJS process co-located with each UE5 game server. Bridges game server ↔ Realm Backend. Handles player auth tokens, character data load/save, lifecycle updates. | One per game server instance |
+
+Each service is split into **Frontend** (player-facing: auth, matchmaking requests, character listing) and **Backend** (internal: processing matchmaking, allocating servers, sidecar communication). This split enables independent horizontal scaling and separates attack vectors.
+
+**Interservice communication:** Socket.IO/WebSockets for 1-to-1 connections. Redis pub/sub for fan-out where the sender doesn't know which replica to target. All API definitions centralized in `packages/common/src/interfaces.ts`.
+
+### 2. Game Server Model — Proxies, Collections, Instances
+
+Redwood introduces an abstraction hierarchy for game servers:
+
+| Entity | Description |
+|--------|-------------|
+| **GameServerProxy** | Abstract representation of a virtual world. Can exist without running servers (appears in lobby list). Stores world data, game mode/map, access config. |
+| **GameServerCollection** | Active backing for a Proxy. Contains 1+ GameServerInstances (all zones/shards). Can be stopped/archived; a new Collection is created on restart. |
+| **GameServerInstance** | Single running UE5 dedicated server process. Serves one shard of one zone. Has connection URI and hosting provider ID. |
+| **GameServerContainer** | Docker container running one GameServerInstance. Maps to Agones/Hathora resource. |
+
+**Key insight for Nyx:** The Proxy can appear "live" with no running servers — servers spin up on-demand when a player joins. This enables persistent worlds that don't waste resources when unpopulated. The Collection/Instance separation cleanly handles zone restarts without losing world identity.
+
+### 3. Zones, Shards, and Channels
+
+**Zones** are abstract spatial divisions of a game world. Each GameServerProxy defines 1+ zones. Zones can be different UE5 maps or different areas in a single map. Players transfer between zones via `TravelPlayerToZoneSpawnName()` or `TravelPlayerToZoneTransform()` — this is a server travel (loading screen), not seamless.
+
+**Shards** are parallel instances of the same zone. Every GameServerInstance IS a shard. Sharding is configured per game profile:
+- `max-players-per-shard`: Hard cap per server instance
+- `num-players-to-add-shard`: Soft cap that triggers spinning up a new shard
+- `num-minutes-to-destroy-empty-shard`: Auto-cleanup for idle shards
+- `game.shard-names`: NATO phonetic alphabet names (Alpha, Bravo, Charlie...) — max shards = number of names
+
+**Sharding algorithm:** When connected players reach `num-players-to-add-shard`, a new shard is started. The soft cap is deliberately lower than the hard cap so party members can follow each other. Players can manually switch shards. Queue for a specific shard or auto-join the least populated one.
+
+### 4. Data Persistence Model
+
+Redwood has a well-structured data hierarchy:
+
+| Data Type | Scope | Persistence | Sync |
+|-----------|-------|-------------|------|
+| **PlayerIdentity** | Director-level (across all Realms) | PostgreSQL (Director DB) | N/A |
+| **PlayerCharacter** | Realm-level | PostgreSQL (Realm DB) | Via UE5 replication |
+| **World Data** | Per-Proxy (shared across all zones/shards) | PostgreSQL | Auto-synced to all shards via Redis |
+| **Zone Data** | Per-Zone (not shared with other zones) | PostgreSQL | Synced within zone shards |
+| **Global Data** | Director or Realm level | PostgreSQL (versioned) | On-demand fetch |
+| **Sync Items** | Per-actor (cross-shard sync) | Optional PostgreSQL | Redis pub/sub between sidecars |
+| **Blob Storage** | Arbitrary files | S3-compatible (SeaweedFS/AWS S3) | N/A |
+
+**PlayerCharacter fields** are thoughtfully partitioned:
+- `characterCreatorData` — player-editable, replicated to all (appearance)
+- `metadata` — server-managed, replicated to all (level, health, equipped gear)
+- `equippedInventory` — server-managed, owner-only replication (prevents snooping)
+- `nonequippedInventory` — bank/vault, owner-only replication
+- `progress` — achievements, quests, skill trees (replication optional)
+- `abilitySystem` — GAS integration or custom ability data
+- `data` — catch-all game data, not replicated
+
+**Data persistence timing:** Dirty data is saved at `DatabasePersistenceInterval` (default 2 Hz / 0.5s). Recommendation: "Choose the largest number of seconds you're willing to potentially lose data in a game server crash."
+
+**Schema migrations:** Each data struct has a `SchemaVersion` integer. Migration functions (`Metadata_Migrate_v0`, `Metadata_Migrate_v1`, etc.) upgrade one version at a time. This is a mature pattern for live game data evolution.
+
+### 5. Sync Items — Limited Cross-Server State
+
+Sync Items (`URedwoodSyncComponent`) synchronize transform, state, and data between servers via Redis. This is **NOT full server meshing** but a targeted tool for specific cross-shard needs:
+
+- Battle Royale circle/play zone
+- Supply airdrops
+- Limited-supply resources (prevent cross-shard farming)
+- World state (time of day, global scores)
+- Theoretically player characters across zone boundaries (untested by Redwood)
+
+**Sync mechanism:** Dirty checks on tick → batched API call to sidecar → Redis pub/sub → subscribing sidecars → individual item change messages. No clock synchronization or rewind. Clients receive state via standard UE5 replication from their connected server, not directly from Redis.
+
+### 6. Authentication and Ticketing
+
+**Auth providers:** Local (username/password), Steam, Epic, Discord, Twitch, JWT. Multiple providers can be enabled simultaneously for cross-platform. No account linking between providers yet (on roadmap).
+
+**Ticketing (matchmaking/queuing):**
+- **Queue:** FIFO queue for lobby-based games where players know which server to join (MMO overworld)
+- **Simple Match:** Lightweight matchmaking emulator for development
+- **Open Match:** Google's open-source matchmaker for production (region, skill, class matching)
+- **Custom Flow:** Programmable ticketing for advanced setups
+- Queue and matchmaking can run simultaneously (overworld queue + instanced dungeon matchmaking)
+
+### 7. Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Runtime | NodeJS + TypeScript |
+| Database | PostgreSQL (SQLite for Windows dev) |
+| Cache/PubSub | Redis (custom JS stub for Windows dev) |
+| Orchestration | Kubernetes |
+| Game servers | Agones (self-hosted/K8s) or Hathora (managed/on-demand) |
+| Deployment | Pulumi (Infrastructure-as-Code) |
+| Matchmaking | Open Match |
+| Chat | ejabberd (XMPP) |
+| Client ↔ Backend | Socket.IO |
+| Server ↔ Backend | Sidecar (NodeJS, co-located) |
+
+### 8. Comparison with Nyx's SpacetimeDB Architecture
+
+| Aspect | Redwood | Nyx (SpacetimeDB) |
+|--------|---------|-------------------|
+| **Real-time gameplay** | Standard UE5 dedicated servers (UDP replication) | SpacetimeDB WebSocket subscriptions |
+| **Backend language** | NodeJS/TypeScript | Rust (WASM module) |
+| **Database** | PostgreSQL + Redis | SpacetimeDB (built-in) |
+| **Game server hosting** | Agones/Hathora (UE5 dedicated servers) | SpacetimeDB IS the server (no UE5 server) |
+| **Spatial partitioning** | Zones (hard boundaries, server travel) | Chunk-based subscriptions (soft boundaries) |
+| **Scalability model** | Horizontal (more shards/servers) | Vertical (one SpacetimeDB per zone, up to ~200 players) |
+| **Cross-zone sync** | Redis pub/sub Sync Items (limited) | Not yet implemented |
+| **Physics** | UE5 dedicated server (full Chaos physics) | Sidecar (Euler integration via reducer calls) |
+| **Auth** | Built-in (Steam/Epic/Discord/etc.) | EOS integration (Spike 4) |
+| **Matchmaking** | Open Match (production-grade) | Not implemented |
+| **Chat** | ejabberd (XMPP, built-in) | Not implemented |
+| **Persistence** | Periodic dirty-flush to PostgreSQL | Automatic (every table write immediately persisted) |
+| **Licensing** | Paid license (source-available) | Open source (SpacetimeDB) |
+| **Complexity** | High (many microservices, K8s required for production) | Low (single binary, single database) |
+
+### 9. Patterns Worth Adopting in Nyx
+
+| # | Pattern | Redwood Implementation | Applicability to Nyx |
+|---|---------|----------------------|---------------------|
+| 1 | **Frontend/Backend service split** | Player-facing services scale independently from internal processing. Separate attack vectors. | Medium — if Nyx ever needs a web API layer (admin dashboard, companion app), this separation matters. SpacetimeDB currently serves both roles. |
+| 2 | **GameServerProxy (virtual world identity)** | Worlds exist as database entities even without running servers. Servers spin up on-demand. | High — Nyx should track "zones" as persistent entities in SpacetimeDB, independent of whether any client is connected. Enables restart recovery. |
+| 3 | **Sidecar pattern (game server ↔ backend bridge)** | Node process co-located with each UE5 server handles all backend communication, isolating game code from backend details. | Medium — Nyx's SpacetimeDB plugin already acts as an integrated "sidecar" inside the UE5 process. But if Nyx moves to Option C (UE5 dedicated servers), a sidecar becomes essential. |
+| 4 | **Character data partitioning** | 7 distinct data fields with different replication/privacy rules. Prevents clients from snooping on other players' inventories. | High — Nyx should adopt this pattern. SpacetimeDB tables can implement equivalent partitioning via subscription queries (`SELECT * FROM player_metadata` vs `SELECT * FROM player_inventory WHERE owner = :self`). |
+| 5 | **Dirty-flush persistence with configurable interval** | Default 0.5s. "Choose the largest number you're willing to lose in a crash." Auto-save on disconnect. | Low for SpacetimeDB (writes are immediately persistent). But relevant for the UE5 sidecar physics results — batch writes at a configurable interval rather than per-frame. |
+| 6 | **Schema migration functions** | Per-field `SchemaVersion` + `FieldName_Migrate_vN` functions. Upgrade one version at a time. Live game data evolution without downtime. | High — SpacetimeDB doesn't have built-in schema migration. Nyx will need a migration strategy for live data changes. Redwood's per-field versioning is more granular than whole-database migrations. |
+| 7 | **Dynamic sharding with soft/hard caps** | `num-players-to-add-shard` (soft) < `max-players-per-shard` (hard). Gap allows party follow. Auto-destroy empty shards after timeout. | High — directly applicable to Nyx's spatial zones. Could implement in SpacetimeDB: a `zone_state` table tracking player counts, a reducer that triggers shard creation when soft cap is reached. |
+| 8 | **Sync Items (selective cross-shard sync via Redis)** | Targeted pub/sub for specific actors (world events, limited resources), NOT full state mesh. Practical compromise. | High — if Nyx has multiple SpacetimeDB instances per world, Sync Items shows the right granularity for cross-instance sync. Not every entity needs cross-instance visibility — just world events, global state, and border entities. |
+| 9 | **Instanced dungeons as matchmaking-zone profiles** | Same system handles both persistent overworld (queue) and ephemeral dungeons (matchmaking). Player transfers back to overworld on completion. | Medium — When Nyx adds instanced content, this pattern is clean. SpacetimeDB could handle this as a separate module/database for each instance, with the main database tracking active instances. |
+| 10 | **Text chat via XMPP (ejabberd)** | Separate, proven chat server with room types (guild, party, realm, shard, nearby, direct). Spatial "nearby" chat uses sender location + client-side distance filtering. | Low — SpacetimeDB could handle chat as tables/subscriptions, but a dedicated XMPP server is more mature for features like history, blocking, moderation. Worth evaluating when chat becomes a priority. |
+
+### Bottom Line for Nyx
+
+Redwood represents the **production-grade UE5 MMO backend** that Nyx would need if it outgrows SpacetimeDB's capabilities (>300 players per zone, complex matchmaking, multiple regions). Its architecture is a well-engineered reference for how traditional MMO backends work.
+
+**Key architectural takeaway:** Redwood's approach is fundamentally different from Nyx's. Redwood says "use UE5 dedicated servers for gameplay, use backend microservices for everything else." Nyx says "use SpacetimeDB for everything including gameplay state sync." Both are valid:
+
+- **Redwood's strength:** Battle-tested UE5 replication for real-time gameplay (UDP, client prediction, server authority), production-grade game server orchestration (Agones/Hathora), mature data persistence patterns
+- **Nyx/SpacetimeDB's strength:** Dramatically simpler architecture (one binary vs. many microservices), automatic persistence (no dirty-flush needed), real-time subscriptions as a database feature, no Kubernetes required
+
+**Convergence point:** If Nyx ever needs Option C (UE5 dedicated servers + SpacetimeDB persistence), Redwood's architecture is essentially what Option C would look like, but with SpacetimeDB replacing PostgreSQL + Redis + custom sync code. The Sidecar pattern, GameServerProxy/Collection/Instance hierarchy, zone transfer flow, and character data partitioning would all translate directly.
+
+**Practical adoption path:** For Nyx's current Phase 1 (SpacetimeDB-only, ~100-200 players per zone), Redwood's patterns #2, #4, #6, #7, and #8 are immediately useful for structuring SpacetimeDB tables and reducers. Patterns #1, #3, #9, and #10 become relevant later if Nyx scales to multi-zone/multi-region deployment.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
@@ -1938,6 +2105,7 @@ However, OWS's **hard zone boundaries** (no cross-zone visibility, loading scree
 - EOS Developer Portal: https://dev.epicgames.com/portal/
 - UE5.7 Documentation: https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-5-7-documentation
 - BitCraft (reference game built with SpacetimeDB): https://www.bitcraftonline.com/
+- Redwood MMO (UE5 backend infrastructure): https://redwoodmmo.com/docs/
 - BitCraft Server Source Code (Apache 2.0): https://github.com/clockworklabs/BitCraftPublic
 - MultiServer Replication Plugin (Experimental): https://dev.epicgames.com/community/learning/knowledge-base/xBvk/unreal-engine-experimental-an-introduction-to-the-multiserver-replication-plugin
 - MultiServer Replication API: https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Plugins/MultiServerReplication
