@@ -9,6 +9,7 @@
 
 class USpringArmComponent;
 class UCameraComponent;
+class UNyxServerSubsystem;
 struct FInputActionValue;
 class UInputMappingContext;
 class UInputAction;
@@ -112,6 +113,9 @@ protected:
 	TObjectPtr<UInputMappingContext> DefaultMappingContext;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputMappingContext> MouseLookMappingContext;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> MoveAction;
 
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
@@ -119,6 +123,12 @@ protected:
 
 	UPROPERTY(EditDefaultsOnly, Category = "Input")
 	TObjectPtr<UInputAction> JumpAction;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> MouseLookAction;
+
+	UPROPERTY(EditDefaultsOnly, Category = "Input")
+	TObjectPtr<UInputAction> AttackAction;
 
 	// ──── Replicated Stats ────
 
@@ -155,6 +165,16 @@ protected:
 private:
 	void HandleMove(const FInputActionValue& Value);
 	void HandleLook(const FInputActionValue& Value);
+	void HandleAttack();
+
+	/** Server RPC: client requests a basic attack. Server does line trace + SpacetimeDB ResolveHit. */
+	UFUNCTION(Server, Reliable)
+	void ServerRPC_RequestAttack();
+
+	/** Attack cooldown */
+	float LastAttackTime = 0.f;
+	static constexpr float AttackCooldown = 0.5f;
+	static constexpr float AttackRange = 300.f;
 
 	UFUNCTION()
 	void OnRep_CurrentHP();

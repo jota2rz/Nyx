@@ -13,6 +13,9 @@
 #include "InputAction.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
+#include "Nyx/Server/NyxServerSubsystem.h"
+#include "Engine/World.h"
+#include "DrawDebugHelpers.h"
 
 ANyxCharacter::ANyxCharacter()
 {
@@ -52,12 +55,17 @@ ANyxCharacter::ANyxCharacter()
 
 	// ──── Mannequin mesh + animation ────
 	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshFinder(
-		TEXT("/Game/Characters/Mannequins/Meshes/SK_Mannequin"));
+		TEXT("/Game/Characters/Mannequins/Meshes/SKM_Manny_Simple"));
 	if (MeshFinder.Succeeded())
 	{
 		GetMesh()->SetSkeletalMesh(MeshFinder.Object);
 		GetMesh()->SetRelativeLocation(FVector(0.f, 0.f, -96.f));
 		GetMesh()->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
+		UE_LOG(LogNyx, Log, TEXT("SKM_Manny_Simple loaded successfully"));
+	}
+	else
+	{
+		UE_LOG(LogNyx, Error, TEXT("FAILED to load SKM_Manny_Simple!"));
 	}
 
 	static ConstructorHelpers::FClassFinder<UAnimInstance> AnimFinder(
@@ -65,6 +73,11 @@ ANyxCharacter::ANyxCharacter()
 	if (AnimFinder.Succeeded())
 	{
 		GetMesh()->SetAnimInstanceClass(AnimFinder.Class);
+		UE_LOG(LogNyx, Log, TEXT("ABP_Unarmed loaded successfully"));
+	}
+	else
+	{
+		UE_LOG(LogNyx, Error, TEXT("FAILED to load ABP_Unarmed!"));
 	}
 
 	// ──── Enhanced Input assets ────
@@ -73,6 +86,18 @@ ANyxCharacter::ANyxCharacter()
 	if (IMCFinder.Succeeded())
 	{
 		DefaultMappingContext = IMCFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<UInputMappingContext> IMCMouseLookFinder(
+		TEXT("/Game/Input/IMC_MouseLook"));
+	if (IMCMouseLookFinder.Succeeded())
+	{
+		MouseLookMappingContext = IMCMouseLookFinder.Object;
+		UE_LOG(LogNyx, Log, TEXT("IMC_MouseLook loaded successfully"));
+	}
+	else
+	{
+		UE_LOG(LogNyx, Warning, TEXT("FAILED to load IMC_MouseLook"));
 	}
 
 	static ConstructorHelpers::FObjectFinder<UInputAction> MoveFinder(
@@ -95,6 +120,22 @@ ANyxCharacter::ANyxCharacter()
 	{
 		JumpAction = JumpFinder.Object;
 	}
+
+	static ConstructorHelpers::FObjectFinder<UInputAction> MouseLookFinder(
+		TEXT("/Game/Input/Actions/IA_MouseLook"));
+	if (MouseLookFinder.Succeeded())
+	{
+		MouseLookAction = MouseLookFinder.Object;
+		UE_LOG(LogNyx, Log, TEXT("IA_MouseLook loaded successfully"));
+	}
+	else
+	{
+		UE_LOG(LogNyx, Warning, TEXT("FAILED to load IA_MouseLook — mouse camera will not work"));
+	}
+
+	// Attack action — create programmatically (Digital/bool trigger)
+	AttackAction = CreateDefaultSubobject<UInputAction>(TEXT("IA_Attack"));
+	AttackAction->ValueType = EInputActionValueType::Boolean;
 }
 
 void ANyxCharacter::BeginPlay()
@@ -114,7 +155,20 @@ void ANyxCharacter::BeginPlay()
 		{
 			if (DefaultMappingContext)
 			{
+				// Inject left-click → AttackAction into the shared IMC
+				if (AttackAction)
+				{
+					FEnhancedActionKeyMapping& Mapping =
+						DefaultMappingContext->MapKey(AttackAction, EKeys::LeftMouseButton);
+					(void)Mapping; // suppress unused warning
+				}
+
 				InputSub->AddMappingContext(DefaultMappingContext, 0);
+			}
+
+			if (MouseLookMappingContext)
+			{
+				InputSub->AddMappingContext(MouseLookMappingContext, 1);
 			}
 		}
 	}
@@ -137,10 +191,20 @@ void ANyxCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 		EnhancedInput->BindAction(LookAction, ETriggerEvent::Triggered, this, &ANyxCharacter::HandleLook);
 	}
 
+	if (MouseLookAction)
+	{
+		EnhancedInput->BindAction(MouseLookAction, ETriggerEvent::Triggered, this, &ANyxCharacter::HandleLook);
+	}
+
 	if (JumpAction)
 	{
 		EnhancedInput->BindAction(JumpAction, ETriggerEvent::Started, this, &ACharacter::Jump);
 		EnhancedInput->BindAction(JumpAction, ETriggerEvent::Completed, this, &ACharacter::StopJumping);
+	}
+
+	if (AttackAction)
+	{
+		EnhancedInput->BindAction(AttackAction, ETriggerEvent::Started, this, &ANyxCharacter::HandleAttack);
 	}
 }
 
@@ -238,9 +302,65 @@ void ANyxCharacter::HandleLook(const FInputActionValue& Value)
 {
 	const FVector2D LookInput = Value.Get<FVector2D>();
 
-	if (APlayerController* PC = Cast<APlayerController>(Controller))
+	if (Controller)
 	{
-		PC->AddYawInput(LookInput.X);
-		PC->AddPitchInput(LookInput.Y);
+		AddControllerYawInput(LookInput.X);
+		AddControllerPitchInput(LookInput.Y);
+	}
+}
+
+void ANyxCharacter::HandleAttack()
+{
+	// Cooldown check (client-side, prevents spam)
+	const float Now = GetWorld()->GetTimeSeconds();
+	if (Now - LastAttackTime < AttackCooldown) return;
+	LastAttackTime = Now;
+
+	UE_LOG(LogNyx, Log, TEXT("%s: Attack pressed!"), *GetDisplayName());
+
+	// Call Server RPC — server will do the line trace and SpacetimeDB call
+	ServerRPC_RequestAttack();
+}
+
+void ANyxCharacter::ServerRPC_RequestAttack_Implementation()
+{
+	// Server-side: line trace forward from this character to find a target
+	const FVector Start = GetActorLocation() + FVector(0.f, 0.f, 50.f); // eye height
+	const FVector Forward = GetActorForwardVector();
+	const FVector End = Start + Forward * AttackRange;
+
+	FHitResult HitResult;
+	FCollisionQueryParams Params;
+	Params.AddIgnoredActor(this);
+
+	const bool bHit = GetWorld()->LineTraceSingleByChannel(
+		HitResult, Start, End, ECC_Pawn, Params);
+
+	// Debug line (visible in editor)
+	DrawDebugLine(GetWorld(), Start, End,
+		bHit ? FColor::Red : FColor::Green, false, 1.0f, 0, 2.f);
+
+	if (!bHit)
+	{
+		UE_LOG(LogNyx, Log, TEXT("%s: Attack missed (no target in range)"), *GetDisplayName());
+		return;
+	}
+
+	ANyxCharacter* Target = Cast<ANyxCharacter>(HitResult.GetActor());
+	if (!Target || Target == this)
+	{
+		UE_LOG(LogNyx, Log, TEXT("%s: Attack hit non-character"), *GetDisplayName());
+		return;
+	}
+
+	UE_LOG(LogNyx, Log, TEXT("%s attacks %s! (range=%.0f)"),
+		*GetDisplayName(), *Target->GetDisplayName(),
+		FVector::Dist(GetActorLocation(), Target->GetActorLocation()));
+
+	// Route through NyxServerSubsystem → SpacetimeDB
+	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+	if (ServerSub)
+	{
+		ServerSub->RequestResolveHit(SpacetimeIdentity, Target->SpacetimeIdentity, 0); // skill 0 = basic attack
 	}
 }
