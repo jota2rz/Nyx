@@ -1,0 +1,8 @@
+[package]
+name = "fanout_stress"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+spacetimedb-sdk = "2.0.2"
+clap = { version = "4", features = ["derive"] }
