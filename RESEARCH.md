@@ -1553,6 +1553,176 @@ BitCraft reveals idiomatic SpacetimeDB usage patterns. Most translate to v2.0, b
 
 ---
 
+## Open World Server (OWS) — Reference Architecture Analysis
+
+> **Source:** https://github.com/Dartanlla/OWS  
+> **License:** MIT  
+> **Engine:** Unreal Engine 5.7 (plugin updated January 2026)  
+> **Backend:** C# .NET 8 microservices + MSSQL/PostgreSQL + RabbitMQ  
+> **Relevance:** OWS is an open-source server instance manager for UE5 that handles zone-based world partitioning, dynamic server spin-up/down, sharding, character persistence, and cross-zone travel. It solves many of the same problems Nyx faces in Option C (UE5 dedicated servers + persistence layer), but lacks seamless border transitions.
+
+### Overview
+
+OWS is designed to create large worlds in UE5 by stitching together multiple UE5 maps or splitting a single large map into multiple **zones**. Each zone runs as a separate UE5 dedicated server instance. OWS manages the lifecycle of these instances — spinning them up when players arrive and shutting them down when empty. The project targets 100,000+ concurrent players across all zones.
+
+**Key architectural insight:** OWS treats each UE5 dedicated server as a self-contained zone. Players in different zones **cannot see or interact** with each other. Zone transitions use UE5's `ClientTravel` — the client disconnects from one server and connects to another. This is a hard zone boundary model, not the seamless border overlap that MultiServer Replication provides.
+
+### Architecture
+
+```
+Client ──UE5 NetDriver──► UE5 Zone Server Instance (one per zone/shard)
+  │                              │
+  │  HTTP REST ──────────────────┤──► OWS Public API ──► MSSQL/PostgreSQL
+  │                              │         │
+  │                              │    OWS Instance Management API
+  │                              │         │
+  │                              │    RabbitMQ ──► Instance Launcher(s)
+  │                              │                    │
+  │                              │                    └── Spawns/kills UE5 server processes
+  │                              │
+  └── HTTP REST (travel) ────────┘──► OWS Character Persistence API
+```
+
+**Five microservices** (all .NET 8, Docker-deployed):
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| **Public API** | 44302 | Client-facing: login, registration, character selection, zone connection |
+| **Instance Management** | 44328 | Zone instance lifecycle: spin up, shut down, status tracking, launcher registration |
+| **Character Persistence** | 44323 | Character CRUD: stats, abilities, inventory, custom data, position saving |
+| **Global Data** | 44325 | Key-value store for non-character, non-user data |
+| **Instance Launcher** | (agent) | Runs on each hardware server; listens to RabbitMQ for spin-up/shut-down commands; launches UE5 server processes |
+
+**Messaging:** RabbitMQ handles async communication between Instance Management and Instance Launchers. Two exchanges:
+- `ows.serverspinup` — routes `MQSpinUpServerMessage` (CustomerGUID, WorldServerID, ZoneInstanceID, MapName, Port) to the correct launcher
+- `ows.servershutdown` — routes `MQShutDownServerMessage` to kill specific zone instances
+
+**Database:** MSSQL (default), PostgreSQL, or MySQL. Stores: users, characters, zones, zone instances, world servers, abilities, inventory, global data. Character position (X, Y, Z, RX, RY, RZ) is persisted per-character.
+
+### Zone & Shard System
+
+OWS's core concept is **Zones** and **Shards**:
+
+- **Zone** = a named area of the game world, mapped to a UE5 map or section of a map
+- **Zone Instance** (Shard) = a running UE5 dedicated server process for that zone
+- **World Server** = a hardware device that runs one or more zone instances
+- **Soft Player Cap** — when reached, new shards spin up automatically for that zone
+- **Hard Player Cap** — absolute maximum per shard, new players are rejected
+
+When a player requests to join a zone, the flow is:
+1. Client calls `GetServerToConnectTo` with `CharacterName` + `ZoneName`
+2. API calls `JoinMapByCharName` stored procedure — finds a running zone instance with capacity
+3. If no instance exists (`NeedToStartupMap = true`), publishes a `MQSpinUpServerMessage` to RabbitMQ
+4. Instance Launcher receives the message, spawns a UE5 server process: `PathToDedicatedServer "{ProjectPath}" {MapName}?listen -server -port={Port} -zoneinstanceid={ZoneInstanceID}`
+5. API polls `CheckMapInstanceStatus` every 2 seconds for up to 90 seconds waiting for status = 2 (Ready)
+6. Returns `ServerIP:Port` to the client
+7. Client calls `ClientTravel(ServerIP:Port)` to connect
+
+**Shard selection strategies** (`ERPGSchemeToChooseMap`):
+- `Default` — first available
+- `MapWithFewestPlayers` — load balancing
+- `MapWithMostPlayers` — population concentration
+- `MapOnWorldServerWithLeastNumberOfMaps` — hardware load balancing
+- `SpecificWorldServer` — manual assignment
+
+### Zone Travel (How Transfers Work)
+
+Zone travel is **not seamless**. The UE5 plugin provides two mechanisms:
+
+1. **`AOWSTravelToMapActor`** — a Blueprint-configurable actor placed in the world with properties:
+   - `ZoneName` — destination zone
+   - `LocationOnMap` — spawn position in destination
+   - `StartingRotation` — spawn rotation
+   - `UseDynamicSpawnLocation` / `DynamicSpawnAxis` — offset spawn position based on trigger entry direction
+   - When triggered, calls `GetZoneServerToTravelTo(CharacterName, SchemeToChooseMap, WorldServerID, ZoneName)` → receives `ServerIP:Port` → calls `TravelToMap2(ServerAndPort, X, Y, Z, RX, RY, RZ, PlayerName, SeamlessTravel)`
+
+2. **`SetSelectedCharacterAndConnectToLastZone`** — reconnects a character to whatever zone they last played in (used after login/character selection)
+
+The travel flow:
+- Player location is saved to the database before travel (`SavePlayerLocation` / `SaveAllPlayerLocations` batch)
+- Client disconnects from current zone server
+- Client connects to new zone server via `ClientTravel`
+- New server's `GameMode::InitNewPlayer` reads character data from the database, spawns the character at the persisted position
+- **Black screen or loading screen** during transition — no visual continuity
+
+### Character Persistence Model
+
+The `GetCharByCharName` stored procedure returns a character with ~30 fields including:
+- Position: `X, Y, Z, RX, RY, RZ` (float, persisted per-character)
+- Stats: `CharacterLevel, Gender, Gold, Silver, Copper, FreeCurrency, PremiumCurrency, Score, XP, Size, Weight`
+- Zone: `MapName` (last zone the character was in)
+- Session: `LastActivity, CreateDate, UserSessionGUID`
+- Custom: `CustomCharacterDataStruct[]` — arbitrary key-value pairs for game-specific data
+
+**Batch position saving:** `AOWSGameMode::SaveAllPlayerLocations` runs on a timer (`SaveIntervalInSeconds`), serializes all player positions into a single REST call (`FUpdateAllPlayerPositionsJSONPost`), and sends to the Character Persistence API. Can be split into groups (`SplitSaveIntoHowManyGroups`) to avoid large batches.
+
+**Custom character data:** OWS provides a generic `AddOrUpdateCustomCharacterData(CharName, FieldName, Value)` system. Any game-specific data (quest progress, faction standing, appearance) is stored as string key-value pairs. This is extensible but requires manual deserialization.
+
+### Health Monitoring & Auto-Shutdown
+
+`ServerLauncherHealthMonitoring` periodically:
+1. Gets all zone instances for the world server via `GetZoneInstancesForWorldServer`
+2. Checks `LastServerEmptyDate` — if a zone instance has been empty longer than `MinutesToShutdownAfterEmpty`, it's shut down
+3. Kills the process via `Process.Kill()`
+
+### UE5 Plugin Architecture
+
+The plugin provides:
+- **`AOWSPlayerController`** — extends `APlayerController` with HTTP REST calls for travel, character management, chat, groups, abilities
+- **`UOWSPlayerControllerComponent`** — same functionality as a component (can be added to any controller)
+- **`AOWSGameMode`** — extends `AGameMode` with zone management, batch saving, world time, inventory
+- **`AOWSCharacter` / `AOWSCharacterWithAbilities`** — character base classes with GAS (Gameplay Ability System) integration
+- **`UOWSAPISubsystem`** — game instance subsystem for API configuration
+- **`AOWSTravelToMapActor`** — trigger actor for zone transitions
+- **`AOWSAdvancedProjectile`** — replicated projectile with prediction support
+
+All API communication is via **HTTP REST** (not WebSocket). The plugin uses UE5's `FHttpModule` to make POST requests to the OWS backend services. This is a fire-and-forget pattern — no persistent connection for real-time updates.
+
+### Comparison with Nyx's Architecture
+
+| Aspect | OWS | Nyx (Current) | Nyx Option C |
+|--------|-----|---------------|-------------|
+| **Game state** | SQL database (MSSQL/PostgreSQL) | SpacetimeDB (WASM module) | SpacetimeDB as persistence layer |
+| **Real-time networking** | UE5 NetDriver (per zone server) | SpacetimeDB WebSocket subscriptions | UE5 NetDriver + SpacetimeDB persistence |
+| **Zone transitions** | `ClientTravel` — hard disconnect/reconnect (loading screen) | N/A (single world) | MultiServer Replication — seamless visual border (Spike 8 deep dive) |
+| **Cross-zone visibility** | None — players in different zones are invisible | N/A | MultiServer Replication — `ANoPawnPlayerController` with `SetRemoteViewTarget` |
+| **Cross-zone interaction** | None — requires custom implementation | N/A | Requires custom beacon RPCs (MultiServer Replication) |
+| **Instance management** | Automated: soft cap → spin up shard, empty timeout → shut down | N/A | Would need similar management layer |
+| **Persistence** | HTTP REST to SQL per-operation | SpacetimeDB table subscriptions (real-time) | SpacetimeDB table sync |
+| **Sharding** | Multiple instances of same zone (horizontal scaling) | Single SpacetimeDB instance | Multiple UE5 servers via MultiServer Replication |
+| **Physics** | UE5 Chaos (per zone server) | SpacetimeDB sidecar (Euler/Chaos) | UE5 Chaos (per zone server) |
+| **Message bus** | RabbitMQ (async spin-up/down commands) | SpacetimeDB reducers | RabbitMQ or similar for orchestration |
+| **Max players per zone** | ~100 (UE5 server limit) | ~10 (SpacetimeDB throughput limit) | ~100 (UE5 server limit) |
+
+### Key Limitations of OWS for Nyx
+
+1. **Hard zone boundaries** — Players in different zones are completely isolated. No visibility, no interaction. This is the fundamental gap for a seamless open world.
+2. **No border overlap** — Unlike MultiServer Replication's `ANoPawnPlayerController` + relevancy-based cross-server visibility, OWS has no mechanism for players to see across zone boundaries.
+3. **Loading screen transitions** — `ClientTravel` disconnects and reconnects. Even with UE5's seamless travel, there's a noticeable transition.
+4. **HTTP REST for game state** — Not real-time. Character data is fetched on connection and saved periodically. No live subscription to state changes. SpacetimeDB's WebSocket subscriptions are strictly superior for real-time state sync.
+5. **No physics coordination** — Each zone server runs independent physics. Objects at zone borders don't interact across servers.
+6. **SQL as game database** — Traditional CRUD with stored procedures. No reducer-as-game-logic pattern. No built-in event system for state changes.
+
+### What Nyx Can Learn from OWS
+
+| # | Pattern | Description | Applicability |
+|---|---------|-------------|--------------|
+| 1 | **Zone instance lifecycle management** | Automated spin-up when players arrive, shutdown after empty timeout, health monitoring. RabbitMQ as the command bus between orchestrator and launchers. | High — if Nyx goes with Option C, we need this exact orchestration layer. SpacetimeDB reducers could replace RabbitMQ for instance management commands. |
+| 2 | **Shard selection strategies** | Multiple algorithms for placing players: fewest players, most players, least-loaded hardware. Configurable per-zone soft/hard caps. | High — any multi-server architecture needs player routing intelligence. |
+| 3 | **Batch position persistence** | `SaveAllPlayerLocations` batches all player positions into one API call on a timer, optionally split into groups. Avoids N individual save calls per tick. | Medium — Nyx's SpacetimeDB batch reducer (`physics_update_batch` in Spike 9) solves this differently, but the batching-on-timer pattern is the same. |
+| 4 | **Travel actor with dynamic spawn** | `AOWSTravelToMapActor` with configurable destination zone, position, rotation, and dynamic axis offset based on entry direction. Clean Blueprint-configurable interface. | Medium — if Nyx implements zone transitions, a similar trigger actor pattern is useful. But MultiServer Replication's migration is more seamless. |
+| 5 | **Custom character data as key-value pairs** | Extensible `AddOrUpdateCustomCharacterData(CharName, FieldName, Value)` avoids schema migrations for game-specific data. | Low — SpacetimeDB tables are more structured (typed columns, subscriptions). But the pattern of having a generic extension table alongside typed tables is worth considering. |
+| 6 | **World time synchronization** | `GetCurrentWorldTime` + `DayLengthInSeconds` + `DaysPerLunarCycle` + `DaysPerSolarCycle` on the GameMode. Server-authoritative time of day. | Low — should be a SpacetimeDB table/reducer, not an API call. |
+| 7 | **Instance Launcher as an agent** | Separating the "what to launch" (Instance Management API) from "how to launch" (Instance Launcher process) allows scaling across multiple hardware servers. Each machine runs its own launcher agent. | High — directly applicable to Option C infrastructure. Could be a simple Rust/C# service per machine. |
+
+### Bottom Line for Nyx
+
+OWS validates that a **microservice-based orchestration layer** on top of UE5 dedicated servers is viable for large-scale MMOs. Its zone lifecycle management, shard selection, and batch persistence patterns are production-proven and directly applicable to Nyx's Option C.
+
+However, OWS's **hard zone boundaries** (no cross-zone visibility, loading screen transitions) fall short of Nyx's "seamless open world" requirement. The combination of OWS's instance management patterns **plus** MultiServer Replication's border seamlessness would address both concerns — OWS provides the orchestration for spinning up/down servers, while MultiServer Replication provides the seamless cross-server visibility at borders. This hybrid approach is worth exploring if Spike 9 benchmarks confirm Option C as the architecture.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
@@ -1565,3 +1735,5 @@ BitCraft reveals idiomatic SpacetimeDB usage patterns. Most translate to v2.0, b
 - BitCraft Server Source Code (Apache 2.0): https://github.com/clockworklabs/BitCraftPublic
 - MultiServer Replication Plugin (Experimental): https://dev.epicgames.com/community/learning/knowledge-base/xBvk/unreal-engine-experimental-an-introduction-to-the-multiserver-replication-plugin
 - MultiServer Replication API: https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Plugins/MultiServerReplication
+- Open World Server (OWS): https://github.com/Dartanlla/OWS
+- OWS Documentation: https://www.openworldserver.com/
