@@ -9,6 +9,7 @@
 #include "Nyx/Player/NyxPlayerPawn.h"
 #include "Nyx/Player/NyxMovementComponent.h"
 #include "Nyx/Sidecar/NyxSidecarSubsystem.h"
+#include "Nyx/Test/NyxSmokeTest.h"
 #include "ModuleBindings/SpacetimeDBClient.g.h"
 
 void UNyxGameInstance::Init()
@@ -575,7 +576,27 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset"));
+	// ─── Option 4: Smoke Test ─────────────────────────────────────────
+
+	// Nyx.SmokeTest [host] [database] — run end-to-end Option 4 pipeline test
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.SmokeTest"),
+		TEXT("Run Option 4 end-to-end smoke test. Usage: Nyx.SmokeTest [host] [database]"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			const FString Host = Args.Num() > 0 ? Args[0] : SpacetimeDBHost;
+			const FString DB = Args.Num() > 1 ? Args[1] : SpacetimeDBDatabaseName;
+
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.SmokeTest %s %s"), *Host, *DB);
+
+			// Create smoke test object (GC-rooted by AddToRoot)
+			UNyxSmokeTest* Test = NewObject<UNyxSmokeTest>(this);
+			Test->AddToRoot(); // prevent GC during async test
+			Test->Run(Host, DB);
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset, Nyx.SmokeTest"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()
