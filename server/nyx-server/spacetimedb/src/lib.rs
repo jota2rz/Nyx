@@ -1,4 +1,4 @@
-// Nyx MMO — SpacetimeDB Server Module (Spikes 1–8)
+// Nyx MMO — SpacetimeDB Server Module (Spikes 1–9)
 //
 // Tables:
 //   - player: Active player state (position, chunk, display name)
@@ -9,6 +9,10 @@
 //   - bench_entity: Entity table for read/write benchmarks
 //   - bench_tick_log: Logs from each scheduled tick
 //   - tick_schedule: Scheduled table driving the game tick loop
+//   - fanout_entity: Entities for subscription fan-out stress testing (Spike 9)
+//   - fanout_schedule: Scheduled table driving the fan-out tick (Spike 9)
+//   - fanout_tick_log: Logs from each fan-out tick (Spike 9)
+//   - stress_result: Records multi-client contention results (Spike 9)
 //
 // Auth flow:
 //   1. Client connects anonymously (gets SpacetimeDB Identity)
@@ -315,6 +319,28 @@ pub fn spawn_projectile(
     );
 }
 
+/// Spawn N projectiles in a single reducer call (Spike 9 benchmarking utility).
+/// All bodies start at different X positions with the same velocity.
+#[spacetimedb::reducer]
+pub fn spawn_projectiles_batch(ctx: &ReducerContext, count: u32) {
+    for i in 0..count {
+        ctx.db.physics_body().insert(PhysicsBody {
+            entity_id: 0,
+            body_type: "projectile".to_string(),
+            pos_x: (i as f64) * 100.0,
+            pos_y: 0.0,
+            pos_z: 500.0,
+            vel_x: 10.0,
+            vel_y: 0.0,
+            vel_z: 100.0,
+            active: true,
+            owner: ctx.sender(),
+            last_update: ctx.timestamp,
+        });
+    }
+    log::info!("spawn_projectiles_batch: {} bodies spawned", count);
+}
+
 /// Sidecar updates a single physics body's position and velocity.
 /// Called every sidecar tick for each active body.
 #[spacetimedb::reducer]
@@ -369,6 +395,381 @@ pub fn physics_reset(ctx: &ReducerContext) {
         removed += 1;
     }
     log::info!("physics_reset: removed {} bodies", removed);
+}
+
+// ─── Spike 9: Scalability & 1000-Player Chunk Viability ────────────
+
+// ── Test 1: Batched Physics Update ─────────────────────────────────
+
+/// A single body update within a batch. Passed as Vec to physics_update_batch.
+#[derive(spacetimedb::SpacetimeType)]
+pub struct BodyUpdate {
+    pub entity_id: u64,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub pos_z: f64,
+    pub vel_x: f64,
+    pub vel_y: f64,
+    pub vel_z: f64,
+    pub active: bool,
+}
+
+/// Batched physics update: sidecar sends ALL body updates in a single reducer call.
+/// This avoids per-reducer invocation overhead and subscription diff overhead by
+/// doing all updates in one transaction with one commit + one diff.
+#[spacetimedb::reducer]
+pub fn physics_update_batch(ctx: &ReducerContext, updates: Vec<BodyUpdate>) {
+    let mut applied = 0u32;
+    for u in &updates {
+        if let Some(mut body) = ctx.db.physics_body().entity_id().find(u.entity_id) {
+            body.pos_x = u.pos_x;
+            body.pos_y = u.pos_y;
+            body.pos_z = u.pos_z;
+            body.vel_x = u.vel_x;
+            body.vel_y = u.vel_y;
+            body.vel_z = u.vel_z;
+            body.active = u.active;
+            body.last_update = ctx.timestamp;
+            ctx.db.physics_body().entity_id().update(body);
+            applied += 1;
+        }
+    }
+    log::info!(
+        "physics_update_batch: {}/{} bodies updated",
+        applied,
+        updates.len()
+    );
+}
+
+/// Spike 9 Test 1 self-contained benchmark: measures batched update throughput
+/// server-side. Spawns `body_count` bodies, then updates all of them in a single
+/// batch call, repeated `iterations` times. Uses bench_counter(id=500) to record
+/// the iteration count. Compare server logs for timing.
+#[spacetimedb::reducer]
+pub fn bench_batch_physics(ctx: &ReducerContext, body_count: u32, iterations: u32) {
+    // Clean existing bodies
+    for body in ctx.db.physics_body().iter() {
+        ctx.db.physics_body().entity_id().delete(body.entity_id);
+    }
+    // Spawn bodies
+    let mut body_ids: Vec<u64> = Vec::with_capacity(body_count as usize);
+    for i in 0..body_count {
+        let body = ctx.db.physics_body().insert(PhysicsBody {
+            entity_id: 0,
+            body_type: "bench".to_string(),
+            pos_x: (i as f64) * 100.0,
+            pos_y: 0.0,
+            pos_z: 500.0,
+            vel_x: 10.0,
+            vel_y: 0.0,
+            vel_z: 100.0,
+            active: true,
+            owner: ctx.sender(),
+            last_update: ctx.timestamp,
+        });
+        body_ids.push(body.entity_id);
+    }
+    log::info!("bench_batch_physics: spawned {} bodies, running {} iterations", body_count, iterations);
+
+    // Run iterations — each iteration updates all bodies
+    for iter in 0..iterations {
+        for id in &body_ids {
+            if let Some(mut body) = ctx.db.physics_body().entity_id().find(*id) {
+                body.pos_x += 1.0;
+                body.pos_y += 0.5;
+                body.pos_z -= 0.1;
+                body.last_update = ctx.timestamp;
+                ctx.db.physics_body().entity_id().update(body);
+            }
+        }
+        // Log every 10th iteration
+        if (iter + 1) % 10 == 0 || iter == 0 {
+            log::info!("bench_batch_physics: iteration {}/{} ({} bodies)", iter + 1, iterations, body_count);
+        }
+    }
+
+    // Record completion
+    if let Some(mut c) = ctx.db.bench_counter().id().find(500) {
+        c.value = (body_count as u64) * (iterations as u64);
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 500,
+            value: (body_count as u64) * (iterations as u64),
+            last_updated: ctx.timestamp,
+        });
+    }
+    log::info!(
+        "bench_batch_physics: COMPLETE — {} bodies × {} iterations = {} total updates",
+        body_count, iterations, (body_count as u64) * (iterations as u64)
+    );
+}
+
+// ── Test 2: Multi-Client Contention ────────────────────────────────
+
+/// Table to record stress test results. Each row captures one measurement sample.
+#[spacetimedb::table(accessor = stress_result, public)]
+pub struct StressResult {
+    #[primary_key]
+    #[auto_inc]
+    pub id: u64,
+    /// Number of concurrent clients in this test run
+    pub client_count: u32,
+    /// Total reducer calls processed during the measurement window
+    pub total_calls: u64,
+    /// Measurement window duration in milliseconds
+    pub window_ms: u64,
+    /// Server timestamp when this result was recorded
+    pub recorded_at: Timestamp,
+}
+
+/// Simple movement reducer for stress testing. Each stress client calls this at N Hz.
+/// Uses the same pattern as move_player but on bench_entity rows to avoid
+/// interfering with real player state.
+#[spacetimedb::reducer]
+pub fn stress_move(ctx: &ReducerContext, entity_id: u64, dx: f64, dy: f64) {
+    if let Some(mut e) = ctx.db.bench_entity().id().find(entity_id) {
+        e.pos_x += dx;
+        e.pos_y += dy;
+        e.updated_at = ctx.timestamp;
+        ctx.db.bench_entity().id().update(e);
+    }
+    // Increment the stress call counter (id=300)
+    if let Some(mut c) = ctx.db.bench_counter().id().find(300) {
+        c.value += 1;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 300,
+            value: 1,
+            last_updated: ctx.timestamp,
+        });
+    }
+}
+
+/// Record the stress test results. Called by the test harness after a measurement window.
+#[spacetimedb::reducer]
+pub fn stress_record(ctx: &ReducerContext, client_count: u32, window_ms: u64) {
+    let total_calls = ctx
+        .db
+        .bench_counter()
+        .id()
+        .find(300)
+        .map(|c| c.value)
+        .unwrap_or(0);
+    ctx.db.stress_result().insert(StressResult {
+        id: 0,
+        client_count,
+        total_calls,
+        window_ms,
+        recorded_at: ctx.timestamp,
+    });
+    // Reset the counter for the next window
+    if let Some(mut c) = ctx.db.bench_counter().id().find(300) {
+        c.value = 0;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    }
+    log::info!(
+        "stress_record: {} calls from {} clients in {}ms ({:.0} calls/sec)",
+        total_calls,
+        client_count,
+        window_ms,
+        total_calls as f64 / (window_ms as f64 / 1000.0)
+    );
+}
+
+/// Clear all stress test results.
+#[spacetimedb::reducer]
+pub fn stress_reset(ctx: &ReducerContext) {
+    for r in ctx.db.stress_result().iter() {
+        ctx.db.stress_result().id().delete(r.id);
+    }
+    if let Some(mut c) = ctx.db.bench_counter().id().find(300) {
+        c.value = 0;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    }
+    log::info!("stress_reset: cleared all stress results");
+}
+
+// ── Test 3: Subscription Fan-Out Stress ────────────────────────────
+
+/// Entity for fan-out testing. Each row simulates a "player" whose position
+/// is updated every tick. Subscribers see OnUpdate for every row change.
+#[spacetimedb::table(accessor = fanout_entity, public)]
+pub struct FanoutEntity {
+    #[primary_key]
+    #[auto_inc]
+    pub id: u64,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub pos_z: f64,
+    pub vel_x: f64,
+    pub vel_y: f64,
+    pub updated_at: Timestamp,
+}
+
+/// Scheduling table for the fan-out tick. Controls the update frequency.
+#[spacetimedb::table(accessor = fanout_schedule, scheduled(fanout_tick))]
+pub struct FanoutSchedule {
+    #[primary_key]
+    #[auto_inc]
+    pub scheduled_id: u64,
+    pub scheduled_at: ScheduleAt,
+}
+
+/// Log entry for each fan-out tick.
+#[spacetimedb::table(accessor = fanout_tick_log, public)]
+pub struct FanoutTickLog {
+    #[primary_key]
+    #[auto_inc]
+    pub id: u64,
+    pub tick_number: u64,
+    pub entities_updated: u32,
+    pub timestamp: Timestamp,
+}
+
+/// Fan-out tick: updates ALL fanout_entity rows each tick.
+/// Subscribers receive OnUpdate for every row change — this is the O(N²) test.
+#[spacetimedb::reducer]
+pub fn fanout_tick(ctx: &ReducerContext, _arg: FanoutSchedule) -> Result<(), String> {
+    // Read/increment tick counter (id=400)
+    let tick_num = if let Some(mut c) = ctx.db.bench_counter().id().find(400) {
+        c.value += 1;
+        c.last_updated = ctx.timestamp;
+        let n = c.value;
+        ctx.db.bench_counter().id().update(c);
+        n
+    } else {
+        ctx.db.bench_counter().insert(BenchCounter {
+            id: 400,
+            value: 1,
+            last_updated: ctx.timestamp,
+        });
+        1
+    };
+
+    // Update all fan-out entities (simulates N players moving)
+    let mut updated: u32 = 0;
+    let ids: Vec<u64> = ctx.db.fanout_entity().iter().map(|e| e.id).collect();
+    for id in &ids {
+        if let Some(mut e) = ctx.db.fanout_entity().id().find(*id) {
+            e.pos_x += e.vel_x;
+            e.pos_y += e.vel_y;
+            e.updated_at = ctx.timestamp;
+            ctx.db.fanout_entity().id().update(e);
+            updated += 1;
+        }
+    }
+
+    // Log this tick (keep last 50)
+    ctx.db.fanout_tick_log().insert(FanoutTickLog {
+        id: 0,
+        tick_number: tick_num,
+        entities_updated: updated,
+        timestamp: ctx.timestamp,
+    });
+    if tick_num > 50 {
+        let cutoff = tick_num - 50;
+        for row in ctx.db.fanout_tick_log().iter() {
+            if row.tick_number <= cutoff {
+                ctx.db.fanout_tick_log().id().delete(row.id);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Seed N fan-out entities with random-ish velocities.
+#[spacetimedb::reducer]
+pub fn fanout_seed(ctx: &ReducerContext, count: u32) {
+    for i in 0..count {
+        let angle = (i as f64) * 0.1;
+        ctx.db.fanout_entity().insert(FanoutEntity {
+            id: 0,
+            pos_x: (i as f64) * 100.0,
+            pos_y: (i as f64) * 50.0,
+            pos_z: 0.0,
+            vel_x: angle.cos() * 5.0,
+            vel_y: angle.sin() * 5.0,
+            updated_at: ctx.timestamp,
+        });
+    }
+    log::info!("fanout_seed: seeded {} entities", count);
+}
+
+/// Start the fan-out tick at the given interval.
+#[spacetimedb::reducer]
+pub fn fanout_start(ctx: &ReducerContext, interval_ms: u64) {
+    // Stop any existing fan-out ticks
+    for row in ctx.db.fanout_schedule().iter() {
+        ctx.db
+            .fanout_schedule()
+            .scheduled_id()
+            .delete(row.scheduled_id);
+    }
+    // Reset tick counter
+    if let Some(mut c) = ctx.db.bench_counter().id().find(400) {
+        c.value = 0;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    }
+    // Clear tick logs
+    for row in ctx.db.fanout_tick_log().iter() {
+        ctx.db.fanout_tick_log().id().delete(row.id);
+    }
+    // Start
+    let interval = TimeDuration::from_micros((interval_ms * 1000) as i64);
+    ctx.db.fanout_schedule().insert(FanoutSchedule {
+        scheduled_id: 0,
+        scheduled_at: interval.into(),
+    });
+    log::info!("fanout_start: tick every {}ms", interval_ms);
+}
+
+/// Stop the fan-out tick.
+#[spacetimedb::reducer]
+pub fn fanout_stop(ctx: &ReducerContext) {
+    let mut stopped = 0u32;
+    for row in ctx.db.fanout_schedule().iter() {
+        ctx.db
+            .fanout_schedule()
+            .scheduled_id()
+            .delete(row.scheduled_id);
+        stopped += 1;
+    }
+    log::info!("fanout_stop: stopped {} schedules", stopped);
+}
+
+/// Clear all fan-out test data.
+#[spacetimedb::reducer]
+pub fn fanout_reset(ctx: &ReducerContext) {
+    // Stop ticks
+    for row in ctx.db.fanout_schedule().iter() {
+        ctx.db
+            .fanout_schedule()
+            .scheduled_id()
+            .delete(row.scheduled_id);
+    }
+    // Clear entities
+    for e in ctx.db.fanout_entity().iter() {
+        ctx.db.fanout_entity().id().delete(e.id);
+    }
+    // Clear tick logs
+    for row in ctx.db.fanout_tick_log().iter() {
+        ctx.db.fanout_tick_log().id().delete(row.id);
+    }
+    // Reset counter
+    if let Some(mut c) = ctx.db.bench_counter().id().find(400) {
+        c.value = 0;
+        c.last_updated = ctx.timestamp;
+        ctx.db.bench_counter().id().update(c);
+    }
+    log::info!("fanout_reset: cleared all fan-out test data");
 }
 
 // ─── Spike 7: WASM Module Performance Benchmarks ──────────────────

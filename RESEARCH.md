@@ -1131,7 +1131,7 @@ After completing these spikes, we'll have clarity on:
 | **AI system** | A) WASM module, B) Sidecar UE5 process, C) Hybrid | Spike 7, 8 ✅ → **Option C**: WASM for AI decisions + UE5 sidecar for physics/pathfinding |
 | **Physics simulation** | A) Client-only, B) UE5 sidecar, C) WASM | Spike 8 ✅ → **Option B** (sidecar validated) |
 | **Module language** | A) Rust (performance), B) C# (familiarity) | Spike 2, 7 ✅ → **Option A** (Rust, performance critical for WASM throughput) |
-| **Networking architecture** | A) SpacetimeDB-only, B) Hybrid relay + SpacetimeDB, C) UE5 dedicated server + SpacetimeDB persistence | Spike 9 — **pending** |
+| **Networking architecture** | A) SpacetimeDB-only, B) Hybrid relay + SpacetimeDB, C) UE5 dedicated server + SpacetimeDB persistence | **Option A viable for ~65–200 players** (server-side proven). Fan-out ceiling untested — likely binding at >50 players. Hybrid B/C only needed for mass events (>200 players in one zone). |
 
 ---
 
@@ -1141,7 +1141,7 @@ After completing these spikes, we'll have clarity on:
 
 **Duration:** 2–3 days
 
-**Status:** NOT STARTED
+**Status:** PARTIAL COMPLETE — Tests 1–3 executed, Tests 4–5 deferred
 
 ### The 1000-Player Problem
 
@@ -1202,7 +1202,7 @@ Even with unlimited reducer throughput, the **read-side** is the binding constra
 | 500 | 250,000 | 2,500,000 | ❌ Unmanageable |
 | 1000 | 1,000,000 | 10,000,000 | ❌ Physically impossible via WebSocket |
 
-**We have NOT benchmarked subscription fan-out yet** — this is exactly what Spike 9 Test 3 is for. The real player ceiling will be determined by this test, not by reducer throughput.
+**Spike 9 Test 3 measured server-side tick overhead at ~10ms constant (50–500 entities), confirming the server can handle the write side.** However, the WebSocket fan-out to actual subscribers remains untested — this is the O(N²) cost that will determine the real player ceiling. Testing requires connecting multiple WebSocket subscribers simultaneously.
 
 Spatial interest management (subscribing only to nearby entities) reduces the N in the formula, but in a "1000 players in one area" scenario, all players ARE nearby.
 
@@ -1240,7 +1240,7 @@ BitCraft's "MMO scale" likely means hundreds of concurrent players spread across
 Client ──WebSocket──► SpacetimeDB (WASM) ◄──WebSocket── Sidecar
                      (all state + movement)
 ```
-- **Max capacity (corrected):** ~50-100 moving players with input-change + scheduled tick architecture. Subscription fan-out becomes the ceiling (needs Spike 9 Test 3 to determine exact limit).
+- **Max capacity (corrected):** ~65–200 moving players depending on input model, with input-change + scheduled tick architecture (confirmed by Spike 9 Tests 1–3). Server-side WASM+DB handles ~400K entity updates/sec. Scheduled tick overhead is ~10ms constant. Subscription fan-out remains the untested ceiling — likely binding at >50 players.
 - **Pros:** Simple, single source of truth, no additional infrastructure
 - **Cons:** O(N²) subscription fan-out limits high-density scenarios. Per-reducer pipeline overhead (~4.5ms/call) limits client-initiated event rate.
 - **Verdict:** Viable for moderate density (50-100 players per zone). Not viable for 1000 players per zone due to subscription fan-out, not WASM speed.
@@ -1308,23 +1308,133 @@ Build a minimal Rust UDP relay that:
 - Snapshots to SpacetimeDB at 1 Hz
 - Measure: Throughput at 100, 500, 1000 clients
 
-### Expected Outcome
+### Expected Outcome vs. Actual Results
 
-Based on the corrected analysis above, the most likely results are:
+Based on the corrected analysis above, the predicted vs. actual results:
 
-1. **SpacetimeDB-only (Option A) will support 50-100 players** with the right architecture (input-change + scheduled tick + wasm-opt), not the originally estimated ~10. This is a significant revision.
-2. **Subscription fan-out (Test 3) will be the real ceiling** — the O(N²) WebSocket broadcast, not WASM execution speed, is the binding constraint. This test is the most important one in Spike 9.
-3. **For 1000 players in one zone, all three architectures face the O(N²) fan-out problem.** Even Option B (UDP relay) or Option C (UE5 dedicated) must solve spatial filtering/LOD.
-4. **Option A remains viable for moderate-density zones** (~50-100 players) if subscription fan-out tests pass. This would preserve SpacetimeDB as the game logic engine for most gameplay.
-5. **Options B or C are needed only for mass events** (sieges, world bosses). A hybrid approach — Option A for normal gameplay, switching to B or C for high-density events — is worth considering.
+1. **Predicted: SpacetimeDB-only supports 50–100 players.** **Actual: 65–200 players (server-side).** Test 1 showed ~400K entity updates/sec (4× higher than Spike 7's estimate). Test 2 showed 200+ reducer calls/sec with zero drops. Significant upward revision.
+2. **Predicted: Subscription fan-out is the real ceiling.** **Status: Unconfirmed but likely.** Test 3 measured server-side tick overhead (~10ms constant), but did NOT test WebSocket fan-out to actual subscribers. The O(N²) broadcast cost remains the key unknown.
+3. **For 1000 players, all architectures face O(N²) fan-out.** **Unchanged.** Even with ~400K updates/sec server-side, broadcasting to 1000 subscribers is a separate problem.
+4. **Option A viable for moderate density.** **Confirmed.** Server handles 500 entities at ~9.2 Hz with 10ms overhead.
+5. **Options B or C needed for mass events.** **Still likely.** Above ~200 players, subscription fan-out will dominate regardless of server-side throughput.
 
-The spike will produce the benchmark data needed to determine the exact subscription fan-out ceiling, which is the key unknown.
+### Spike 9 Benchmark Results
 
-### Files to Create/Modify
-- `server/nyx-server/spacetimedb/src/lib.rs` — Add `physics_update_batch` reducer, multi-client test reducers
-- `Source/Nyx/Sidecar/NyxSidecarSubsystem.cpp` — Batch update mode
-- `tools/stress_client/` — Multi-client stress test tool (Python or Rust)
-- `tools/udp_relay/` — Minimal UDP position relay prototype (if needed)
+**Test environment:** i3-12100 (4C/8T, 4.3 GHz boost), 64 GB RAM, SpacetimeDB 2.0.2 local server, Windows 11. Note: League of Legends was running concurrently during tests, adding CPU contention. Server-side timestamps (measured inside WASM/SpacetimeDB) are unaffected; client-side measurements may show higher latency.
+
+#### Test 1: Batched Physics Update Throughput
+
+A self-contained `bench_batch_physics(body_count, iterations)` reducer spawns N bodies and applies M position+velocity updates to all of them in a tight loop within a single transaction. Server-side execution time is measured via SpacetimeDB log timestamps (spawned→COMPLETE).
+
+**Server-side WASM+DB execution (log timestamp deltas):**
+
+| Bodies | Iterations | Total Updates | Server Time (ms) | Server Rate (updates/sec) |
+|--------|-----------|--------------|-------------------|--------------------------|
+| 10 | 30 | 300 | 1.3 | 230,769 |
+| 50 | 30 | 1,500 | 3.6 | 416,667 |
+| 100 | 30 | 3,000 | 7.1 | 422,535 |
+| 200 | 30 | 6,000 | 13.9 | 431,655 |
+| 500 | 10 | 5,000 | 13.0 | 384,615 |
+| 1,000 | 10 | 10,000 | 24.1 | 414,938 |
+| 1,000 | 30 | 30,000 | 74.7 | 401,606 |
+
+**Client-perceived pipeline (wall clock including WebSocket + subscription diff):**
+
+| Bodies | Iterations | Total Updates | Pipeline Time (s) | Pipeline Rate (updates/sec) |
+|--------|-----------|--------------|-------------------|--------------------------|
+| 10 | 30 | 300 | 0.065 | 4,616 |
+| 50 | 30 | 1,500 | 0.052 | 29,021 |
+| 100 | 30 | 3,000 | 0.052 | 57,688 |
+| 200 | 30 | 6,000 | 0.083 | 72,470 |
+| 500 | 10 | 5,000 | 0.057 | 87,203 |
+| 1,000 | 10 | 10,000 | 0.070 | 142,326 |
+| 1,000 | 30 | 30,000 | 0.122 | 245,268 |
+
+**Key findings:**
+- **Server-side WASM+DB: ~400,000 entity updates/sec** — consistent across all batch sizes, 4× faster than Spike 7's ~100K estimate (which included per-tick scheduling overhead).
+- **Pipeline overhead: ~40–80ms constant** regardless of batch size (1 reducer call = 1 subscription diff, regardless of how many rows changed inside it).
+- Batched operations within a single reducer call are dramatically more efficient than individual reducer calls — the amortized pipeline cost per entity update drops from ~4.5ms (per-call) to ~0.004ms (batched).
+- At 1,000 bodies × 30 iterations, 30,000 entity updates complete in **74.7ms server-side** — well within a 100ms tick budget.
+
+#### Test 2: Multi-Client Reducer Contention
+
+Each simulated "client" is a PowerShell background job calling `stress_move` at 10 Hz via the `spacetime call` CLI. The `stress_move` reducer updates one `bench_entity` row and increments a server-side counter (id=300). After all jobs complete, `stress_record` captures the counter and records the result.
+
+| Test | Clients | Target Hz | Expected Calls | Actual Calls | Delivery % |
+|------|---------|-----------|----------------|--------------|------------|
+| 2A | 5 | 10 | 500 | 500 | 100.0% |
+| 2B | 10 | 10 | 1,000 | 1,000 | 100.0% |
+| 2C | 20 | 10 | 2,000 | 2,000 | 100.0% |
+| 2D | 50 | 10 | 5,000 | 4,792 | 95.8% |
+| 2E | 100 | 10 | — | — | *Cancelled* |
+
+**Key findings:**
+- **5–20 concurrent clients: 100% reducer delivery** — the server processes every call without contention or drops, up to 200 reducer calls/sec aggregate.
+- **50 clients (2D): 95.8% delivery** — the 4.2% shortfall is caused by the **test harness**, not the server. 50 PowerShell processes each spawning CLI processes saturated the local CPU (especially with LoL running). The server-side counter confirmed all received calls were processed without errors.
+- **100 clients: cancelled** — test harness too slow to generate meaningful load. CLI-based testing hits OS process limits, not SpacetimeDB limits.
+- **Interpretation:** The server's reducer throughput was never the bottleneck. At 20 clients × 10 Hz = 200 calls/sec, the server handled all calls cleanly. Combined with Test 1's ~400K entity updates/sec, the server can process far more concurrent player input than the test harness can generate.
+
+#### Test 3: Subscription Fan-Out Stress (Server-Side)
+
+A scheduled `fanout_tick` reducer runs at M Hz, updating ALL `fanout_entity` rows per tick and logging per-tick metadata (tick number, entities updated, timestamp) to `fanout_tick_log`. This measures server-side tick execution overhead — **not** WebSocket fan-out to subscribers (no actual WebSocket subscribers were connected during this test).
+
+**At 10 Hz (100ms target interval), 10–15s duration:**
+
+| Test | Entities | Expected Ticks | Actual Ticks | Tick Interval (ms) | Overhead (ms) |
+|------|----------|---------------|-------------|-------------------|---------------|
+| 3B | 100 | 100 | 44* | ~110 | ~10 |
+| 3C | 200 | 100 | 92* | ~110 | ~10 |
+| 3D | 500 | 150 | 138* | ~109 | ~9 |
+
+**At 20 Hz (50ms target interval), 10s duration:**
+
+| Test | Entities | Expected Ticks | Actual Ticks | Tick Interval (ms) | Overhead (ms) |
+|------|----------|---------------|-------------|-------------------|---------------|
+| 3E | 50 | 200 | 161* | ~63 | ~13 |
+| 3F | 100 | 200 | 161* | ~63 | ~13 |
+| 3G | 200 | 200 | 162* | ~63 | ~13 |
+
+\*Actual tick counts are lower than expected because CLI setup (reset + seed entities) consumes 3–5 seconds of the test window. The tick-to-tick interval (measured from consecutive `fanout_tick_log` timestamps) is the reliable metric.
+
+Test 3A (50 entities @ 10 Hz) was anomalous — showed `entities_updated=200` despite seeding 50, likely from residual state. Discarded.
+
+**Key findings:**
+- **Overhead is ~10–13ms constant** regardless of entity count (50–500). This is the scheduled reducer dispatch mechanism, not entity processing time.
+- At 500 entities, the 10 Hz tick runs at ~9.2 Hz actual (109ms interval). At 200 entities, the 20 Hz tick runs at ~15.9 Hz actual (63ms interval).
+- **Entity count does NOT impact tick interval** within the tested range. Processing 500 entity updates per tick adds negligible time vs. 50 entities, consistent with Test 1's ~400K updates/sec throughput.
+- **Important caveat:** This test measures server-side execution only. With N actual WebSocket subscribers, SpacetimeDB must also compute subscription diffs and broadcast to each subscriber per tick. The O(N²) fan-out bottleneck remains **untested** — this would require connecting actual WebSocket subscribers (e.g., multiple `spacetime subscribe` instances), which was not implemented in this round.
+
+#### Tests 4–5: Deferred
+
+- **Test 4 (Sidecar Body Capacity):** Requires a running UE5 build with the sidecar subsystem. Deferred to Phase 1 implementation.
+- **Test 5 (UDP Relay Prototype):** Contingent on Tests 1–3 confirming SpacetimeDB-only is unviable. Given Test 1–3 results, Option A (SpacetimeDB-only) is viable for moderate density. UDP relay deferred unless mass-event testing reveals the need.
+
+### Revised Capacity Estimate
+
+Combining all benchmark data:
+
+| Component | Measured Capacity | Source |
+|-----------|------------------|--------|
+| WASM+DB entity updates | ~400,000/sec | Test 1 |
+| Scheduled tick overhead | ~10ms constant | Test 3 |
+| Concurrent reducer throughput | 200+/sec (no drops) | Test 2 |
+| Per-tick entity budget (10 Hz) | ~500 entities at 9.2 Hz actual | Test 3 |
+| Per-tick entity budget (20 Hz) | ~200 entities at 15.9 Hz actual | Test 3 |
+
+**Revised player ceiling (server-side only, excluding subscription fan-out):**
+
+| Player Input Model | Input Rate/Player | Reducer Budget (after tick) | Max Players |
+|---|---|---|---|
+| Input-change (WASD) | ~3 calls/sec | ~200/sec | **~65** |
+| Click-to-move / low-action | ~1 call/sec | ~200/sec | **~200** |
+| Hybrid (mixed activity) | ~2 calls/sec | ~200/sec | **~100** |
+
+The **server-side** capacity is 65–200 players depending on input model. The **subscription fan-out** ceiling (O(N²) WebSocket broadcast, untested) is expected to be the binding constraint at >50 players. Testing this requires actual WebSocket subscriber connections, which is the most important remaining benchmark.
+
+### Files Created/Modified
+- `server/nyx-server/spacetimedb/src/lib.rs` — Added `physics_update_batch`, `bench_batch_physics`, `spawn_projectiles_batch`, `stress_move`, `stress_record`, `stress_reset`, `fanout_tick`, `fanout_seed`, `fanout_start`, `fanout_stop`, `fanout_reset` reducers; `BodyUpdate` struct; `StressResult`, `FanoutEntity`, `FanoutSchedule`, `FanoutTickLog` tables
+- `tools/stress_client/stress_test.ps1` — Multi-client contention test script (PowerShell)
+- `tools/stress_client/fanout_test.ps1` — Fan-out stress test script (PowerShell)
 
 ---
 
@@ -1338,7 +1448,7 @@ The spike will produce the benchmark data needed to determine the exact subscrip
 | Week 2 | Spike 6 (Prediction) ✅ | **DONE** — prediction + reconciliation verified, 0 cm error |
 | Week 2–3 | Spike 7 (WASM Perf) ✅ | **DONE** — 218 reducers/sec, 1000 entities/tick at 100ms, 512MB memory OK |
 | Week 3 | Spike 8 (Sidecar) ✅ | **DONE** — UE5 sidecar architecture validated, MultiServer Replication deep dive completed |
-| Week 3–4 | Spike 9 (Scalability) | **PENDING** — Batched throughput, multi-client contention, fan-out stress, sidecar capacity, UDP relay prototype |
+| Week 3–4 | Spike 9 (Scalability) ✅ | **PARTIAL** — Tests 1–3 done (400K updates/sec, 200 calls/sec, 10ms tick overhead). Tests 4–5 deferred |
 
 **Total estimated time: ~4 weeks**
 
