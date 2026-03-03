@@ -2777,20 +2777,20 @@ We wrote ~1500 lines of C++ and Rust to replicate what UE5 already does in `Char
 │ • Interpolate│         │ • CharacterMovement   │         │ • Interpolate│
 │ • Render     │         │ • ReplicationGraph    │         │ • Render     │
 └──────────────┘         │ • Combat/Physics      │         └──────────────┘
-                         │ • Relevancy (spatial) │
-                         │ • MultiServer (scale) │
-                         │                       │
-                         │         │ Sidecar     │
-                         │         ▼             │
-                         │  ┌─────────────────┐  │
-                         │  │ SpacetimeDB SDK │  │
-                         │  │ (Rust/C++ link) │  │
-                         │  └────────┬────────┘  │
-                         └───────────┼───────────┘
-                                     │ WebSocket
-                                     ▼
+       ▲                 │ • Relevancy (spatial) │                 ▲
+       │                 │ • MultiServer (scale) │                 │
+       │                 │ • Guild/Chat/AH proxy │                 │
+       │                 │                       │                 │
+  ONLY connection        │    SpacetimeDB SDK    │        ONLY connection
+  (UDP from client)      │    (linked library)   │        (UDP from client)
+                         │         │             │
+                         └─────────┼─────────────┘
+                                   │ WebSocket (BSATN binary)
+                                   │ Internal network
+                                   ▼
                          ┌───────────────────────┐
                          │    SpacetimeDB 2.0    │
+                         │  (separate VM/container)│
                          │                       │
                          │ • Player accounts     │
                          │ • Inventory/economy   │
@@ -2802,6 +2802,12 @@ We wrote ~1500 lines of C++ and Rust to replicate what UE5 already does in `Char
                          │ • Audit/event log     │
                          └───────────────────────┘
 ```
+
+**Single-Connection Model:** Clients connect ONLY to the UE5 Dedicated Server via UDP. The dedicated server is the sole gateway to SpacetimeDB. Clients never talk to SpacetimeDB directly. This provides:
+- **Security:** Server controls all database access; clients can't craft malicious queries
+- **Simplicity:** Clients only need UE5's standard NetDriver — no SpacetimeDB SDK on client
+- **Anti-cheat:** All game state mutations flow through server-authoritative validation
+- **Reduced attack surface:** SpacetimeDB is not exposed to the internet
 
 #### Layer Responsibilities
 
@@ -2913,11 +2919,11 @@ The dedicated server talks to SpacetimeDB via the C++ or Rust SDK:
 | Player levels up | Server → SpacetimeDB: `update_progression(identity, new_level, new_xp)` |
 | Periodic save | Server → SpacetimeDB: batch dirty-flush of positions, HP, buffs (every 2-5 sec) |
 | Player disconnects | Server → SpacetimeDB: final save of all state |
-| Guild chat | Client → SpacetimeDB subscription (direct, bypasses game server) |
-| Auction house | Client → SpacetimeDB reducer (no game server involvement needed) |
+| Guild chat | Client → Server RPC → SpacetimeDB subscription (server relays to recipients) |
+| Auction house | Client → Server RPC → SpacetimeDB reducer (server validates, executes ACID transaction) |
 | Territory control | Server → SpacetimeDB: `capture_territory(guild_id, zone_id)` → all servers subscribe |
 
-Clients can also connect **directly** to SpacetimeDB for non-gameplay features (inventory UI, guild management, chat, auction house) — the dedicated server isn't in the path for these.
+All client requests — including non-gameplay features like chat, inventory UI, guild management, and the auction house — flow through the dedicated server. The server acts as a trusted proxy, validating requests before forwarding them to SpacetimeDB. This eliminates the need for a SpacetimeDB SDK on the client and keeps the database off the public internet.
 
 #### What Changes From Current Nyx Architecture
 
@@ -2929,7 +2935,7 @@ Clients can also connect **directly** to SpacetimeDB for non-gameplay features (
 | Manual spatial subscriptions | ReplicationGraph handles relevancy |
 | WASM reducers for game logic | C++ game logic on dedicated server |
 | SpacetimeDB subscriptions for entity sync | UE5 replication for entity sync |
-| Single process | Dedicated server + SpacetimeDB (2 processes minimum) |
+| Single process | Dedicated server (VM/container) + SpacetimeDB (separate VM/container) |
 
 #### What We Keep From Phase 0
 
@@ -2955,12 +2961,79 @@ The Phase 0 spikes aren't wasted — they inform how the SpacetimeDB integration
 | **Complexity** | ★★★☆☆ | More infrastructure (dedicated server hosting, orchestration). |
 | **MultiServer maturity** | ★★☆☆☆ | Experimental plugin. May need modifications. |
 
+#### Transport Protocol: Dedicated Server ↔ SpacetimeDB
+
+SpacetimeDB's SDK supports **WebSocket only** as the transport protocol. There is no raw TCP, UDP, or gRPC alternative. However, this is perfectly adequate for the server→database connection:
+
+| Aspect | Detail |
+|--------|--------|
+| **Protocol** | WebSocket (`ws://` or `wss://` via `DbConnection::builder().with_uri()`) |
+| **Serialization** | BSATN (Binary SpacetimeDB Algebraic Notation) — compact binary, NOT JSON |
+| **Frequency** | Persistence operations at 0.2-5 Hz (NOT 60 Hz real-time gameplay) |
+| **Overhead** | WebSocket framing: 2-14 bytes per frame (negligible for persistence ops) |
+| **Connection model** | `run_threaded()` for background processing, or `frame_tick()` for per-frame polling |
+| **Subscriptions** | Server subscribes to cross-server state (territory, guilds) — push-based, low volume |
+
+**Why WebSocket is sufficient:** The dedicated server→SpacetimeDB connection handles persistence operations (save character, trade items, update quests) — NOT real-time gameplay state. Real-time movement, combat, and physics use UE5's UDP replication directly between clients and the dedicated server. The SpacetimeDB connection fires at most a few times per second for dirty-flushes and on-demand for player joins/trades/disconnects.
+
+**BSATN vs JSON:** SpacetimeDB uses BSATN (a compact binary format), not JSON. This means serialization overhead is minimal — comparable to protobuf. A position update (`f32 × 3 + rotation`) would be ~16 bytes of BSATN payload vs ~80+ bytes as JSON text.
+
+#### Deployment Model
+
+Each component runs in its own VM or container, communicating over internal network:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Internal Network                          │
+│                                                             │
+│  ┌───────────────────┐   ┌───────────────────┐              │
+│  │ VM/Container 1    │   │ VM/Container 2    │              │
+│  │                   │   │                   │              │
+│  │ UE5 Dedicated     │   │ UE5 Dedicated     │              │
+│  │ Server (Zone NW)  │   │ Server (Zone NE)  │              │
+│  │                   │   │                   │              │
+│  │ SpacetimeDB SDK   │   │ SpacetimeDB SDK   │              │
+│  │ (linked library)  │   │ (linked library)  │              │
+│  └────────┬──────────┘   └────────┬──────────┘              │
+│           │ ws://stdb:3000        │ ws://stdb:3000          │
+│           └───────────┬───────────┘                         │
+│                       ▼                                      │
+│           ┌───────────────────┐                              │
+│           │ VM/Container 3    │                              │
+│           │                   │                              │
+│           │ SpacetimeDB 2.0   │                              │
+│           │ Port 3000         │                              │
+│           │                   │                              │
+│           └───────────────────┘                              │
+└─────────────────────────────────────────────────────────────┘
+         ▲               ▲
+         │ UDP (public)   │ UDP (public)
+    ┌────┴────┐     ┌────┴────┐
+    │ Client  │     │ Client  │
+    │    A    │     │    B    │
+    └─────────┘     └─────────┘
+```
+
+**SpacetimeDB Docker support:** Official Docker image available:
+```bash
+docker run --rm --pull always -p 3000:3000 clockworklabs/spacetime start
+```
+
+**Key deployment considerations:**
+- SpacetimeDB listens on port 3000 by default
+- SSL not supported in standalone mode (use reverse proxy for wss:// if needed)
+- Each dedicated server connects to SpacetimeDB via internal network (low latency, no public exposure)
+- SpacetimeDB is NOT exposed to the public internet — only dedicated servers can reach it
+- Multiple dedicated servers connect to the SAME SpacetimeDB instance (shared world state)
+- Container orchestration (Kubernetes, ECS, etc.) can auto-scale dedicated servers per zone demand
+
 #### Key Implementation Work
 
 1. **Custom `UReplicationGraph`** implementing L2-style optimizations (spatial grid, rate-limiting per distance tier, dormancy, priority)
-2. **SpacetimeDB sidecar integration** on the dedicated server (load/save character data, ACID economy transactions)
+2. **SpacetimeDB integration module** in the dedicated server (linked SDK library for load/save character data, ACID economy transactions)
 3. **MultiServer configuration** for spatial world partitioning
-4. **Direct client→SpacetimeDB** channel for UI-level features (chat, inventory, AH)
+4. **Server-proxied UI features** — dedicated server relays chat, inventory, AH requests to SpacetimeDB on behalf of clients
+5. **Container/VM deployment pipeline** — Docker images for SpacetimeDB, dedicated server packaging for VM/container deployment
 
 ### Options Comparison Summary
 
