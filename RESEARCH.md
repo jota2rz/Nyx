@@ -2285,6 +2285,49 @@ The strategies above are drawn directly from SpacetimeDB 2.0's official document
 
 **Key insight:** The bottleneck was never SpacetimeDB's database or WASM execution (400K entity updates/sec). It's the WebSocket fan-out, which is bounded by (total_subscribers × visible_entities × update_rate × row_size). Every strategy above attacks one or more of those four terms.
 
+### Critical Clarification: World-Scale vs. Viewport-Scale
+
+The phrase "scales to thousands" above refers to **concurrent players across the entire game world**, distributed across spatial partitions and/or database shards. It does **not** mean 1,000+ players all visible to each other simultaneously in a single viewport — that is an entirely different (and much harder) problem.
+
+**Why massive PvP is fundamentally different:**
+
+When N players all see each other, every position update must fan out to all N observers. This creates O(N²) event delivery per tick:
+
+| Players Visible to Each Other | Events per Tick | Events/Sec (10 Hz) | vs. 280K Measured Budget |
+|-------------------------------|-----------------|---------------------|--------------------------|
+| 200 | 40,000 | 400,000 | 1.4× over — degraded |
+| 300 | 90,000 | 900,000 | 3.2× over |
+| 500 | 250,000 | 2,500,000 | 9× over |
+| 1,000 | 1,000,000 | 10,000,000 | 35× over |
+
+No amount of spatial partitioning helps when everyone is in the same partition. Multi-database sharding doesn't help either — all players must share the same database to see each other.
+
+**How AAA MMOs handle massive PvP:**
+
+| Game | Players in Battle | Technique |
+|------|-------------------|-----------|
+| EVE Online | 6,000+ | Time dilation (slows to 10% speed), reducing tick rate to 1 Hz |
+| PlanetSide 2 | 1,000+ | Aggressive LOD (far players update at 1-2 Hz), render culling at 300m |
+| WoW Classic | ~300 | No mitigation — severe lag and disconnects beyond 300 |
+| New World | ~100 | Wars capped at 50v50, open world degrades beyond ~100 |
+| Guild Wars 2 | ~200 | WvW has visibility cap, distant players become nameplates |
+
+**No game renders 1,000 players updating at full tick rate to all 1,000 simultaneously.** Every title uses some combination of reducing what each player sees, reducing how often far players update, or slowing down time itself.
+
+**Realistic massive PvP strategies for Nyx:**
+
+1. **Visibility cap (200-300):** Server culls entities beyond a maximum count per player, prioritizing proximity and threat level. Most MMOs do exactly this. SpacetimeDB's `WHERE` subscriptions already support this via chunk-based interest.
+2. **LOD tiers:** Near players (0-50m) update at 10 Hz with full state. Mid-range (50-150m) update at 3-5 Hz position-only. Far (150m+) update at 1 Hz as dots on minimap. Reduces effective fan-out by 3-5×.
+3. **Option B UDP relay:** Position data for 500+ combatants streamed via a lightweight UDP relay in front of SpacetimeDB. SpacetimeDB handles authoritative game state (health, inventory, abilities); the relay handles high-frequency positions. Breaks the WebSocket bottleneck entirely for movement.
+4. **Time dilation (EVE model):** When event throughput exceeds budget, server reduces tick rate proportionally. 1,000 players at 1 Hz fits within budget (1M events/sec with spatial + decomposition). Gameplay slows but remains fair and functional.
+
+**Updated bottom line for massive PvP:**
+- **200-300 all-visible:** Proven achievable with SpacetimeDB today (Test 3b)
+- **500 all-visible:** Requires LOD tiers + table decomposition (P1-P2)
+- **1,000+ all-visible:** Requires hybrid approach (Option B relay or time dilation)
+- **1,000+ world-concurrent (spatial partitions):** Achievable with spatial interest + sharding (P0-P3)
+- **5,000+ world-concurrent:** Multi-database sharding on production hardware
+
 ---
 
 ## References
