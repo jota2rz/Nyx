@@ -2658,6 +2658,337 @@ For Nyx with SpacetimeDB, the most impactful lessons are: **(1)** switch from pe
 
 ---
 
+## Architecture Options — Comparative Analysis
+
+After completing all Phase 0 research spikes (1-9), reference architecture analyses (BitCraft, OWS, Redwood, Lineage 2), scaling benchmarks, and L2 source-code archaeology, four architecture options emerged for achieving 1000+ visible WASD players with server-authoritative movement.
+
+### Option 1: Pure SpacetimeDB + Movement Intent Tables (Minimal Change)
+
+Stay entirely within SpacetimeDB but restructure how movement works. Instead of streaming positions every tick, store velocity vectors and let clients interpolate:
+
+```rust
+#[table(name = movement_state, public)]
+pub struct MovementState {
+    #[primary_key]
+    identity: Identity,
+    pos_x: f32, pos_y: f32, pos_z: f32,           // authoritative position (written at ~1Hz)
+    vel_x: f32, vel_y: f32, vel_z: f32,           // velocity vector (set on input change)
+    heading: f32,
+    speed: f32,
+    move_start_tick: u64,
+    chunk_id: u32,                                  // spatial filter for subscriptions
+}
+
+#[reducer]
+fn update_movement(ctx: &ReducerContext, vel_x: f32, vel_y: f32, vel_z: f32, heading: f32) {
+    // Validate, update position to server-calculated current pos, set new velocity
+}
+
+#[reducer]
+fn tick_positions(ctx: &ReducerContext) {
+    // Scheduled: interpolate all moving entities, write positions to DB at ~1-2 Hz
+    // This triggers subscription updates but only at 1-2 Hz, not 60 Hz
+}
+```
+
+Client subscribes: `SELECT * FROM movement_state WHERE chunk_id IN (c1, c2, c3, ...)`
+
+**Pros:** No new infrastructure, pure SpacetimeDB
+**Cons:** Still pays subscription eval cost per position write (~1-2 Hz per moving entity). With 1000 players: 1000-2000 evals/sec × 1000 subscribers = 1-2M eval/sec. Spike 9 showed 280K events/sec ceiling.
+
+**Estimated ceiling:** ~300-500 all-visible players (improved from ~200 but not 1000+)
+
+### Option 2: SpacetimeDB + UDP Relay Sidecar (Best Raw Performance)
+
+SpacetimeDB handles persistent state. A lightweight UDP relay (simple Rust process, ~500 lines) handles high-frequency ephemeral state:
+
+```
+┌─────────────┐     ┌──────────────────┐     ┌─────────────┐
+│   UE5       │────►│   SpacetimeDB    │◄────│   UE5       │
+│  Client A   │     │  (persistent)    │     │  Client B   │
+│             │     └──────────────────┘     │             │
+│             │     ┌──────────────────┐     │             │
+│             │────►│   UDP Relay      │◄────│             │
+│             │     │  (movement/combat)│    │             │
+└─────────────┘     │  • Spatial grid  │     └─────────────┘
+                    │  • Rate limiting │
+                    │  • Auth via STDB │
+                    └──────────────────┘
+```
+
+The relay maintains a 2D spatial grid (L2's WorldRegion pattern), receives velocity vector changes, broadcasts to surrounding grid cells, rate-limits to 1/entity/100ms, runs server-side interpolation at 20 Hz (arithmetic only), and periodically writes positions back to SpacetimeDB (every 1-5 sec). Supports packet dropping under load.
+
+**Pros:** Bypasses subscription overhead entirely for movement. Simple region iteration + socket writes can handle millions of small packets/sec.
+**Cons:** Second process to deploy, custom UDP protocol, auth sync between SpacetimeDB and relay.
+
+**Estimated ceiling:** 1000+ all-visible (matching L2's proven capability)
+
+### Option 3: SpacetimeDB + Event Tables + Client Interpolation (Middle Ground)
+
+Use SpacetimeDB's event tables (auto-deleted after delivery) for movement events:
+
+```rust
+#[table(name = movement_event, event)]
+pub struct MovementEvent {
+    chunk_id: u32,
+    entity_id: u64,
+    event_type: u8,      // 0=start_move, 1=stop, 2=direction_change, 3=correction
+    pos_x: f32, pos_y: f32, pos_z: f32,
+    vel_x: f32, vel_y: f32, vel_z: f32,
+    heading: f32,
+    tick: u64,
+}
+```
+
+Clients subscribe to `SELECT * FROM movement_event WHERE chunk_id IN (...)` and maintain local entity state by applying events.
+
+**Pros:** Stays within SpacetimeDB, event tables optimized for insert-heavy workloads
+**Cons:** Still pays BSATN serialization + subscription delivery cost. Event tables may not support spatial WHERE filtering efficiently.
+
+**Estimated ceiling:** ~500-800 all-visible (needs benchmarking)
+
+### Option 4: UE5 NetDriver + MultiServer + SpacetimeDB (Hybrid) ★ RECOMMENDED
+
+Use UE5's built-in dedicated server for real-time gameplay (movement, combat, physics) and SpacetimeDB for persistent/queryable state (accounts, inventory, economy, social, world persistence). Optionally leverage the MultiServer Replication plugin for scaling beyond a single server.
+
+#### What We'd Stop Reinventing
+
+Everything built in Spikes 5 and 6 already exists — battle-tested — inside UE5:
+
+| What We Built (Spikes 5-6) | UE5 Built-In Equivalent | Maturity |
+|---|---|---|
+| Chunk-based spatial subscriptions | `NetCullDistanceSquared` + Relevancy system | 25+ years (since UE1) |
+| `NyxMovementComponent` prediction | `UCharacterMovementComponent` prediction + reconciliation | Shipped in Fortnite (100 players) |
+| `move_player` reducer echo + seq | `ServerMove` / `ClientAdjustPosition` RPC pair | Standard UE5 replication |
+| `PlayerTable::OnUpdate` → reconcile | Property replication + delta compression | Automatic, optimized |
+| Manual 20 Hz send rate | `NetUpdateFrequency` per actor | Configurable per-class |
+| Identity-based actor lookup | `UNetConnection` → `APlayerController` → `APawn` | Core UE5 |
+
+We wrote ~1500 lines of C++ and Rust to replicate what UE5 already does in `CharacterMovementComponent.cpp` (15,000+ lines, decade of edge-case fixes).
+
+#### Architecture
+
+```
+┌──────────────┐         ┌──────────────────────┐         ┌──────────────┐
+│   UE5        │◄──UDP──►│   UE5 Dedicated       │◄──UDP──►│   UE5        │
+│   Client A   │         │   Server(s)           │         │   Client B   │
+│              │         │                       │         │              │
+│ • CMC predict│         │ • Server-authoritative│         │ • CMC predict│
+│ • Interpolate│         │ • CharacterMovement   │         │ • Interpolate│
+│ • Render     │         │ • ReplicationGraph    │         │ • Render     │
+└──────────────┘         │ • Combat/Physics      │         └──────────────┘
+                         │ • Relevancy (spatial) │
+                         │ • MultiServer (scale) │
+                         │                       │
+                         │         │ Sidecar     │
+                         │         ▼             │
+                         │  ┌─────────────────┐  │
+                         │  │ SpacetimeDB SDK │  │
+                         │  │ (Rust/C++ link) │  │
+                         │  └────────┬────────┘  │
+                         └───────────┼───────────┘
+                                     │ WebSocket
+                                     ▼
+                         ┌───────────────────────┐
+                         │    SpacetimeDB 2.0    │
+                         │                       │
+                         │ • Player accounts     │
+                         │ • Inventory/economy   │
+                         │ • Guilds/social        │
+                         │ • Quests/progression  │
+                         │ • Territory control   │
+                         │ • Cross-server state  │
+                         │ • World persistence   │
+                         │ • Audit/event log     │
+                         └───────────────────────┘
+```
+
+#### Layer Responsibilities
+
+**UE5 Dedicated Server (real-time, ephemeral):**
+- Server-authoritative WASD movement via `UCharacterMovementComponent`
+- Client-side prediction + reconciliation (built-in, proven at Fortnite scale)
+- UDP replication with delta compression (only changed properties)
+- `UReplicationGraph` for spatial relevancy (L2-style grid, built into engine)
+- Combat, skills, projectiles, physics (full Chaos physics)
+- AI/NPC simulation with net relevancy (lazy — distant NPCs don't replicate)
+- Rate-limiting via `NetUpdateFrequency` and `NetPriority` per actor
+
+**SpacetimeDB (persistent, queryable):**
+- Accounts, authentication (EOS → SpacetimeDB identity, Spike 4 flow still applies)
+- Character data persistence (load on join, periodic dirty-flush from dedicated server)
+- Inventory, equipment, economy (ACID transactions for trades/auctions)
+- Guilds, parties, friends, chat (real-time subscriptions for UI updates)
+- Quest/progression state
+- Territory control, world state (survives server restarts)
+- Cross-server queries (guild roster across all zones, global leaderboards)
+- Event tables for audit logging
+
+**MultiServer Replication (scaling beyond single server):**
+- Spatial partitioning across multiple dedicated servers
+- Seamless zone transitions (no loading screens)
+- Cross-server actor handoff (player walks from Server A's territory to Server B)
+- Shared world state via the plugin's built-in replication channel
+
+#### Why This Works for 1000+ Visible Players
+
+UE5's `ReplicationGraph` is the key. Epic built it specifically to scale Fortnite from ~20 to 100 players. It implements:
+
+1. **Spatial grid cells** — actors grouped by position (same concept as L2's WorldRegion)
+2. **Per-connection relevancy** — each client gets only nearby actors (like L2's 3×3 neighborhood)
+3. **Frequency bucketing** — far actors replicate at 1-5 Hz, close actors at 10-30 Hz
+4. **Dormancy** — stationary actors stop replicating entirely until state changes
+5. **Priority** — damage-dealing/receiving actors get bandwidth priority
+
+A custom `UReplicationGraph` subclass can implement ALL of L2's optimizations:
+
+```cpp
+// Custom ReplicationGraph implementing L2-style patterns
+class UNyxReplicationGraph : public UReplicationGraph
+{
+    // L2 Pattern 1: Spatial grid (same as WorldRegion)
+    UReplicationGraphNode_GridSpatialization2D* GridNode;
+
+    // L2 Pattern 2: Rate-limited movement (NetUpdateFrequency)
+    // Far players: 2 Hz, Medium: 5 Hz, Close: 10 Hz
+
+    // L2 Pattern 3: Dormancy for stationary actors
+    UReplicationGraphNode_DormancyNode* DormancyNode;
+
+    // L2 Pattern 4: Always-relevant (party UI, targeted HP)
+    UReplicationGraphNode_AlwaysRelevant* AlwaysRelevantNode;
+
+    // L2 Pattern 5: HP updates only to targeting players
+    // → Custom node that checks if observer is targeting this actor
+};
+```
+
+**With aggressive ReplicationGraph optimization:**
+- 1000 players in a siege → each client sees ~200-400 relevant actors (distance-based LOD)
+- Close actors (50m): full replication at 10 Hz → ~100 actors × 10 Hz = 1000 updates/sec per client
+- Medium actors (100m): reduced replication at 5 Hz → ~200 actors × 5 Hz = 1000 updates/sec
+- Far actors (200m): minimal replication at 1-2 Hz → ~200 actors × 2 Hz = 400 updates/sec
+- Total: ~2400 replicated updates/sec per client, with delta compression (only changed bytes)
+- UDP, so no head-of-line blocking. Droppable movement packets (unreliable RPCs)
+
+#### MultiServer for Scaling Beyond Single-Server Limits
+
+Single UE5 dedicated server caps at ~200-400 players (game thread bottleneck). MultiServer splits the world:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Game World                             │
+│                                                         │
+│   ┌──────────┐  ┌──────────┐  ┌──────────┐            │
+│   │ Server 1 │  │ Server 2 │  │ Server 3 │            │
+│   │ Zone NW  │←→│ Zone NE  │←→│ Zone SE  │            │
+│   │ ~300 ply │  │ ~300 ply │  │ ~300 ply │            │
+│   └──────────┘  └──────────┘  └──────────┘            │
+│        ↕                                               │
+│   ┌──────────┐   Siege Event: Servers 1+2              │
+│   │ Server 4 │   merge relevancy at boundary           │
+│   │ Zone SW  │                                         │
+│   │ ~300 ply │                                         │
+│   └──────────┘                                         │
+│        │             │             │                   │
+│        └─────────────┼─────────────┘                   │
+│                      ▼                                  │
+│              ┌──────────────┐                           │
+│              │ SpacetimeDB  │                           │
+│              │ (shared DB)  │                           │
+│              └──────────────┘                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+For a 1000-player siege: 3-4 servers each handling 250-350 players, with MultiServer Replication handling cross-boundary visibility. Players near server boundaries are replicated to both servers. SpacetimeDB serves as the shared persistence layer for all servers.
+
+#### SpacetimeDB Integration Points
+
+The dedicated server talks to SpacetimeDB via the C++ or Rust SDK:
+
+| Event | Flow |
+|-------|------|
+| Player joins | Server → SpacetimeDB: `load_character(identity)` → gets inventory, stats, quests |
+| Player trades | Server → SpacetimeDB: reducer with ACID transaction (atomic item swap) |
+| Player levels up | Server → SpacetimeDB: `update_progression(identity, new_level, new_xp)` |
+| Periodic save | Server → SpacetimeDB: batch dirty-flush of positions, HP, buffs (every 2-5 sec) |
+| Player disconnects | Server → SpacetimeDB: final save of all state |
+| Guild chat | Client → SpacetimeDB subscription (direct, bypasses game server) |
+| Auction house | Client → SpacetimeDB reducer (no game server involvement needed) |
+| Territory control | Server → SpacetimeDB: `capture_territory(guild_id, zone_id)` → all servers subscribe |
+
+Clients can also connect **directly** to SpacetimeDB for non-gameplay features (inventory UI, guild management, chat, auction house) — the dedicated server isn't in the path for these.
+
+#### What Changes From Current Nyx Architecture
+
+| Current (SpacetimeDB-everything) | Option 4 (Hybrid) |
+|---|---|
+| SpacetimeDB IS the game server | UE5 dedicated server IS the game server |
+| WebSocket for everything | UDP for gameplay, WebSocket for persistence/social |
+| Custom NyxMovementComponent | Standard CharacterMovementComponent |
+| Manual spatial subscriptions | ReplicationGraph handles relevancy |
+| WASM reducers for game logic | C++ game logic on dedicated server |
+| SpacetimeDB subscriptions for entity sync | UE5 replication for entity sync |
+| Single process | Dedicated server + SpacetimeDB (2 processes minimum) |
+
+#### What We Keep From Phase 0
+
+The Phase 0 spikes aren't wasted — they inform how the SpacetimeDB integration layer works:
+
+- **Spike 1-3:** Plugin integration, codegen, round-trip → still used for server↔SpacetimeDB communication
+- **Spike 4:** EOS auth → still the auth flow, but token passes through dedicated server
+- **Spike 5:** Spatial chunks → informs ReplicationGraph cell sizing
+- **Spike 6:** Prediction architecture understanding → validates that CMC does it better
+- **Spike 7:** WASM benchmarks → SpacetimeDB still runs economy/inventory logic as reducers
+- **Spike 8-9:** Sidecar/scalability data → confirms why dedicated server is needed for physics
+
+#### Viability Assessment
+
+| Criterion | Rating | Notes |
+|-----------|--------|-------|
+| **Proven at scale** | ★★★★★ | Every shipped MMO uses UE4/5 dedicated servers. Fortnite does 100 on stock engine. |
+| **WASD support** | ★★★★★ | CMC is literally built for this. Prediction, reconciliation, all included. |
+| **Server-authoritative** | ★★★★★ | Default UE5 mode. Server owns all movement, combat, physics. |
+| **1000+ visible** | ★★★★☆ | Needs custom ReplicationGraph + MultiServer. Not trivial but proven path. |
+| **Development velocity** | ★★★★☆ | Massive existing ecosystem: tutorials, marketplace, community. |
+| **SpacetimeDB fit** | ★★★★☆ | Perfect for persistence/social/economy. Clear separation of concerns. |
+| **Complexity** | ★★★☆☆ | More infrastructure (dedicated server hosting, orchestration). |
+| **MultiServer maturity** | ★★☆☆☆ | Experimental plugin. May need modifications. |
+
+#### Key Implementation Work
+
+1. **Custom `UReplicationGraph`** implementing L2-style optimizations (spatial grid, rate-limiting per distance tier, dormancy, priority)
+2. **SpacetimeDB sidecar integration** on the dedicated server (load/save character data, ACID economy transactions)
+3. **MultiServer configuration** for spatial world partitioning
+4. **Direct client→SpacetimeDB** channel for UI-level features (chat, inventory, AH)
+
+### Options Comparison Summary
+
+| Aspect | Option 1 (Pure STDB) | Option 2 (UDP Relay) | Option 3 (Event Tables) | Option 4 (UE5 NetDriver) |
+|--------|---------------------|---------------------|------------------------|--------------------------|
+| **Ceiling** | ~300-500 | 1000+ | ~500-800 | 1000+ |
+| **WASD** | Via intent tables | Via relay | Via events | Native CMC |
+| **Server-auth movement** | WASM reducer | Relay process | WASM reducer | UE5 dedicated server |
+| **Physics** | None (or sidecar) | None (or sidecar) | None (or sidecar) | Full Chaos physics |
+| **New infrastructure** | None | UDP relay process | None | Dedicated server hosting |
+| **Complexity** | Low | Medium | Low-Medium | Medium-High |
+| **Proven at MMO scale** | No (BitCraft is ~200) | Pattern proven (L2) | No | Yes (every shipped MMO) |
+| **Development velocity** | Medium | Medium | Medium | High (existing UE5 ecosystem) |
+| **What we reinvent** | Movement, combat, physics | Movement auth, combat | Movement, combat, physics | Nothing (use UE5 built-ins) |
+| **SpacetimeDB role** | Everything | Persistence + social | Everything | Persistence + social + economy |
+
+### Recommendation
+
+**Option 4 is the recommended architecture** for achieving 1000+ visible WASD players with server-authoritative movement. It uses proven technology (UE5 NetDriver, CMC, ReplicationGraph) for real-time gameplay and SpacetimeDB for what it excels at — persistent, queryable, transactional game state.
+
+**Start with Option 1** if the goal is rapid prototyping with minimal infrastructure. It validates the event-driven movement model and can serve ~300-500 players per zone.
+
+**Plan for Option 4** as the production architecture. The key insight from all the research: UE5's dedicated server already implements every optimization that L2 used to achieve 1000+ player sieges — spatial grid relevancy, rate-limited replication, delta compression, dormancy, priority bucketing, UDP transport with unreliable channels. Building these from scratch on top of SpacetimeDB's subscription model would take years and never match what Epic has refined over two decades.
+
+The Phase 0 spikes are NOT wasted — they validated SpacetimeDB's strengths (persistence, subscriptions, ACID transactions) and identified its limitations (fan-out ceiling, no UDP, subscription re-evaluation cost). This data directly informs how to partition responsibilities between UE5 dedicated servers and SpacetimeDB in Option 4.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
@@ -2679,3 +3010,4 @@ For Nyx with SpacetimeDB, the most impactful lessons are: **(1)** switch from pe
 - Open World Server (OWS): https://github.com/Dartanlla/OWS
 - OWS Documentation: https://www.openworldserver.com/
 - L2J Mobius (Lineage 2 Server Emulator): https://gitlab.com/MobiusDevelopment/L2J_Mobius
+- UE5 ReplicationGraph: https://dev.epicgames.com/documentation/en-us/unreal-engine/replication-graph-in-unreal-engine
