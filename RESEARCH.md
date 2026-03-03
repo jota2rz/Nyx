@@ -830,6 +830,7 @@ ctx.db.tick_schedule().insert(TickSchedule {
 2. **Scheduled tables are private** — codegen skips them (`Skipping private tables during codegen: tick_schedule`). Clients control ticks via regular reducers that insert/delete schedule rows.
 3. **No `wasm-opt`** — our module is unoptimised. Installing `wasm-opt` from Binaryen could improve throughput by 10–30%.
 4. **Throughput bottleneck is per-reducer overhead**, not DB operations. Batch entity updates in a single scheduled tick instead of many individual reducer calls.
+5. **Measurement methodology caveat:** The "Server Processing Time" figures (4.58 sec for 1000 bench_simple, 6.01 sec for bench_burst_update) were measured client-side and include the **full pipeline** — WebSocket I/O, WASM invocation, DB operations, transaction commit, subscription diff computation, broadcast to subscribers, and client callback processing. By contrast, game_tick timing (measured via `bench_tick_log` timestamps inside WASM) shows 1000 entity updates complete in ~10ms of pure server-side execution. The ~600× difference (166 entity updates/sec client-perceived vs ~100K/sec server-internal) is dominated by subscription diff processing, not WASM execution speed. See Spike 9 section for corrected analysis.
 
 ---
 
@@ -1146,38 +1147,81 @@ After completing these spikes, we'll have clarity on:
 
 Nyx's vision is a seamless open world where large player concentrations (sieges, cities, world events) must work without sharding or instancing. The target: **1000 simultaneously active players in one chunk**.
 
-Our Spike 7 benchmarks reveal a fundamental constraint:
+Our Spike 7 benchmarks reveal constraints, but the original analysis in this section was **overly pessimistic** due to flawed assumptions. Here we correct the math.
 
-#### Math: Can SpacetimeDB handle 1000 players?
+#### Spike 7 Benchmark Methodology — What Was Actually Measured
 
-**Reducer throughput (Spike 7):** ~218 reducers/sec (simple: 1 read + 1 update)
+Our benchmarks produced two data points that initially appeared contradictory:
 
-| Scenario | Reducer calls needed | Available | Verdict |
-|----------|---------------------|-----------|--------|
-| 1000 players × 20 Hz movement | 20,000 /sec | 218 /sec | **91× over capacity** |
-| 1000 players × 10 Hz movement | 10,000 /sec | 218 /sec | **46× over capacity** |
-| 1000 players × 5 Hz movement | 5,000 /sec | 218 /sec | **23× over capacity** |
-| 1000 players × 1 Hz movement | 1,000 /sec | 218 /sec | **4.6× over capacity** |
-| 100 players × 20 Hz movement | 2,000 /sec | 218 /sec | **9× over capacity** |
-| 10 players × 20 Hz movement | 200 /sec | 218 /sec | ✅ Just fits |
+| Measurement | Result | What it Actually Measured |
+|---|---|---|
+| `bench_simple` × 1000 calls → 4.58 sec | **218 reducers/sec** | **Full client-observable pipeline**: dispatch → WebSocket → WASM invoke → DB op → commit → subscription diff computation → broadcast to subscribers → client callback. This is the end-to-end rate. |
+| `game_tick` updating 1000 entities → **~10ms** per tick | **~100,000 entity updates/sec** | **Pure WASM + DB execution time**: measured via `bench_tick_log` timestamps *inside* the WASM module, excludes subscription processing |
 
-**Batched throughput (Spike 7):** Even with a single scheduled reducer processing all moves in one transaction:
-- `bench_burst_update`: 1,000 entity find+update ops in 1 call → **~166 entity updates/sec**
-- 1,000 players at 5 Hz batched tick → need 5,000 entity updates/sec → **30× over capacity**
-- 1,000 players at 1 Hz → need 1,000 entity updates/sec → **6× over capacity**
+Similarly, `bench_burst_update` (1000 entity updates in one call) reported 6.01 sec — but `game_tick` does the same work in ~10ms. The **~600× discrepancy** is because `bench_burst_update` was measured from the client (includes subscription diff computation and WebSocket broadcast for 1000 row changes), while `game_tick` timing is measured inside the reducer.
 
-**Critical insight:** SpacetimeDB executes all reducers serially in a single WASM thread. This is a fundamental architectural property, not a tuning issue. Batching helps with per-reducer overhead but doesn't change the sequential entity update cost (~6ms per entity update).
+**Key insight:** The WASM execution itself is fast (~100K entity updates/sec). The bottleneck is the **per-reducer invocation pipeline** (especially subscription diff computation and broadcast) — not the database or WASM performance. SpacetimeDB's claims about DB speed *are* correct; the overhead is in the event distribution layer.
 
-#### What about subscription fan-out?
+#### Corrected Math: Can SpacetimeDB handle N players?
 
-Even if we solved the write throughput, the read side has limits:
-- 1000 players updating at 10 Hz = 10,000 row changes/sec in the `player` table
-- Each of those 1000 clients receives `OnUpdate` for every visible player
-- 1000 visible players × 10 Hz = **10,000 `OnUpdate` callbacks/sec per client**
-- × 1000 clients = **10 million events/sec** total WebSocket throughput from SpacetimeDB
-- This is an O(N²) fan-out problem that scales poorly regardless of server architecture
+**The original "~10 players" estimate was wrong** because it assumed:
+1. Each player sends a per-frame position reducer at 20 Hz (FPS pattern, not MMO pattern)
+2. The 218/sec pipeline rate is the only throughput available
+3. Batched operations were also bottlenecked at 166/sec (wrong — that was client-measured, not server throughput)
 
-### Architectural Analysis: How do other MMOs handle this?
+**Correct architecture** (as BitCraft uses): **input-change reducers + scheduled tick**
+- Clients call a reducer only when input *changes* (key down/up, click-to-move) — not every frame
+- A scheduled tick at 100ms (10 Hz) processes all pending inputs and updates all entity positions in batch
+- The tick updates 1000 entities in ~10ms WASM time — well within the 100ms budget
+
+| Architecture | Per-Player Input Rate | Pipeline Budget (after 10 ticks/sec) | Max Players (Reducer Budget) |
+|---|---|---|---|
+| **Naive (original estimate)** | 20 Hz position sends | 218/sec total | **~10** ← wrong architecture |
+| **Input-change model** | ~3 events/sec (key changes) | ~208/sec for inputs | **~69** |
+| **Input-change + wasm-opt (est. +30%)** | ~3 events/sec | ~273/sec for inputs | **~90** |
+| **Click-to-move / low-action MMO** | ~1 event/sec | ~208/sec for inputs | **~200** |
+
+The scheduled tick itself handles ALL entity movement in one reducer call (~10ms for 1000 entities). The reducer budget is consumed by client-initiated input events, not movement processing.
+
+**Hardware note (i3-12100):** This CPU has decent single-thread performance (4.3 GHz boost, Passmark ST ~3800). A high-end i9-14900K would be ~30-40% faster single-thread. This would improve throughput somewhat, but is not the 10× improvement needed for 1000 players — the architecture matters more than raw CPU.
+
+#### The Real Bottleneck: Subscription Fan-Out (O(N²))
+
+Even with unlimited reducer throughput, the **read-side** is the binding constraint at high player counts:
+
+- A 10 Hz scheduled tick updates N player positions per tick
+- Each of those N clients receives `OnUpdate` callbacks for every visible player
+- With N players visible: N changes × N subscribers = **N² events per tick**
+- At 10 Hz: **10 × N² events/sec** total WebSocket throughput from SpacetimeDB
+
+| Players in Chunk | Events/Tick | Events/Sec (10 Hz) | Feasibility |
+|---|---|---|---|
+| 50 | 2,500 | 25,000 | ✅ Likely OK |
+| 100 | 10,000 | 100,000 | ⚠️ Needs testing |
+| 200 | 40,000 | 400,000 | ❌ Probably too much for WebSocket |
+| 500 | 250,000 | 2,500,000 | ❌ Unmanageable |
+| 1000 | 1,000,000 | 10,000,000 | ❌ Physically impossible via WebSocket |
+
+**We have NOT benchmarked subscription fan-out yet** — this is exactly what Spike 9 Test 3 is for. The real player ceiling will be determined by this test, not by reducer throughput.
+
+Spatial interest management (subscribing only to nearby entities) reduces the N in the formula, but in a "1000 players in one area" scenario, all players ARE nearby.
+
+#### What BitCraft Actually Does
+
+BitCraft proves SpacetimeDB works at MMO scale, but their workload profile is fundamentally different:
+
+| Aspect | BitCraft | Nyx (Target) |
+|---|---|---|
+| Movement model | Hex-grid click-to-move | WASD continuous |
+| Input rate per player | ~0.5-2 calls/sec | ~3-10 calls/sec |
+| Player density target | Low (spread across world) | High (1000 in one zone) |
+| Physics | None (delay-based projectiles) | Real-time (gravity, collision) |
+| Activity distribution | Most players standing still (crafting) | Many players moving simultaneously |
+| Spatial filtering | Hex-grid area subscriptions | Chunk-based WHERE queries |
+
+BitCraft's "MMO scale" likely means hundreds of concurrent players spread across a large world, with ~20-50 visible per area. This is well within SpacetimeDB's capabilities. Nyx's "1000 in one zone" target is a fundamentally harder problem that even AAA C++ engines struggle with.
+
+#### Revised Comparison: How do other MMOs handle this?
 
 | Game | Max density | Architecture | Notes |
 |------|-----------|-------------|-------|
@@ -1185,21 +1229,21 @@ Even if we solved the write throughput, the read side has limits:
 | **Planetside 2** | 1000+ per zone | Custom C++ dedicated servers, 15 Hz tick | Spatial partitioning, aggressive LOD |
 | **WoW Classic** | ~300 before severe lag | C++ dedicated server, 20 Hz tick | World bosses cause mass disconnects |
 | **New World** | ~100 per settlement | Lumberyard C++ server | Severe lag at 200+ |
-| **BitCraft** | Unknown (sandbox, low density by design) | SpacetimeDB WASM, hex grid | No physics, turn-based movement |
+| **BitCraft** | ~20-50 per area (estimated) | SpacetimeDB WASM, hex grid | Low-density sandbox; no physics, click-to-move |
 
-**Key observation:** Even AAA studios with custom C++ servers running compiled (not WASM) code struggle beyond ~300 players. 1000 players is only achieved with time dilation (EVE) or purpose-built C++ engines (Planetside 2).
+**Key observation:** Even AAA studios with custom C++ servers running compiled (not WASM) code struggle beyond ~300 players. 1000 players is only achieved with time dilation (EVE) or purpose-built C++ engines (Planetside 2). SpacetimeDB's per-reducer overhead is a real constraint, but even without it, the O(N²) fan-out problem would remain.
 
 ### Three Candidate Architectures
 
-#### Option A: SpacetimeDB-Only (Current)
+#### Option A: SpacetimeDB-Only (Optimized)
 ```
 Client ──WebSocket──► SpacetimeDB (WASM) ◄──WebSocket── Sidecar
                      (all state + movement)
 ```
-- **Max capacity:** ~10 concurrent moving players (from our benchmarks)
+- **Max capacity (corrected):** ~50-100 moving players with input-change + scheduled tick architecture. Subscription fan-out becomes the ceiling (needs Spike 9 Test 3 to determine exact limit).
 - **Pros:** Simple, single source of truth, no additional infrastructure
-- **Cons:** Serial WASM execution is a hard ceiling
-- **Verdict:** Not viable for 1000 players. Not viable for 100 players.
+- **Cons:** O(N²) subscription fan-out limits high-density scenarios. Per-reducer pipeline overhead (~4.5ms/call) limits client-initiated event rate.
+- **Verdict:** Viable for moderate density (50-100 players per zone). Not viable for 1000 players per zone due to subscription fan-out, not WASM speed.
 
 #### Option B: Hybrid Relay + SpacetimeDB
 ```
@@ -1266,15 +1310,15 @@ Build a minimal Rust UDP relay that:
 
 ### Expected Outcome
 
-Based on the analysis above, the most likely result is:
+Based on the corrected analysis above, the most likely results are:
 
-1. **SpacetimeDB-only (Option A) will be confirmed unviable** for >~10 moving players
-2. **Batched reducers will improve throughput** but not by the 100× needed
-3. **Architecture decision will be between Option B (hybrid relay) and Option C (UE5 dedicated server)**
-4. **Option B preserves SpacetimeDB as the game logic engine** (reducers handle combat, inventory, AI), which aligns with our Phase 0 investment
-5. **Option C is the safe fallback** — proven architecture, but reduces SpacetimeDB to a database
+1. **SpacetimeDB-only (Option A) will support 50-100 players** with the right architecture (input-change + scheduled tick + wasm-opt), not the originally estimated ~10. This is a significant revision.
+2. **Subscription fan-out (Test 3) will be the real ceiling** — the O(N²) WebSocket broadcast, not WASM execution speed, is the binding constraint. This test is the most important one in Spike 9.
+3. **For 1000 players in one zone, all three architectures face the O(N²) fan-out problem.** Even Option B (UDP relay) or Option C (UE5 dedicated) must solve spatial filtering/LOD.
+4. **Option A remains viable for moderate-density zones** (~50-100 players) if subscription fan-out tests pass. This would preserve SpacetimeDB as the game logic engine for most gameplay.
+5. **Options B or C are needed only for mass events** (sieges, world bosses). A hybrid approach — Option A for normal gameplay, switching to B or C for high-density events — is worth considering.
 
-The spike will produce the benchmark data needed to make this decision with confidence rather than speculation.
+The spike will produce the benchmark data needed to determine the exact subscription fan-out ceiling, which is the key unknown.
 
 ### Files to Create/Modify
 - `server/nyx-server/spacetimedb/src/lib.rs` — Add `physics_update_batch` reducer, multi-client test reducers
