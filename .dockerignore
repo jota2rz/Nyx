@@ -1,0 +1,10 @@
+# Don't send these to Docker daemon
+Binaries/
+DerivedDataCache/
+Intermediate/
+Saved/
+Content/
+.vs/
+*.sln
+*.uproject
+build_output.txt

@@ -1,0 +1,40 @@
+# Nyx MMO — Local Development Stack
+#
+# Architecture: Option 4 — Hybrid A + C + D
+#   SpacetimeDB (persistence/combat compute) + UE5 Dedicated Servers (real-time gameplay)
+#
+# Usage:
+#   docker compose up -d              # Start SpacetimeDB
+#   docker compose logs -f spacetimedb # Watch logs
+#   docker compose down               # Stop everything
+#
+# After starting, publish the module:
+#   cd server/nyx-server/spacetimedb
+#   spacetime publish nyx --clear-database
+
+services:
+  # ── SpacetimeDB 2.0 ─────────────────────────────────────────────
+  # Persistence layer, combat compute (Pattern C), orchestration hub.
+  # Internal-only — NOT exposed to clients. Only dedicated servers connect.
+  spacetimedb:
+    image: clockworklabs/spacetime:latest
+    container_name: nyx-spacetimedb
+    command: start
+    ports:
+      - "3000:3000"      # WebSocket (BSATN) — dedicated servers connect here
+    volumes:
+      - stdb-data:/stdb  # Persist database across restarts
+    environment:
+      - SPACETIMEDB_DATA_DIR=/stdb
+    restart: unless-stopped
+    healthcheck:
+      # SpacetimeDB doesn't have a health endpoint, so check if port is open
+      test: ["CMD-SHELL", "nc -z localhost 3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  stdb-data:
+    name: nyx-stdb-data

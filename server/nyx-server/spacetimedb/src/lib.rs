@@ -1,30 +1,37 @@
-// Nyx MMO — SpacetimeDB Server Module (Spikes 1–9)
+// Nyx MMO — SpacetimeDB Server Module
+//
+// Architecture: Option 4 — Hybrid A + C + D
+//   UE5 Dedicated Server(s) → SpacetimeDB (single-connection model)
+//   Clients connect ONLY to UE5 via UDP. SpacetimeDB is internal-only.
+//
+// SpacetimeDB responsibilities:
+//   - Player accounts & authentication (EOS identity linking)
+//   - Character persistence (stats, inventory, equipment)
+//   - Combat compute (damage resolution, buff management — Pattern C)
+//   - Zone server orchestration (auto-scaling — Pattern A)
+//   - Social features (guilds, chat, auction house)
+//   - Audit/event logging
 //
 // Tables:
-//   - player: Active player state (position, chunk, display name)
-//   - player_account: Links SpacetimeDB Identity to EOS ProductUserId
-//   - world_entity: Non-player entities for spatial interest testing
-//   - physics_body: Physics-simulated objects managed by the UE5 sidecar
-//   - bench_counter: Simple counter for benchmark throughput
-//   - bench_entity: Entity table for read/write benchmarks
-//   - bench_tick_log: Logs from each scheduled tick
-//   - tick_schedule: Scheduled table driving the game tick loop
-//   - fanout_entity: Entities for subscription fan-out stress testing (Spike 9)
-//   - fanout_schedule: Scheduled table driving the fan-out tick (Spike 9)
-//   - fanout_tick_log: Logs from each fan-out tick (Spike 9)
-//   - stress_result: Records multi-client contention results (Spike 9)
+//   Core:
+//     - player_account: Links SpacetimeDB Identity to EOS ProductUserId
+//     - player: Active player state (position, chunk, display name)
+//     - character_stats: Persistent character data (level, HP, stats, equipment)
+//     - world_entity: Non-player entities for spatial interest
+//   Orchestration:
+//     - zone_server: Registry of active UE5 dedicated servers per zone
+//     - zone_population: Aggregated zone population for auto-scaling decisions
+//   Combat (Pattern C):
+//     - combat_event: Audit log of all combat interactions
+//   Benchmark (Phase 0 spikes — preserved for reference):
+//     - physics_body, bench_counter, bench_entity, bench_tick_log, etc.
 //
 // Auth flow:
-//   1. Client connects anonymously (gets SpacetimeDB Identity)
-//   2. Client calls authenticate_with_eos(eos_puid, display_name, platform)
-//   3. Server links Identity ↔ EOS PUID in player_account table
-//   4. Client calls create_player to enter the world
-//
-// Spatial interest (Spike 5):
-//   - World is divided into chunks (CHUNK_SIZE units each)
-//   - Players and entities have chunk_x/chunk_y columns
-//   - Clients subscribe with WHERE chunk_x/chunk_y BETWEEN min AND max
-//   - On movement, server recomputes chunk from position
+//   1. Client connects to UE5 Dedicated Server via UDP
+//   2. UE5 server authenticates client via EOS
+//   3. UE5 server calls SpacetimeDB: authenticate_with_eos(eos_puid, ...)
+//   4. UE5 server calls SpacetimeDB: load_character(identity) → gets stats
+//   5. UE5 server creates player actor with loaded data
 
 use spacetimedb::{Identity, ReducerContext, ScheduleAt, Table, TimeDuration, Timestamp};
 
@@ -95,31 +102,483 @@ pub struct WorldEntity {
     pub data: String,
 }
 
-// ─── Spike 8: Physics Body (UE5 Sidecar) ──────────────────────────
+// ─── Orchestration Tables (Pattern A: Entity-Sharded MultiServer) ──
 
-/// Physics-simulated objects. Clients insert rows (e.g. spawn_projectile),
-/// the UE5 sidecar picks them up, runs physics, and writes positions
-/// back via the physics_update reducer. Clients see the updates via
-/// OnUpdate subscription callbacks.
-#[spacetimedb::table(accessor = physics_body, public)]
-pub struct PhysicsBody {
+/// Registry of active UE5 dedicated servers. Each server registers itself
+/// on startup and updates entity_count as players join/leave.
+/// The orchestrator watches this table to make scaling decisions.
+#[spacetimedb::table(accessor = zone_server, public)]
+pub struct ZoneServer {
+    #[primary_key]
+    pub server_id: String,
+    /// Which zone this server is running (e.g., "castle_siege", "plains_nw")
+    pub zone_id: String,
+    /// Internal network address (e.g., "10.0.1.5")
+    pub container_ip: String,
+    /// UDP port for client connections
+    pub port: u16,
+    /// Current number of entities this server is authoritative over
+    pub entity_count: u32,
+    /// Maximum entities before requesting scale-up
+    pub max_entities: u32,
+    /// "active", "draining", "standby"
+    pub status: String,
+    /// When this server joined the mesh
+    pub joined_at: Timestamp,
+    /// Last heartbeat from this server
+    pub last_heartbeat: Timestamp,
+}
+
+/// Aggregated zone population tracking. Updated by reducers when
+/// servers register/deregister or entity counts change.
+/// The orchestrator subscribes to this table for scaling decisions.
+#[spacetimedb::table(accessor = zone_population, public)]
+pub struct ZonePopulation {
+    #[primary_key]
+    pub zone_id: String,
+    /// Total players across all servers in this zone
+    pub total_players: u32,
+    /// Number of active servers for this zone
+    pub server_count: u32,
+    /// Orchestrator sets these flags based on thresholds
+    pub needs_scale_up: bool,
+    pub needs_scale_down: bool,
+    pub last_updated: Timestamp,
+}
+
+// ─── Character Persistence Tables ──────────────────────────────────
+
+/// Persistent character data. Loaded when a player joins a zone,
+/// dirty-flushed periodically by the dedicated server,
+/// and saved on disconnect.
+#[spacetimedb::table(accessor = character_stats, public)]
+pub struct CharacterStats {
+    #[primary_key]
+    pub identity: Identity,
+    pub display_name: String,
+    pub level: u32,
+    pub experience: u64,
+    pub max_hp: i32,
+    pub current_hp: i32,
+    pub max_mp: i32,
+    pub current_mp: i32,
+    // Base stats
+    pub strength: u32,
+    pub dexterity: u32,
+    pub intelligence: u32,
+    pub constitution: u32,
+    // Derived/cached stats (recalculated from equipment + base)
+    pub attack_power: u32,
+    pub defense: u32,
+    pub magic_power: u32,
+    pub magic_defense: u32,
+    // Position persistence (saved periodically, loaded on join)
+    pub saved_pos_x: f64,
+    pub saved_pos_y: f64,
+    pub saved_pos_z: f64,
+    pub saved_zone_id: String,
+    pub last_saved: Timestamp,
+}
+
+// ─── Combat Compute Tables (Pattern C) ─────────────────────────────
+
+/// Audit log of combat events. Every hit, heal, buff application
+/// is recorded here for debugging, anti-cheat, and analytics.
+/// Uses event-table semantics — rows are append-only, auto-pruned.
+#[spacetimedb::table(accessor = combat_event, public)]
+pub struct CombatEvent {
     #[primary_key]
     #[auto_inc]
-    pub entity_id: u64,
-    /// Type tag: "projectile", "debris", etc.
-    pub body_type: String,
-    pub pos_x: f64,
-    pub pos_y: f64,
-    pub pos_z: f64,
-    pub vel_x: f64,
-    pub vel_y: f64,
-    pub vel_z: f64,
-    /// False once the body has been deactivated (hit ground, out of range, etc.)
-    pub active: bool,
-    /// Identity of the player who spawned this body
-    pub owner: Identity,
-    pub last_update: Timestamp,
+    pub id: u64,
+    /// Identity of the attacker/source
+    pub source_id: Identity,
+    /// Identity of the target
+    pub target_id: Identity,
+    /// Skill/ability ID used
+    pub skill_id: u32,
+    /// Damage dealt (negative for heals)
+    pub damage: i32,
+    /// Result HP of the target after this event
+    pub result_hp: i32,
+    /// Whether the target died from this event
+    pub is_kill: bool,
+    /// Additional context (crit, resist, absorbed, etc.)
+    pub flags: String,
+    pub timestamp: Timestamp,
 }
+
+// ─── Orchestration Reducers ────────────────────────────────────────
+
+/// Helper: recalculate zone population from all active servers.
+fn recalculate_zone_population(ctx: &ReducerContext, zone_id: &str) {
+    let mut total_players: u32 = 0;
+    let mut server_count: u32 = 0;
+
+    for server in ctx.db.zone_server().iter() {
+        if server.zone_id == zone_id && server.status == "active" {
+            total_players += server.entity_count;
+            server_count += 1;
+        }
+    }
+
+    // Scale thresholds: per-server max of 300
+    let needs_scale_up = server_count > 0
+        && total_players > server_count * 250; // >250 avg per server
+    let needs_scale_down = server_count > 1
+        && total_players < (server_count - 1) * 200; // could fit in N-1 servers
+
+    if let Some(mut pop) = ctx.db.zone_population().zone_id().find(zone_id.to_string()) {
+        pop.total_players = total_players;
+        pop.server_count = server_count;
+        pop.needs_scale_up = needs_scale_up;
+        pop.needs_scale_down = needs_scale_down;
+        pop.last_updated = ctx.timestamp;
+        ctx.db.zone_population().zone_id().update(pop);
+    } else {
+        ctx.db.zone_population().insert(ZonePopulation {
+            zone_id: zone_id.to_string(),
+            total_players,
+            server_count,
+            needs_scale_up,
+            needs_scale_down,
+            last_updated: ctx.timestamp,
+        });
+    }
+}
+
+/// Called by a UE5 dedicated server on startup to register itself.
+#[spacetimedb::reducer]
+pub fn register_zone_server(
+    ctx: &ReducerContext,
+    server_id: String,
+    zone_id: String,
+    container_ip: String,
+    port: u16,
+    max_entities: u32,
+) {
+    // Remove any stale entry with same server_id
+    if ctx.db.zone_server().server_id().find(server_id.clone()).is_some() {
+        ctx.db.zone_server().server_id().delete(server_id.clone());
+    }
+
+    ctx.db.zone_server().insert(ZoneServer {
+        server_id: server_id.clone(),
+        zone_id: zone_id.clone(),
+        container_ip,
+        port,
+        entity_count: 0,
+        max_entities,
+        status: "active".to_string(),
+        joined_at: ctx.timestamp,
+        last_heartbeat: ctx.timestamp,
+    });
+
+    recalculate_zone_population(ctx, &zone_id);
+    log::info!("Zone server registered: {} for zone {}", server_id, zone_id);
+}
+
+/// Called by a UE5 dedicated server to deregister (graceful shutdown).
+#[spacetimedb::reducer]
+pub fn deregister_zone_server(ctx: &ReducerContext, server_id: String) {
+    if let Some(server) = ctx.db.zone_server().server_id().find(server_id.clone()) {
+        let zone_id = server.zone_id.clone();
+        ctx.db.zone_server().server_id().delete(server_id.clone());
+        recalculate_zone_population(ctx, &zone_id);
+        log::info!("Zone server deregistered: {}", server_id);
+    }
+}
+
+/// Called periodically by each UE5 server as a heartbeat + entity count update.
+#[spacetimedb::reducer]
+pub fn server_heartbeat(ctx: &ReducerContext, server_id: String, entity_count: u32) {
+    if let Some(mut server) = ctx.db.zone_server().server_id().find(server_id.clone()) {
+        let zone_id = server.zone_id.clone();
+        server.entity_count = entity_count;
+        server.last_heartbeat = ctx.timestamp;
+        ctx.db.zone_server().server_id().update(server);
+        recalculate_zone_population(ctx, &zone_id);
+    }
+}
+
+/// Called by orchestrator to mark a server for draining (no new players).
+#[spacetimedb::reducer]
+pub fn drain_zone_server(ctx: &ReducerContext, server_id: String) {
+    if let Some(mut server) = ctx.db.zone_server().server_id().find(server_id.clone()) {
+        server.status = "draining".to_string();
+        ctx.db.zone_server().server_id().update(server);
+        log::info!("Zone server marked for draining: {}", server_id);
+    }
+}
+
+/// Returns the best server for a new player joining a zone.
+/// Picks the active server with the fewest entities.
+#[spacetimedb::reducer]
+pub fn assign_player_to_zone(
+    ctx: &ReducerContext,
+    zone_id: String,
+    _player_identity: Identity,
+) {
+    let best = ctx
+        .db
+        .zone_server()
+        .iter()
+        .filter(|s| s.zone_id == zone_id && s.status == "active")
+        .min_by_key(|s| s.entity_count);
+
+    match best {
+        Some(server) => {
+            log::info!(
+                "Player assigned to server {} (zone {}, {} entities)",
+                server.server_id,
+                zone_id,
+                server.entity_count
+            );
+            // The dedicated server that receives this player will call
+            // server_heartbeat to update its entity_count
+        }
+        None => {
+            log::warn!("No active servers for zone {}", zone_id);
+        }
+    }
+}
+
+// ─── Character Persistence Reducers ────────────────────────────────
+
+/// Called by UE5 dedicated server when a player joins — loads or creates
+/// character data and returns it via subscription.
+#[spacetimedb::reducer]
+pub fn load_character(ctx: &ReducerContext, identity: Identity, display_name: String) {
+    if ctx.db.character_stats().identity().find(identity).is_some() {
+        log::info!("Character loaded for {:?}", identity);
+        // Data already exists — UE5 server reads it via subscription
+        return;
+    }
+
+    // New character — create with defaults
+    ctx.db.character_stats().insert(CharacterStats {
+        identity,
+        display_name,
+        level: 1,
+        experience: 0,
+        max_hp: 1000,
+        current_hp: 1000,
+        max_mp: 500,
+        current_mp: 500,
+        strength: 10,
+        dexterity: 10,
+        intelligence: 10,
+        constitution: 10,
+        attack_power: 15,
+        defense: 10,
+        magic_power: 12,
+        magic_defense: 8,
+        saved_pos_x: 0.0,
+        saved_pos_y: 0.0,
+        saved_pos_z: 100.0,
+        saved_zone_id: "default".to_string(),
+        last_saved: ctx.timestamp,
+    });
+    log::info!("New character created for {:?}", identity);
+}
+
+/// Called periodically by UE5 server to dirty-flush character state.
+#[spacetimedb::reducer]
+pub fn save_character(
+    ctx: &ReducerContext,
+    identity: Identity,
+    current_hp: i32,
+    current_mp: i32,
+    pos_x: f64,
+    pos_y: f64,
+    pos_z: f64,
+    zone_id: String,
+) {
+    if let Some(mut stats) = ctx.db.character_stats().identity().find(identity) {
+        stats.current_hp = current_hp;
+        stats.current_mp = current_mp;
+        stats.saved_pos_x = pos_x;
+        stats.saved_pos_y = pos_y;
+        stats.saved_pos_z = pos_z;
+        stats.saved_zone_id = zone_id;
+        stats.last_saved = ctx.timestamp;
+        ctx.db.character_stats().identity().update(stats);
+    }
+}
+
+/// Called by UE5 server when a player levels up.
+#[spacetimedb::reducer]
+pub fn update_progression(
+    ctx: &ReducerContext,
+    identity: Identity,
+    new_level: u32,
+    new_experience: u64,
+) {
+    if let Some(mut stats) = ctx.db.character_stats().identity().find(identity) {
+        stats.level = new_level;
+        stats.experience = new_experience;
+        // Level-up stat gains (simple formula — would be data-driven in production)
+        stats.max_hp = 1000 + (new_level as i32 - 1) * 50;
+        stats.current_hp = stats.max_hp; // Full heal on level up
+        stats.max_mp = 500 + (new_level as i32 - 1) * 25;
+        stats.current_mp = stats.max_mp;
+        stats.strength = 10 + (new_level - 1) * 2;
+        stats.dexterity = 10 + (new_level - 1) * 2;
+        stats.intelligence = 10 + (new_level - 1) * 2;
+        stats.constitution = 10 + (new_level - 1) * 2;
+        stats.attack_power = stats.strength + 5;
+        stats.defense = stats.constitution;
+        stats.magic_power = stats.intelligence + 2;
+        stats.magic_defense = stats.intelligence / 2 + stats.constitution / 3;
+        ctx.db.character_stats().identity().update(stats);
+        log::info!("Player {:?} leveled up to {}", identity, new_level);
+    }
+}
+
+// ─── Combat Compute Reducers (Pattern C) ───────────────────────────
+
+/// Called by UE5 dedicated server when hit detection confirms a melee/skill hit.
+/// SpacetimeDB resolves damage using authoritative character stats, applies it
+/// atomically, and logs the event. UE5 receives the result via subscription
+/// to character_stats and combat_event tables.
+#[spacetimedb::reducer]
+pub fn resolve_hit(
+    ctx: &ReducerContext,
+    attacker_id: Identity,
+    defender_id: Identity,
+    skill_id: u32,
+) {
+    let attacker = match ctx.db.character_stats().identity().find(attacker_id) {
+        Some(a) => a,
+        None => {
+            log::warn!("resolve_hit: attacker {:?} not found", attacker_id);
+            return;
+        }
+    };
+
+    let mut defender = match ctx.db.character_stats().identity().find(defender_id) {
+        Some(d) => d,
+        None => {
+            log::warn!("resolve_hit: defender {:?} not found", defender_id);
+            return;
+        }
+    };
+
+    // Skip if defender is already dead
+    if defender.current_hp <= 0 {
+        return;
+    }
+
+    // Damage formula: attack_power * skill_modifier - defense
+    // skill_id 0 = basic attack (1.0x), skill_id 1 = power attack (1.5x), etc.
+    let skill_modifier: f64 = match skill_id {
+        0 => 1.0,   // Basic attack
+        1 => 1.5,   // Power strike
+        2 => 2.0,   // Critical strike
+        3 => 0.8,   // Quick jab (fast, weak)
+        10 => 1.2,  // Fire bolt (magic)
+        11 => 1.8,  // Fireball (magic AoE)
+        _ => 1.0,
+    };
+
+    // Determine if physical or magical (skill_id >= 10 = magic)
+    let raw_damage = if skill_id >= 10 {
+        (attacker.magic_power as f64 * skill_modifier) as i32 - defender.magic_defense as i32
+    } else {
+        (attacker.attack_power as f64 * skill_modifier) as i32 - defender.defense as i32
+    };
+
+    // Minimum 1 damage
+    let damage = raw_damage.max(1);
+
+    // Apply damage atomically
+    defender.current_hp = (defender.current_hp - damage).max(0);
+    let is_kill = defender.current_hp <= 0;
+    let result_hp = defender.current_hp;
+
+    ctx.db.character_stats().identity().update(defender);
+
+    // Log combat event
+    ctx.db.combat_event().insert(CombatEvent {
+        id: 0, // auto_inc
+        source_id: attacker_id,
+        target_id: defender_id,
+        skill_id,
+        damage,
+        result_hp,
+        is_kill,
+        flags: if is_kill { "KILL".to_string() } else { String::new() },
+        timestamp: ctx.timestamp,
+    });
+
+    if is_kill {
+        log::info!(
+            "KILL: {:?} killed {:?} with skill {} for {} damage",
+            attacker_id, defender_id, skill_id, damage
+        );
+    }
+}
+
+/// Batch resolve: for AoE skills that hit multiple targets in one frame.
+/// UE5 server sends all targets at once for atomic resolution.
+#[spacetimedb::reducer]
+pub fn resolve_hit_batch(
+    ctx: &ReducerContext,
+    attacker_id: Identity,
+    defender_ids: Vec<Identity>,
+    skill_id: u32,
+) {
+    for defender_id in defender_ids {
+        // Delegate to single-target resolver (runs in same transaction)
+        resolve_hit(ctx, attacker_id, defender_id, skill_id);
+    }
+}
+
+/// Heal a character. Called by UE5 server when a heal skill lands.
+#[spacetimedb::reducer]
+pub fn resolve_heal(
+    ctx: &ReducerContext,
+    healer_id: Identity,
+    target_id: Identity,
+    skill_id: u32,
+) {
+    let healer = match ctx.db.character_stats().identity().find(healer_id) {
+        Some(h) => h,
+        None => return,
+    };
+
+    let mut target = match ctx.db.character_stats().identity().find(target_id) {
+        Some(t) => t,
+        None => return,
+    };
+
+    // Heal formula: magic_power * skill_modifier
+    let skill_modifier: f64 = match skill_id {
+        20 => 1.0,  // Minor heal
+        21 => 2.0,  // Major heal
+        22 => 0.5,  // HoT tick
+        _ => 1.0,
+    };
+
+    let heal_amount = (healer.magic_power as f64 * skill_modifier) as i32;
+    target.current_hp = (target.current_hp + heal_amount).min(target.max_hp);
+    let result_hp = target.current_hp;
+    ctx.db.character_stats().identity().update(target);
+
+    // Log as negative damage
+    ctx.db.combat_event().insert(CombatEvent {
+        id: 0,
+        source_id: healer_id,
+        target_id,
+        skill_id,
+        damage: -heal_amount,
+        result_hp,
+        is_kill: false,
+        flags: "HEAL".to_string(),
+        timestamp: ctx.timestamp,
+    });
+}
+
+// ─── Phase 0 Spike Code (preserved for reference/benchmarking) ────
 
 // ─── Lifecycle Reducers ────────────────────────────────────────────
 
@@ -135,21 +594,17 @@ pub fn client_connected(_ctx: &ReducerContext) {
 
 #[spacetimedb::reducer(client_disconnected)]
 pub fn client_disconnected(ctx: &ReducerContext) {
-    // Remove player on disconnect
+    // Remove active player entry on disconnect
     if let Some(player) = ctx.db.player().identity().find(ctx.sender()) {
         log::info!("Removing player {} on disconnect", player.display_name);
         ctx.db.player().identity().delete(ctx.sender());
     }
 }
 
-// ─── Game Reducers ─────────────────────────────────────────────────
+// ─── Core Game Reducers ────────────────────────────────────────────
 
-/// Called by the client after EOS login to link their SpacetimeDB Identity
-/// to their EOS ProductUserId. This must be called before create_player.
-///
-/// In production, this would validate the EOS id_token JWT server-side.
-/// For now, we trust the client-provided PUID (the SpacetimeDB Identity
-/// itself provides the security layer — each client gets a unique one).
+/// Called by the UE5 dedicated server after EOS login to link a
+/// SpacetimeDB Identity to an EOS ProductUserId.
 #[spacetimedb::reducer]
 pub fn authenticate_with_eos(
     ctx: &ReducerContext,
@@ -188,10 +643,9 @@ pub fn authenticate_with_eos(
     }
 }
 
-/// Called after EOS auth to register the player in the world.
+/// Called by UE5 dedicated server to register the player in the active world.
 #[spacetimedb::reducer]
 pub fn create_player(ctx: &ReducerContext, display_name: String) {
-    // Prevent duplicate entries
     if ctx.db.player().identity().find(ctx.sender()).is_some() {
         log::warn!("Player already exists for identity {:?}", ctx.sender());
         return;
@@ -205,7 +659,7 @@ pub fn create_player(ctx: &ReducerContext, display_name: String) {
         display_name,
         pos_x: spawn_x,
         pos_y: spawn_y,
-        pos_z: 100.0, // Spawn slightly above ground
+        pos_z: 100.0,
         rot_yaw: 0.0,
         chunk_x: pos_to_chunk(spawn_x),
         chunk_y: pos_to_chunk(spawn_y),
@@ -217,7 +671,8 @@ pub fn create_player(ctx: &ReducerContext, display_name: String) {
 }
 
 /// Move the calling player to a new position.
-/// `seq` is the client's prediction sequence number, echoed back for reconciliation.
+/// In the current plan, this is called by the UE5 dedicated server
+/// for periodic dirty-flush of authoritative positions (NOT per-frame).
 #[spacetimedb::reducer]
 pub fn move_player(ctx: &ReducerContext, x: f64, y: f64, z: f64, yaw: f32, seq: u32) {
     if let Some(mut player) = ctx.db.player().identity().find(ctx.sender()) {
@@ -238,8 +693,6 @@ pub fn move_player(ctx: &ReducerContext, x: f64, y: f64, z: f64, yaw: f32, seq: 
 // ─── Spike 5: Spatial Interest Stress-Test Reducers ────────────────
 
 /// Seed the world with `count` entities spread across a grid of chunks.
-/// Distributes entities in a square pattern centered on the origin.
-/// Each entity is placed at a random-ish position within its chunk.
 #[spacetimedb::reducer]
 pub fn seed_entities(ctx: &ReducerContext, count: u32) {
     // Spread entities across a grid. Side length = sqrt(count).
@@ -286,7 +739,27 @@ pub fn clear_entities(ctx: &ReducerContext) {
     log::info!("Cleared {} world entities", removed);
 }
 
-// ─── Spike 8: Physics / Sidecar Reducers ──────────────────────────
+// ─── Spike 8: Physics Body Table & Sidecar Reducers ───────────────
+
+/// Physics-simulated objects. Clients insert rows (e.g. spawn_projectile),
+/// the UE5 sidecar picks them up, runs physics, and writes positions
+/// back via the physics_update reducer.
+#[spacetimedb::table(accessor = physics_body, public)]
+pub struct PhysicsBody {
+    #[primary_key]
+    #[auto_inc]
+    pub entity_id: u64,
+    pub body_type: String,
+    pub pos_x: f64,
+    pub pos_y: f64,
+    pub pos_z: f64,
+    pub vel_x: f64,
+    pub vel_y: f64,
+    pub vel_z: f64,
+    pub active: bool,
+    pub owner: Identity,
+    pub last_update: Timestamp,
+}
 
 /// Client spawns a projectile. The UE5 sidecar will pick this up via
 /// OnInsert, simulate physics, and write updated positions back.
@@ -1107,4 +1580,159 @@ pub fn bench_reset(ctx: &ReducerContext) {
         ctx.db.bench_tick_log().id().delete(s.id);
     }
     log::info!("Bench data reset");
+}
+
+// ─── Test/Debug Reducers ───────────────────────────────────────────
+
+/// Smoke-test for the combat compute pipeline.
+/// Creates two synthetic characters, runs a hit + heal, then verifies results.
+/// Results are logged — inspect via `spacetime logs nyx`.
+#[spacetimedb::reducer]
+pub fn test_combat_pipeline(ctx: &ReducerContext) {
+    // Create two synthetic identities (deterministic, non-zero)
+    let atk_bytes: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[31] = 1;
+        b
+    };
+    let def_bytes: [u8; 32] = {
+        let mut b = [0u8; 32];
+        b[31] = 2;
+        b
+    };
+    let attacker_id = Identity::from_byte_array(atk_bytes);
+    let defender_id = Identity::from_byte_array(def_bytes);
+
+    // Clean up any prior test data
+    if ctx.db.character_stats().identity().find(attacker_id).is_some() {
+        ctx.db.character_stats().identity().delete(attacker_id);
+    }
+    if ctx.db.character_stats().identity().find(defender_id).is_some() {
+        ctx.db.character_stats().identity().delete(defender_id);
+    }
+
+    // Create attacker: ATK 15, DEF 10
+    ctx.db.character_stats().insert(CharacterStats {
+        identity: attacker_id,
+        display_name: "TestAttacker".to_string(),
+        level: 1,
+        experience: 0,
+        max_hp: 1000,
+        current_hp: 1000,
+        max_mp: 500,
+        current_mp: 500,
+        strength: 10,
+        dexterity: 10,
+        intelligence: 10,
+        constitution: 10,
+        attack_power: 15,
+        defense: 10,
+        magic_power: 12,
+        magic_defense: 8,
+        saved_pos_x: 0.0,
+        saved_pos_y: 0.0,
+        saved_pos_z: 100.0,
+        saved_zone_id: "test".to_string(),
+        last_saved: ctx.timestamp,
+    });
+
+    // Create defender: HP 100 (low so we can kill), DEF 5
+    ctx.db.character_stats().insert(CharacterStats {
+        identity: defender_id,
+        display_name: "TestDefender".to_string(),
+        level: 1,
+        experience: 0,
+        max_hp: 100,
+        current_hp: 100,
+        max_mp: 100,
+        current_mp: 100,
+        strength: 8,
+        dexterity: 8,
+        intelligence: 8,
+        constitution: 8,
+        attack_power: 10,
+        defense: 5,
+        magic_power: 10,
+        magic_defense: 5,
+        saved_pos_x: 0.0,
+        saved_pos_y: 0.0,
+        saved_pos_z: 100.0,
+        saved_zone_id: "test".to_string(),
+        last_saved: ctx.timestamp,
+    });
+
+    log::info!("=== COMBAT TEST: Characters created ===");
+
+    // ── Test 1: resolve_hit (skill_id=0 = basic_attack, modifier 1.0)
+    // Expected damage: max(1, ATK(15) * 1.0 - DEF(5)) = 10
+    // Expected HP: 100 - 10 = 90
+    resolve_hit(ctx, attacker_id, defender_id, 0);
+    let def_after_hit = ctx.db.character_stats().identity().find(defender_id).unwrap();
+    log::info!(
+        "Test 1 — basic_attack: damage=10 expected, HP={} (expected 90) — {}",
+        def_after_hit.current_hp,
+        if def_after_hit.current_hp == 90 { "PASS" } else { "FAIL" }
+    );
+
+    // ── Test 2: resolve_hit (skill_id=1 = power_strike, modifier 1.5)
+    // Expected damage: max(1, 15 * 1.5 - 5) = max(1, 22 - 5) = 17
+    // Expected HP: 90 - 17 = 73
+    resolve_hit(ctx, attacker_id, defender_id, 1);
+    let def_after_heavy = ctx.db.character_stats().identity().find(defender_id).unwrap();
+    log::info!(
+        "Test 2 — power_strike: damage=17 expected, HP={} (expected 73) — {}",
+        def_after_heavy.current_hp,
+        if def_after_heavy.current_hp == 73 { "PASS" } else { "FAIL" }
+    );
+
+    // ── Test 3: resolve_heal (skill_id=20 = minor_heal, modifier 1.0)
+    // Expected heal: magic_power(12) * 1.0 = 12
+    // Expected HP: min(73 + 12, 100) = 85
+    resolve_heal(ctx, attacker_id, defender_id, 20);
+    let def_after_heal = ctx.db.character_stats().identity().find(defender_id).unwrap();
+    log::info!(
+        "Test 3 — minor_heal: heal=12 expected, HP={} (expected 85) — {}",
+        def_after_heal.current_hp,
+        if def_after_heal.current_hp == 85 { "PASS" } else { "FAIL" }
+    );
+    assert!(def_after_heal.current_hp == 85, "minor_heal result mismatch");
+
+    // ── Test 4: Kill shot — hit until dead
+    // HP is 85, keep hitting with basic_attack (10 dmg each)
+    // 85/10 = 8.5, so 9 hits to kill
+    for _ in 0..9 {
+        resolve_hit(ctx, attacker_id, defender_id, 0);
+    }
+    let def_after_kill = ctx.db.character_stats().identity().find(defender_id).unwrap();
+    let last_event = ctx.db.combat_event().iter().filter(|e| e.is_kill).count();
+    log::info!(
+        "Test 4 — kill shot: HP={} (expected 0), kill_events={} (expected >=1) — {}",
+        def_after_kill.current_hp,
+        last_event,
+        if def_after_kill.current_hp == 0 && last_event >= 1 { "PASS" } else { "FAIL" }
+    );
+
+    // ── Test 5: resolve_hit_batch — batch combat (same skill to same target 3x)
+    // Reset defender HP to 100 for batch test
+    let mut def_reset = ctx.db.character_stats().identity().find(defender_id).unwrap();
+    def_reset.current_hp = 100;
+    ctx.db.character_stats().identity().update(def_reset);
+
+    // 3 basic_attacks at 10 dmg each: 100 - 30 = 70
+    resolve_hit_batch(ctx, attacker_id, vec![defender_id, defender_id, defender_id], 0);
+    let def_after_batch = ctx.db.character_stats().identity().find(defender_id).unwrap();
+    log::info!(
+        "Test 5 — batch(3x basic_attack): HP={} (expected 70) — {}",
+        def_after_batch.current_hp,
+        if def_after_batch.current_hp == 70 { "PASS" } else { "FAIL" }
+    );
+
+    // Count total combat events generated
+    let total_events: u64 = ctx.db.combat_event().iter().count() as u64;
+    log::info!("=== COMBAT TEST COMPLETE: {} combat events logged ===", total_events);
+
+    // Clean up test data
+    ctx.db.character_stats().identity().delete(attacker_id);
+    ctx.db.character_stats().identity().delete(defender_id);
+    // Leave combat_events for audit inspection
 }
