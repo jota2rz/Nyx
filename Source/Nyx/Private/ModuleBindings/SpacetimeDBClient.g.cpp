@@ -7,19 +7,38 @@
 #include "ModuleBindings/Tables/BenchCounterTable.g.h"
 #include "ModuleBindings/Tables/BenchEntityTable.g.h"
 #include "ModuleBindings/Tables/BenchTickLogTable.g.h"
+#include "ModuleBindings/Tables/CharacterStatsTable.g.h"
+#include "ModuleBindings/Tables/CombatEventTable.g.h"
+#include "ModuleBindings/Tables/FanoutEntityTable.g.h"
+#include "ModuleBindings/Tables/FanoutTickLogTable.g.h"
 #include "ModuleBindings/Tables/PhysicsBodyTable.g.h"
 #include "ModuleBindings/Tables/PlayerTable.g.h"
 #include "ModuleBindings/Tables/PlayerAccountTable.g.h"
+#include "ModuleBindings/Tables/StressResultTable.g.h"
 #include "ModuleBindings/Tables/WorldEntityTable.g.h"
+#include "ModuleBindings/Tables/ZonePopulationTable.g.h"
+#include "ModuleBindings/Tables/ZoneServerTable.g.h"
 
 static FReducer DecodeReducer(const FReducerEvent& Event)
 {
     const FString& ReducerName = Event.ReducerCall.ReducerName;
 
+    if (ReducerName == TEXT("assign_player_to_zone"))
+    {
+        FAssignPlayerToZoneArgs Args = UE::SpacetimeDB::Deserialize<FAssignPlayerToZoneArgs>(Event.ReducerCall.Args);
+        return FReducer::AssignPlayerToZone(Args);
+    }
+
     if (ReducerName == TEXT("authenticate_with_eos"))
     {
         FAuthenticateWithEosArgs Args = UE::SpacetimeDB::Deserialize<FAuthenticateWithEosArgs>(Event.ReducerCall.Args);
         return FReducer::AuthenticateWithEos(Args);
+    }
+
+    if (ReducerName == TEXT("bench_batch_physics"))
+    {
+        FBenchBatchPhysicsArgs Args = UE::SpacetimeDB::Deserialize<FBenchBatchPhysicsArgs>(Event.ReducerCall.Args);
+        return FReducer::BenchBatchPhysics(Args);
     }
 
     if (ReducerName == TEXT("bench_burst"))
@@ -94,6 +113,48 @@ static FReducer DecodeReducer(const FReducerEvent& Event)
         return FReducer::CreatePlayer(Args);
     }
 
+    if (ReducerName == TEXT("deregister_zone_server"))
+    {
+        FDeregisterZoneServerArgs Args = UE::SpacetimeDB::Deserialize<FDeregisterZoneServerArgs>(Event.ReducerCall.Args);
+        return FReducer::DeregisterZoneServer(Args);
+    }
+
+    if (ReducerName == TEXT("drain_zone_server"))
+    {
+        FDrainZoneServerArgs Args = UE::SpacetimeDB::Deserialize<FDrainZoneServerArgs>(Event.ReducerCall.Args);
+        return FReducer::DrainZoneServer(Args);
+    }
+
+    if (ReducerName == TEXT("fanout_reset"))
+    {
+        FFanoutResetArgs Args = UE::SpacetimeDB::Deserialize<FFanoutResetArgs>(Event.ReducerCall.Args);
+        return FReducer::FanoutReset(Args);
+    }
+
+    if (ReducerName == TEXT("fanout_seed"))
+    {
+        FFanoutSeedArgs Args = UE::SpacetimeDB::Deserialize<FFanoutSeedArgs>(Event.ReducerCall.Args);
+        return FReducer::FanoutSeed(Args);
+    }
+
+    if (ReducerName == TEXT("fanout_start"))
+    {
+        FFanoutStartArgs Args = UE::SpacetimeDB::Deserialize<FFanoutStartArgs>(Event.ReducerCall.Args);
+        return FReducer::FanoutStart(Args);
+    }
+
+    if (ReducerName == TEXT("fanout_stop"))
+    {
+        FFanoutStopArgs Args = UE::SpacetimeDB::Deserialize<FFanoutStopArgs>(Event.ReducerCall.Args);
+        return FReducer::FanoutStop(Args);
+    }
+
+    if (ReducerName == TEXT("load_character"))
+    {
+        FLoadCharacterArgs Args = UE::SpacetimeDB::Deserialize<FLoadCharacterArgs>(Event.ReducerCall.Args);
+        return FReducer::LoadCharacter(Args);
+    }
+
     if (ReducerName == TEXT("move_player"))
     {
         FMovePlayerArgs Args = UE::SpacetimeDB::Deserialize<FMovePlayerArgs>(Event.ReducerCall.Args);
@@ -118,16 +179,94 @@ static FReducer DecodeReducer(const FReducerEvent& Event)
         return FReducer::PhysicsUpdate(Args);
     }
 
+    if (ReducerName == TEXT("physics_update_batch"))
+    {
+        FPhysicsUpdateBatchArgs Args = UE::SpacetimeDB::Deserialize<FPhysicsUpdateBatchArgs>(Event.ReducerCall.Args);
+        return FReducer::PhysicsUpdateBatch(Args);
+    }
+
+    if (ReducerName == TEXT("register_zone_server"))
+    {
+        FRegisterZoneServerArgs Args = UE::SpacetimeDB::Deserialize<FRegisterZoneServerArgs>(Event.ReducerCall.Args);
+        return FReducer::RegisterZoneServer(Args);
+    }
+
+    if (ReducerName == TEXT("resolve_heal"))
+    {
+        FResolveHealArgs Args = UE::SpacetimeDB::Deserialize<FResolveHealArgs>(Event.ReducerCall.Args);
+        return FReducer::ResolveHeal(Args);
+    }
+
+    if (ReducerName == TEXT("resolve_hit"))
+    {
+        FResolveHitArgs Args = UE::SpacetimeDB::Deserialize<FResolveHitArgs>(Event.ReducerCall.Args);
+        return FReducer::ResolveHit(Args);
+    }
+
+    if (ReducerName == TEXT("resolve_hit_batch"))
+    {
+        FResolveHitBatchArgs Args = UE::SpacetimeDB::Deserialize<FResolveHitBatchArgs>(Event.ReducerCall.Args);
+        return FReducer::ResolveHitBatch(Args);
+    }
+
+    if (ReducerName == TEXT("save_character"))
+    {
+        FSaveCharacterArgs Args = UE::SpacetimeDB::Deserialize<FSaveCharacterArgs>(Event.ReducerCall.Args);
+        return FReducer::SaveCharacter(Args);
+    }
+
     if (ReducerName == TEXT("seed_entities"))
     {
         FSeedEntitiesArgs Args = UE::SpacetimeDB::Deserialize<FSeedEntitiesArgs>(Event.ReducerCall.Args);
         return FReducer::SeedEntities(Args);
     }
 
+    if (ReducerName == TEXT("server_heartbeat"))
+    {
+        FServerHeartbeatArgs Args = UE::SpacetimeDB::Deserialize<FServerHeartbeatArgs>(Event.ReducerCall.Args);
+        return FReducer::ServerHeartbeat(Args);
+    }
+
     if (ReducerName == TEXT("spawn_projectile"))
     {
         FSpawnProjectileArgs Args = UE::SpacetimeDB::Deserialize<FSpawnProjectileArgs>(Event.ReducerCall.Args);
         return FReducer::SpawnProjectile(Args);
+    }
+
+    if (ReducerName == TEXT("spawn_projectiles_batch"))
+    {
+        FSpawnProjectilesBatchArgs Args = UE::SpacetimeDB::Deserialize<FSpawnProjectilesBatchArgs>(Event.ReducerCall.Args);
+        return FReducer::SpawnProjectilesBatch(Args);
+    }
+
+    if (ReducerName == TEXT("stress_move"))
+    {
+        FStressMoveArgs Args = UE::SpacetimeDB::Deserialize<FStressMoveArgs>(Event.ReducerCall.Args);
+        return FReducer::StressMove(Args);
+    }
+
+    if (ReducerName == TEXT("stress_record"))
+    {
+        FStressRecordArgs Args = UE::SpacetimeDB::Deserialize<FStressRecordArgs>(Event.ReducerCall.Args);
+        return FReducer::StressRecord(Args);
+    }
+
+    if (ReducerName == TEXT("stress_reset"))
+    {
+        FStressResetArgs Args = UE::SpacetimeDB::Deserialize<FStressResetArgs>(Event.ReducerCall.Args);
+        return FReducer::StressReset(Args);
+    }
+
+    if (ReducerName == TEXT("test_combat_pipeline"))
+    {
+        FTestCombatPipelineArgs Args = UE::SpacetimeDB::Deserialize<FTestCombatPipelineArgs>(Event.ReducerCall.Args);
+        return FReducer::TestCombatPipeline(Args);
+    }
+
+    if (ReducerName == TEXT("update_progression"))
+    {
+        FUpdateProgressionArgs Args = UE::SpacetimeDB::Deserialize<FUpdateProgressionArgs>(Event.ReducerCall.Args);
+        return FReducer::UpdateProgression(Args);
     }
 
     return FReducer();
@@ -150,10 +289,17 @@ UDbConnection::UDbConnection(const FObjectInitializer& ObjectInitializer) : Supe
 	RegisterTable<FBenchCounterType, UBenchCounterTable, FEventContext>(TEXT("bench_counter"), Db->BenchCounter);
 	RegisterTable<FBenchEntityType, UBenchEntityTable, FEventContext>(TEXT("bench_entity"), Db->BenchEntity);
 	RegisterTable<FBenchTickLogType, UBenchTickLogTable, FEventContext>(TEXT("bench_tick_log"), Db->BenchTickLog);
+	RegisterTable<FCharacterStatsType, UCharacterStatsTable, FEventContext>(TEXT("character_stats"), Db->CharacterStats);
+	RegisterTable<FCombatEventType, UCombatEventTable, FEventContext>(TEXT("combat_event"), Db->CombatEvent);
+	RegisterTable<FFanoutEntityType, UFanoutEntityTable, FEventContext>(TEXT("fanout_entity"), Db->FanoutEntity);
+	RegisterTable<FFanoutTickLogType, UFanoutTickLogTable, FEventContext>(TEXT("fanout_tick_log"), Db->FanoutTickLog);
 	RegisterTable<FPhysicsBodyType, UPhysicsBodyTable, FEventContext>(TEXT("physics_body"), Db->PhysicsBody);
 	RegisterTable<FPlayerType, UPlayerTable, FEventContext>(TEXT("player"), Db->Player);
 	RegisterTable<FPlayerAccountType, UPlayerAccountTable, FEventContext>(TEXT("player_account"), Db->PlayerAccount);
+	RegisterTable<FStressResultType, UStressResultTable, FEventContext>(TEXT("stress_result"), Db->StressResult);
 	RegisterTable<FWorldEntityType, UWorldEntityTable, FEventContext>(TEXT("world_entity"), Db->WorldEntity);
+	RegisterTable<FZonePopulationType, UZonePopulationTable, FEventContext>(TEXT("zone_population"), Db->ZonePopulation);
+	RegisterTable<FZoneServerType, UZoneServerTable, FEventContext>(TEXT("zone_server"), Db->ZoneServer);
 }
 
 FContextBase::FContextBase(UDbConnection* InConn)
@@ -192,26 +338,48 @@ void URemoteTables::Initialize()
 	BenchCounter = NewObject<UBenchCounterTable>(this);
 	BenchEntity = NewObject<UBenchEntityTable>(this);
 	BenchTickLog = NewObject<UBenchTickLogTable>(this);
+	CharacterStats = NewObject<UCharacterStatsTable>(this);
+	CombatEvent = NewObject<UCombatEventTable>(this);
+	FanoutEntity = NewObject<UFanoutEntityTable>(this);
+	FanoutTickLog = NewObject<UFanoutTickLogTable>(this);
 	PhysicsBody = NewObject<UPhysicsBodyTable>(this);
 	Player = NewObject<UPlayerTable>(this);
 	PlayerAccount = NewObject<UPlayerAccountTable>(this);
+	StressResult = NewObject<UStressResultTable>(this);
 	WorldEntity = NewObject<UWorldEntityTable>(this);
+	ZonePopulation = NewObject<UZonePopulationTable>(this);
+	ZoneServer = NewObject<UZoneServerTable>(this);
 	/**/
 
 	/** Initialization */
 	BenchCounter->PostInitialize();
 	BenchEntity->PostInitialize();
 	BenchTickLog->PostInitialize();
+	CharacterStats->PostInitialize();
+	CombatEvent->PostInitialize();
+	FanoutEntity->PostInitialize();
+	FanoutTickLog->PostInitialize();
 	PhysicsBody->PostInitialize();
 	Player->PostInitialize();
 	PlayerAccount->PostInitialize();
+	StressResult->PostInitialize();
 	WorldEntity->PostInitialize();
+	ZonePopulation->PostInitialize();
+	ZoneServer->PostInitialize();
 	/**/
 }
 
+void USetReducerFlags::AssignPlayerToZone(ECallReducerFlags Flag)
+{
+	FlagMap.Add("AssignPlayerToZone", Flag);
+}
 void USetReducerFlags::AuthenticateWithEos(ECallReducerFlags Flag)
 {
 	FlagMap.Add("AuthenticateWithEos", Flag);
+}
+void USetReducerFlags::BenchBatchPhysics(ECallReducerFlags Flag)
+{
+	FlagMap.Add("BenchBatchPhysics", Flag);
 }
 void USetReducerFlags::BenchBurst(ECallReducerFlags Flag)
 {
@@ -261,6 +429,34 @@ void USetReducerFlags::CreatePlayer(ECallReducerFlags Flag)
 {
 	FlagMap.Add("CreatePlayer", Flag);
 }
+void USetReducerFlags::DeregisterZoneServer(ECallReducerFlags Flag)
+{
+	FlagMap.Add("DeregisterZoneServer", Flag);
+}
+void USetReducerFlags::DrainZoneServer(ECallReducerFlags Flag)
+{
+	FlagMap.Add("DrainZoneServer", Flag);
+}
+void USetReducerFlags::FanoutReset(ECallReducerFlags Flag)
+{
+	FlagMap.Add("FanoutReset", Flag);
+}
+void USetReducerFlags::FanoutSeed(ECallReducerFlags Flag)
+{
+	FlagMap.Add("FanoutSeed", Flag);
+}
+void USetReducerFlags::FanoutStart(ECallReducerFlags Flag)
+{
+	FlagMap.Add("FanoutStart", Flag);
+}
+void USetReducerFlags::FanoutStop(ECallReducerFlags Flag)
+{
+	FlagMap.Add("FanoutStop", Flag);
+}
+void USetReducerFlags::LoadCharacter(ECallReducerFlags Flag)
+{
+	FlagMap.Add("LoadCharacter", Flag);
+}
 void USetReducerFlags::MovePlayer(ECallReducerFlags Flag)
 {
 	FlagMap.Add("MovePlayer", Flag);
@@ -277,13 +473,109 @@ void USetReducerFlags::PhysicsUpdate(ECallReducerFlags Flag)
 {
 	FlagMap.Add("PhysicsUpdate", Flag);
 }
+void USetReducerFlags::PhysicsUpdateBatch(ECallReducerFlags Flag)
+{
+	FlagMap.Add("PhysicsUpdateBatch", Flag);
+}
+void USetReducerFlags::RegisterZoneServer(ECallReducerFlags Flag)
+{
+	FlagMap.Add("RegisterZoneServer", Flag);
+}
+void USetReducerFlags::ResolveHeal(ECallReducerFlags Flag)
+{
+	FlagMap.Add("ResolveHeal", Flag);
+}
+void USetReducerFlags::ResolveHit(ECallReducerFlags Flag)
+{
+	FlagMap.Add("ResolveHit", Flag);
+}
+void USetReducerFlags::ResolveHitBatch(ECallReducerFlags Flag)
+{
+	FlagMap.Add("ResolveHitBatch", Flag);
+}
+void USetReducerFlags::SaveCharacter(ECallReducerFlags Flag)
+{
+	FlagMap.Add("SaveCharacter", Flag);
+}
 void USetReducerFlags::SeedEntities(ECallReducerFlags Flag)
 {
 	FlagMap.Add("SeedEntities", Flag);
 }
+void USetReducerFlags::ServerHeartbeat(ECallReducerFlags Flag)
+{
+	FlagMap.Add("ServerHeartbeat", Flag);
+}
 void USetReducerFlags::SpawnProjectile(ECallReducerFlags Flag)
 {
 	FlagMap.Add("SpawnProjectile", Flag);
+}
+void USetReducerFlags::SpawnProjectilesBatch(ECallReducerFlags Flag)
+{
+	FlagMap.Add("SpawnProjectilesBatch", Flag);
+}
+void USetReducerFlags::StressMove(ECallReducerFlags Flag)
+{
+	FlagMap.Add("StressMove", Flag);
+}
+void USetReducerFlags::StressRecord(ECallReducerFlags Flag)
+{
+	FlagMap.Add("StressRecord", Flag);
+}
+void USetReducerFlags::StressReset(ECallReducerFlags Flag)
+{
+	FlagMap.Add("StressReset", Flag);
+}
+void USetReducerFlags::TestCombatPipeline(ECallReducerFlags Flag)
+{
+	FlagMap.Add("TestCombatPipeline", Flag);
+}
+void USetReducerFlags::UpdateProgression(ECallReducerFlags Flag)
+{
+	FlagMap.Add("UpdateProgression", Flag);
+}
+
+void URemoteReducers::AssignPlayerToZone(const FString& ZoneId, const FSpacetimeDBIdentity& PlayerIdentity)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("assign_player_to_zone"), FAssignPlayerToZoneArgs(ZoneId, PlayerIdentity), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeAssignPlayerToZone(const FReducerEventContext& Context, const UAssignPlayerToZoneReducer* Args)
+{
+    if (!OnAssignPlayerToZone.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for AssignPlayerToZone"));
+        }
+        return false;
+    }
+
+    OnAssignPlayerToZone.Broadcast(Context, Args->ZoneId, Args->PlayerIdentity);
+    return true;
+}
+
+bool URemoteReducers::InvokeAssignPlayerToZoneWithArgs(const FReducerEventContext& Context, const FAssignPlayerToZoneArgs& Args)
+{
+    if (!OnAssignPlayerToZone.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for AssignPlayerToZone"));
+        }
+        return false;
+    }
+
+    OnAssignPlayerToZone.Broadcast(Context, Args.ZoneId, Args.PlayerIdentity);
+    return true;
 }
 
 void URemoteReducers::AuthenticateWithEos(const FString& EosProductUserId, const FString& DisplayName, const FString& Platform)
@@ -327,6 +619,50 @@ bool URemoteReducers::InvokeAuthenticateWithEosWithArgs(const FReducerEventConte
     }
 
     OnAuthenticateWithEos.Broadcast(Context, Args.EosProductUserId, Args.DisplayName, Args.Platform);
+    return true;
+}
+
+void URemoteReducers::BenchBatchPhysics(const uint32 BodyCount, const uint32 Iterations)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("bench_batch_physics"), FBenchBatchPhysicsArgs(BodyCount, Iterations), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeBenchBatchPhysics(const FReducerEventContext& Context, const UBenchBatchPhysicsReducer* Args)
+{
+    if (!OnBenchBatchPhysics.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchBatchPhysics"));
+        }
+        return false;
+    }
+
+    OnBenchBatchPhysics.Broadcast(Context, Args->BodyCount, Args->Iterations);
+    return true;
+}
+
+bool URemoteReducers::InvokeBenchBatchPhysicsWithArgs(const FReducerEventContext& Context, const FBenchBatchPhysicsArgs& Args)
+{
+    if (!OnBenchBatchPhysics.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for BenchBatchPhysics"));
+        }
+        return false;
+    }
+
+    OnBenchBatchPhysics.Broadcast(Context, Args.BodyCount, Args.Iterations);
     return true;
 }
 
@@ -858,6 +1194,314 @@ bool URemoteReducers::InvokeCreatePlayerWithArgs(const FReducerEventContext& Con
     return true;
 }
 
+void URemoteReducers::DeregisterZoneServer(const FString& ServerId)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("deregister_zone_server"), FDeregisterZoneServerArgs(ServerId), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeDeregisterZoneServer(const FReducerEventContext& Context, const UDeregisterZoneServerReducer* Args)
+{
+    if (!OnDeregisterZoneServer.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for DeregisterZoneServer"));
+        }
+        return false;
+    }
+
+    OnDeregisterZoneServer.Broadcast(Context, Args->ServerId);
+    return true;
+}
+
+bool URemoteReducers::InvokeDeregisterZoneServerWithArgs(const FReducerEventContext& Context, const FDeregisterZoneServerArgs& Args)
+{
+    if (!OnDeregisterZoneServer.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for DeregisterZoneServer"));
+        }
+        return false;
+    }
+
+    OnDeregisterZoneServer.Broadcast(Context, Args.ServerId);
+    return true;
+}
+
+void URemoteReducers::DrainZoneServer(const FString& ServerId)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("drain_zone_server"), FDrainZoneServerArgs(ServerId), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeDrainZoneServer(const FReducerEventContext& Context, const UDrainZoneServerReducer* Args)
+{
+    if (!OnDrainZoneServer.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for DrainZoneServer"));
+        }
+        return false;
+    }
+
+    OnDrainZoneServer.Broadcast(Context, Args->ServerId);
+    return true;
+}
+
+bool URemoteReducers::InvokeDrainZoneServerWithArgs(const FReducerEventContext& Context, const FDrainZoneServerArgs& Args)
+{
+    if (!OnDrainZoneServer.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for DrainZoneServer"));
+        }
+        return false;
+    }
+
+    OnDrainZoneServer.Broadcast(Context, Args.ServerId);
+    return true;
+}
+
+void URemoteReducers::FanoutReset()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("fanout_reset"), FFanoutResetArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeFanoutReset(const FReducerEventContext& Context, const UFanoutResetReducer* Args)
+{
+    if (!OnFanoutReset.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutReset"));
+        }
+        return false;
+    }
+
+    OnFanoutReset.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeFanoutResetWithArgs(const FReducerEventContext& Context, const FFanoutResetArgs& Args)
+{
+    if (!OnFanoutReset.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutReset"));
+        }
+        return false;
+    }
+
+    OnFanoutReset.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::FanoutSeed(const uint32 Count)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("fanout_seed"), FFanoutSeedArgs(Count), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeFanoutSeed(const FReducerEventContext& Context, const UFanoutSeedReducer* Args)
+{
+    if (!OnFanoutSeed.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutSeed"));
+        }
+        return false;
+    }
+
+    OnFanoutSeed.Broadcast(Context, Args->Count);
+    return true;
+}
+
+bool URemoteReducers::InvokeFanoutSeedWithArgs(const FReducerEventContext& Context, const FFanoutSeedArgs& Args)
+{
+    if (!OnFanoutSeed.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutSeed"));
+        }
+        return false;
+    }
+
+    OnFanoutSeed.Broadcast(Context, Args.Count);
+    return true;
+}
+
+void URemoteReducers::FanoutStart(const uint64 IntervalMs)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("fanout_start"), FFanoutStartArgs(IntervalMs), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeFanoutStart(const FReducerEventContext& Context, const UFanoutStartReducer* Args)
+{
+    if (!OnFanoutStart.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutStart"));
+        }
+        return false;
+    }
+
+    OnFanoutStart.Broadcast(Context, Args->IntervalMs);
+    return true;
+}
+
+bool URemoteReducers::InvokeFanoutStartWithArgs(const FReducerEventContext& Context, const FFanoutStartArgs& Args)
+{
+    if (!OnFanoutStart.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutStart"));
+        }
+        return false;
+    }
+
+    OnFanoutStart.Broadcast(Context, Args.IntervalMs);
+    return true;
+}
+
+void URemoteReducers::FanoutStop()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("fanout_stop"), FFanoutStopArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeFanoutStop(const FReducerEventContext& Context, const UFanoutStopReducer* Args)
+{
+    if (!OnFanoutStop.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutStop"));
+        }
+        return false;
+    }
+
+    OnFanoutStop.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeFanoutStopWithArgs(const FReducerEventContext& Context, const FFanoutStopArgs& Args)
+{
+    if (!OnFanoutStop.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for FanoutStop"));
+        }
+        return false;
+    }
+
+    OnFanoutStop.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::LoadCharacter(const FSpacetimeDBIdentity& Identity, const FString& DisplayName)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("load_character"), FLoadCharacterArgs(Identity, DisplayName), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeLoadCharacter(const FReducerEventContext& Context, const ULoadCharacterReducer* Args)
+{
+    if (!OnLoadCharacter.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for LoadCharacter"));
+        }
+        return false;
+    }
+
+    OnLoadCharacter.Broadcast(Context, Args->Identity, Args->DisplayName);
+    return true;
+}
+
+bool URemoteReducers::InvokeLoadCharacterWithArgs(const FReducerEventContext& Context, const FLoadCharacterArgs& Args)
+{
+    if (!OnLoadCharacter.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for LoadCharacter"));
+        }
+        return false;
+    }
+
+    OnLoadCharacter.Broadcast(Context, Args.Identity, Args.DisplayName);
+    return true;
+}
+
 void URemoteReducers::MovePlayer(const double X, const double Y, const double Z, const float Yaw, const uint32 Seq)
 {
     if (!Conn)
@@ -1034,6 +1678,270 @@ bool URemoteReducers::InvokePhysicsUpdateWithArgs(const FReducerEventContext& Co
     return true;
 }
 
+void URemoteReducers::PhysicsUpdateBatch(const TArray<FBodyUpdateType>& Updates)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("physics_update_batch"), FPhysicsUpdateBatchArgs(Updates), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokePhysicsUpdateBatch(const FReducerEventContext& Context, const UPhysicsUpdateBatchReducer* Args)
+{
+    if (!OnPhysicsUpdateBatch.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsUpdateBatch"));
+        }
+        return false;
+    }
+
+    OnPhysicsUpdateBatch.Broadcast(Context, Args->Updates);
+    return true;
+}
+
+bool URemoteReducers::InvokePhysicsUpdateBatchWithArgs(const FReducerEventContext& Context, const FPhysicsUpdateBatchArgs& Args)
+{
+    if (!OnPhysicsUpdateBatch.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for PhysicsUpdateBatch"));
+        }
+        return false;
+    }
+
+    OnPhysicsUpdateBatch.Broadcast(Context, Args.Updates);
+    return true;
+}
+
+void URemoteReducers::RegisterZoneServer(const FString& ServerId, const FString& ZoneId, const FString& ContainerIp, const uint16 Port, const uint32 MaxEntities)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("register_zone_server"), FRegisterZoneServerArgs(ServerId, ZoneId, ContainerIp, Port, MaxEntities), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeRegisterZoneServer(const FReducerEventContext& Context, const URegisterZoneServerReducer* Args)
+{
+    if (!OnRegisterZoneServer.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for RegisterZoneServer"));
+        }
+        return false;
+    }
+
+    OnRegisterZoneServer.Broadcast(Context, Args->ServerId, Args->ZoneId, Args->ContainerIp, Args->Port, Args->MaxEntities);
+    return true;
+}
+
+bool URemoteReducers::InvokeRegisterZoneServerWithArgs(const FReducerEventContext& Context, const FRegisterZoneServerArgs& Args)
+{
+    if (!OnRegisterZoneServer.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for RegisterZoneServer"));
+        }
+        return false;
+    }
+
+    OnRegisterZoneServer.Broadcast(Context, Args.ServerId, Args.ZoneId, Args.ContainerIp, Args.Port, Args.MaxEntities);
+    return true;
+}
+
+void URemoteReducers::ResolveHeal(const FSpacetimeDBIdentity& HealerId, const FSpacetimeDBIdentity& TargetId, const uint32 SkillId)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("resolve_heal"), FResolveHealArgs(HealerId, TargetId, SkillId), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeResolveHeal(const FReducerEventContext& Context, const UResolveHealReducer* Args)
+{
+    if (!OnResolveHeal.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ResolveHeal"));
+        }
+        return false;
+    }
+
+    OnResolveHeal.Broadcast(Context, Args->HealerId, Args->TargetId, Args->SkillId);
+    return true;
+}
+
+bool URemoteReducers::InvokeResolveHealWithArgs(const FReducerEventContext& Context, const FResolveHealArgs& Args)
+{
+    if (!OnResolveHeal.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ResolveHeal"));
+        }
+        return false;
+    }
+
+    OnResolveHeal.Broadcast(Context, Args.HealerId, Args.TargetId, Args.SkillId);
+    return true;
+}
+
+void URemoteReducers::ResolveHit(const FSpacetimeDBIdentity& AttackerId, const FSpacetimeDBIdentity& DefenderId, const uint32 SkillId)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("resolve_hit"), FResolveHitArgs(AttackerId, DefenderId, SkillId), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeResolveHit(const FReducerEventContext& Context, const UResolveHitReducer* Args)
+{
+    if (!OnResolveHit.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ResolveHit"));
+        }
+        return false;
+    }
+
+    OnResolveHit.Broadcast(Context, Args->AttackerId, Args->DefenderId, Args->SkillId);
+    return true;
+}
+
+bool URemoteReducers::InvokeResolveHitWithArgs(const FReducerEventContext& Context, const FResolveHitArgs& Args)
+{
+    if (!OnResolveHit.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ResolveHit"));
+        }
+        return false;
+    }
+
+    OnResolveHit.Broadcast(Context, Args.AttackerId, Args.DefenderId, Args.SkillId);
+    return true;
+}
+
+void URemoteReducers::ResolveHitBatch(const FSpacetimeDBIdentity& AttackerId, const TArray<FSpacetimeDBIdentity>& DefenderIds, const uint32 SkillId)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("resolve_hit_batch"), FResolveHitBatchArgs(AttackerId, DefenderIds, SkillId), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeResolveHitBatch(const FReducerEventContext& Context, const UResolveHitBatchReducer* Args)
+{
+    if (!OnResolveHitBatch.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ResolveHitBatch"));
+        }
+        return false;
+    }
+
+    OnResolveHitBatch.Broadcast(Context, Args->AttackerId, Args->DefenderIds, Args->SkillId);
+    return true;
+}
+
+bool URemoteReducers::InvokeResolveHitBatchWithArgs(const FReducerEventContext& Context, const FResolveHitBatchArgs& Args)
+{
+    if (!OnResolveHitBatch.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ResolveHitBatch"));
+        }
+        return false;
+    }
+
+    OnResolveHitBatch.Broadcast(Context, Args.AttackerId, Args.DefenderIds, Args.SkillId);
+    return true;
+}
+
+void URemoteReducers::SaveCharacter(const FSpacetimeDBIdentity& Identity, const int32 CurrentHp, const int32 CurrentMp, const double PosX, const double PosY, const double PosZ, const FString& ZoneId)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("save_character"), FSaveCharacterArgs(Identity, CurrentHp, CurrentMp, PosX, PosY, PosZ, ZoneId), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeSaveCharacter(const FReducerEventContext& Context, const USaveCharacterReducer* Args)
+{
+    if (!OnSaveCharacter.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SaveCharacter"));
+        }
+        return false;
+    }
+
+    OnSaveCharacter.Broadcast(Context, Args->Identity, Args->CurrentHp, Args->CurrentMp, Args->PosX, Args->PosY, Args->PosZ, Args->ZoneId);
+    return true;
+}
+
+bool URemoteReducers::InvokeSaveCharacterWithArgs(const FReducerEventContext& Context, const FSaveCharacterArgs& Args)
+{
+    if (!OnSaveCharacter.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SaveCharacter"));
+        }
+        return false;
+    }
+
+    OnSaveCharacter.Broadcast(Context, Args.Identity, Args.CurrentHp, Args.CurrentMp, Args.PosX, Args.PosY, Args.PosZ, Args.ZoneId);
+    return true;
+}
+
 void URemoteReducers::SeedEntities(const uint32 Count)
 {
     if (!Conn)
@@ -1078,6 +1986,50 @@ bool URemoteReducers::InvokeSeedEntitiesWithArgs(const FReducerEventContext& Con
     return true;
 }
 
+void URemoteReducers::ServerHeartbeat(const FString& ServerId, const uint32 EntityCount)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("server_heartbeat"), FServerHeartbeatArgs(ServerId, EntityCount), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeServerHeartbeat(const FReducerEventContext& Context, const UServerHeartbeatReducer* Args)
+{
+    if (!OnServerHeartbeat.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ServerHeartbeat"));
+        }
+        return false;
+    }
+
+    OnServerHeartbeat.Broadcast(Context, Args->ServerId, Args->EntityCount);
+    return true;
+}
+
+bool URemoteReducers::InvokeServerHeartbeatWithArgs(const FReducerEventContext& Context, const FServerHeartbeatArgs& Args)
+{
+    if (!OnServerHeartbeat.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for ServerHeartbeat"));
+        }
+        return false;
+    }
+
+    OnServerHeartbeat.Broadcast(Context, Args.ServerId, Args.EntityCount);
+    return true;
+}
+
 void URemoteReducers::SpawnProjectile(const double PosX, const double PosY, const double PosZ, const double VelX, const double VelY, const double VelZ)
 {
     if (!Conn)
@@ -1119,6 +2071,270 @@ bool URemoteReducers::InvokeSpawnProjectileWithArgs(const FReducerEventContext& 
     }
 
     OnSpawnProjectile.Broadcast(Context, Args.PosX, Args.PosY, Args.PosZ, Args.VelX, Args.VelY, Args.VelZ);
+    return true;
+}
+
+void URemoteReducers::SpawnProjectilesBatch(const uint32 Count)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("spawn_projectiles_batch"), FSpawnProjectilesBatchArgs(Count), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeSpawnProjectilesBatch(const FReducerEventContext& Context, const USpawnProjectilesBatchReducer* Args)
+{
+    if (!OnSpawnProjectilesBatch.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SpawnProjectilesBatch"));
+        }
+        return false;
+    }
+
+    OnSpawnProjectilesBatch.Broadcast(Context, Args->Count);
+    return true;
+}
+
+bool URemoteReducers::InvokeSpawnProjectilesBatchWithArgs(const FReducerEventContext& Context, const FSpawnProjectilesBatchArgs& Args)
+{
+    if (!OnSpawnProjectilesBatch.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for SpawnProjectilesBatch"));
+        }
+        return false;
+    }
+
+    OnSpawnProjectilesBatch.Broadcast(Context, Args.Count);
+    return true;
+}
+
+void URemoteReducers::StressMove(const uint64 EntityId, const double Dx, const double Dy)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("stress_move"), FStressMoveArgs(EntityId, Dx, Dy), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeStressMove(const FReducerEventContext& Context, const UStressMoveReducer* Args)
+{
+    if (!OnStressMove.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for StressMove"));
+        }
+        return false;
+    }
+
+    OnStressMove.Broadcast(Context, Args->EntityId, Args->Dx, Args->Dy);
+    return true;
+}
+
+bool URemoteReducers::InvokeStressMoveWithArgs(const FReducerEventContext& Context, const FStressMoveArgs& Args)
+{
+    if (!OnStressMove.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for StressMove"));
+        }
+        return false;
+    }
+
+    OnStressMove.Broadcast(Context, Args.EntityId, Args.Dx, Args.Dy);
+    return true;
+}
+
+void URemoteReducers::StressRecord(const uint32 ClientCount, const uint64 WindowMs)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("stress_record"), FStressRecordArgs(ClientCount, WindowMs), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeStressRecord(const FReducerEventContext& Context, const UStressRecordReducer* Args)
+{
+    if (!OnStressRecord.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for StressRecord"));
+        }
+        return false;
+    }
+
+    OnStressRecord.Broadcast(Context, Args->ClientCount, Args->WindowMs);
+    return true;
+}
+
+bool URemoteReducers::InvokeStressRecordWithArgs(const FReducerEventContext& Context, const FStressRecordArgs& Args)
+{
+    if (!OnStressRecord.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for StressRecord"));
+        }
+        return false;
+    }
+
+    OnStressRecord.Broadcast(Context, Args.ClientCount, Args.WindowMs);
+    return true;
+}
+
+void URemoteReducers::StressReset()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("stress_reset"), FStressResetArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeStressReset(const FReducerEventContext& Context, const UStressResetReducer* Args)
+{
+    if (!OnStressReset.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for StressReset"));
+        }
+        return false;
+    }
+
+    OnStressReset.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeStressResetWithArgs(const FReducerEventContext& Context, const FStressResetArgs& Args)
+{
+    if (!OnStressReset.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for StressReset"));
+        }
+        return false;
+    }
+
+    OnStressReset.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::TestCombatPipeline()
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("test_combat_pipeline"), FTestCombatPipelineArgs(), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeTestCombatPipeline(const FReducerEventContext& Context, const UTestCombatPipelineReducer* Args)
+{
+    if (!OnTestCombatPipeline.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for TestCombatPipeline"));
+        }
+        return false;
+    }
+
+    OnTestCombatPipeline.Broadcast(Context);
+    return true;
+}
+
+bool URemoteReducers::InvokeTestCombatPipelineWithArgs(const FReducerEventContext& Context, const FTestCombatPipelineArgs& Args)
+{
+    if (!OnTestCombatPipeline.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for TestCombatPipeline"));
+        }
+        return false;
+    }
+
+    OnTestCombatPipeline.Broadcast(Context);
+    return true;
+}
+
+void URemoteReducers::UpdateProgression(const FSpacetimeDBIdentity& Identity, const uint32 NewLevel, const uint64 NewExperience)
+{
+    if (!Conn)
+    {
+        UE_LOG(LogTemp, Error, TEXT("SpacetimeDB connection is null"));
+        return;
+    }
+
+	Conn->CallReducerTyped(TEXT("update_progression"), FUpdateProgressionArgs(Identity, NewLevel, NewExperience), SetCallReducerFlags);
+}
+
+bool URemoteReducers::InvokeUpdateProgression(const FReducerEventContext& Context, const UUpdateProgressionReducer* Args)
+{
+    if (!OnUpdateProgression.IsBound())
+    {
+        // Handle unhandled reducer error
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            // TODO: Check Context.Event.Status for Failed/OutOfEnergy cases
+            // For now, just broadcast any error
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for UpdateProgression"));
+        }
+        return false;
+    }
+
+    OnUpdateProgression.Broadcast(Context, Args->Identity, Args->NewLevel, Args->NewExperience);
+    return true;
+}
+
+bool URemoteReducers::InvokeUpdateProgressionWithArgs(const FReducerEventContext& Context, const FUpdateProgressionArgs& Args)
+{
+    if (!OnUpdateProgression.IsBound())
+    {
+        if (InternalOnUnhandledReducerError.IsBound())
+        {
+            InternalOnUnhandledReducerError.Broadcast(Context, TEXT("No handler registered for UpdateProgression"));
+        }
+        return false;
+    }
+
+    OnUpdateProgression.Broadcast(Context, Args.Identity, Args.NewLevel, Args.NewExperience);
     return true;
 }
 
@@ -1176,10 +2392,22 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
     // Use hardcoded string matching for reducer dispatching
     const FString& ReducerName = Event.ReducerCall.ReducerName;
 
+    if (ReducerName == TEXT("assign_player_to_zone"))
+    {
+        FAssignPlayerToZoneArgs Args = ReducerEvent.Reducer.GetAsAssignPlayerToZone();
+        Reducers->InvokeAssignPlayerToZoneWithArgs(Context, Args);
+        return;
+    }
     if (ReducerName == TEXT("authenticate_with_eos"))
     {
         FAuthenticateWithEosArgs Args = ReducerEvent.Reducer.GetAsAuthenticateWithEos();
         Reducers->InvokeAuthenticateWithEosWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("bench_batch_physics"))
+    {
+        FBenchBatchPhysicsArgs Args = ReducerEvent.Reducer.GetAsBenchBatchPhysics();
+        Reducers->InvokeBenchBatchPhysicsWithArgs(Context, Args);
         return;
     }
     if (ReducerName == TEXT("bench_burst"))
@@ -1254,6 +2482,48 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
         Reducers->InvokeCreatePlayerWithArgs(Context, Args);
         return;
     }
+    if (ReducerName == TEXT("deregister_zone_server"))
+    {
+        FDeregisterZoneServerArgs Args = ReducerEvent.Reducer.GetAsDeregisterZoneServer();
+        Reducers->InvokeDeregisterZoneServerWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("drain_zone_server"))
+    {
+        FDrainZoneServerArgs Args = ReducerEvent.Reducer.GetAsDrainZoneServer();
+        Reducers->InvokeDrainZoneServerWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("fanout_reset"))
+    {
+        FFanoutResetArgs Args = ReducerEvent.Reducer.GetAsFanoutReset();
+        Reducers->InvokeFanoutResetWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("fanout_seed"))
+    {
+        FFanoutSeedArgs Args = ReducerEvent.Reducer.GetAsFanoutSeed();
+        Reducers->InvokeFanoutSeedWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("fanout_start"))
+    {
+        FFanoutStartArgs Args = ReducerEvent.Reducer.GetAsFanoutStart();
+        Reducers->InvokeFanoutStartWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("fanout_stop"))
+    {
+        FFanoutStopArgs Args = ReducerEvent.Reducer.GetAsFanoutStop();
+        Reducers->InvokeFanoutStopWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("load_character"))
+    {
+        FLoadCharacterArgs Args = ReducerEvent.Reducer.GetAsLoadCharacter();
+        Reducers->InvokeLoadCharacterWithArgs(Context, Args);
+        return;
+    }
     if (ReducerName == TEXT("move_player"))
     {
         FMovePlayerArgs Args = ReducerEvent.Reducer.GetAsMovePlayer();
@@ -1278,16 +2548,94 @@ void UDbConnection::ReducerEvent(const FReducerEvent& Event)
         Reducers->InvokePhysicsUpdateWithArgs(Context, Args);
         return;
     }
+    if (ReducerName == TEXT("physics_update_batch"))
+    {
+        FPhysicsUpdateBatchArgs Args = ReducerEvent.Reducer.GetAsPhysicsUpdateBatch();
+        Reducers->InvokePhysicsUpdateBatchWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("register_zone_server"))
+    {
+        FRegisterZoneServerArgs Args = ReducerEvent.Reducer.GetAsRegisterZoneServer();
+        Reducers->InvokeRegisterZoneServerWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("resolve_heal"))
+    {
+        FResolveHealArgs Args = ReducerEvent.Reducer.GetAsResolveHeal();
+        Reducers->InvokeResolveHealWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("resolve_hit"))
+    {
+        FResolveHitArgs Args = ReducerEvent.Reducer.GetAsResolveHit();
+        Reducers->InvokeResolveHitWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("resolve_hit_batch"))
+    {
+        FResolveHitBatchArgs Args = ReducerEvent.Reducer.GetAsResolveHitBatch();
+        Reducers->InvokeResolveHitBatchWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("save_character"))
+    {
+        FSaveCharacterArgs Args = ReducerEvent.Reducer.GetAsSaveCharacter();
+        Reducers->InvokeSaveCharacterWithArgs(Context, Args);
+        return;
+    }
     if (ReducerName == TEXT("seed_entities"))
     {
         FSeedEntitiesArgs Args = ReducerEvent.Reducer.GetAsSeedEntities();
         Reducers->InvokeSeedEntitiesWithArgs(Context, Args);
         return;
     }
+    if (ReducerName == TEXT("server_heartbeat"))
+    {
+        FServerHeartbeatArgs Args = ReducerEvent.Reducer.GetAsServerHeartbeat();
+        Reducers->InvokeServerHeartbeatWithArgs(Context, Args);
+        return;
+    }
     if (ReducerName == TEXT("spawn_projectile"))
     {
         FSpawnProjectileArgs Args = ReducerEvent.Reducer.GetAsSpawnProjectile();
         Reducers->InvokeSpawnProjectileWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("spawn_projectiles_batch"))
+    {
+        FSpawnProjectilesBatchArgs Args = ReducerEvent.Reducer.GetAsSpawnProjectilesBatch();
+        Reducers->InvokeSpawnProjectilesBatchWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("stress_move"))
+    {
+        FStressMoveArgs Args = ReducerEvent.Reducer.GetAsStressMove();
+        Reducers->InvokeStressMoveWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("stress_record"))
+    {
+        FStressRecordArgs Args = ReducerEvent.Reducer.GetAsStressRecord();
+        Reducers->InvokeStressRecordWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("stress_reset"))
+    {
+        FStressResetArgs Args = ReducerEvent.Reducer.GetAsStressReset();
+        Reducers->InvokeStressResetWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("test_combat_pipeline"))
+    {
+        FTestCombatPipelineArgs Args = ReducerEvent.Reducer.GetAsTestCombatPipeline();
+        Reducers->InvokeTestCombatPipelineWithArgs(Context, Args);
+        return;
+    }
+    if (ReducerName == TEXT("update_progression"))
+    {
+        FUpdateProgressionArgs Args = ReducerEvent.Reducer.GetAsUpdateProgression();
+        Reducers->InvokeUpdateProgressionWithArgs(Context, Args);
         return;
     }
 

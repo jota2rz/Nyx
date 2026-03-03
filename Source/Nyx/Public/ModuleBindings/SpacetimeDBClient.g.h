@@ -13,7 +13,9 @@
 #include "Connection/Subscription.h"
 #include "Kismet/BlueprintFunctionLibrary.h"
 #include "ModuleBindings/ReducerBase.g.h"
+#include "ModuleBindings/Reducers/AssignPlayerToZone.g.h"
 #include "ModuleBindings/Reducers/AuthenticateWithEos.g.h"
+#include "ModuleBindings/Reducers/BenchBatchPhysics.g.h"
 #include "ModuleBindings/Reducers/BenchBurst.g.h"
 #include "ModuleBindings/Reducers/BenchBurstUpdate.g.h"
 #include "ModuleBindings/Reducers/BenchComplex.g.h"
@@ -26,12 +28,33 @@
 #include "ModuleBindings/Reducers/BenchStopTick.g.h"
 #include "ModuleBindings/Reducers/ClearEntities.g.h"
 #include "ModuleBindings/Reducers/CreatePlayer.g.h"
+#include "ModuleBindings/Reducers/DeregisterZoneServer.g.h"
+#include "ModuleBindings/Reducers/DrainZoneServer.g.h"
+#include "ModuleBindings/Reducers/FanoutReset.g.h"
+#include "ModuleBindings/Reducers/FanoutSeed.g.h"
+#include "ModuleBindings/Reducers/FanoutStart.g.h"
+#include "ModuleBindings/Reducers/FanoutStop.g.h"
+#include "ModuleBindings/Reducers/LoadCharacter.g.h"
 #include "ModuleBindings/Reducers/MovePlayer.g.h"
 #include "ModuleBindings/Reducers/PhysicsCleanup.g.h"
 #include "ModuleBindings/Reducers/PhysicsReset.g.h"
 #include "ModuleBindings/Reducers/PhysicsUpdate.g.h"
+#include "ModuleBindings/Reducers/PhysicsUpdateBatch.g.h"
+#include "ModuleBindings/Reducers/RegisterZoneServer.g.h"
+#include "ModuleBindings/Reducers/ResolveHeal.g.h"
+#include "ModuleBindings/Reducers/ResolveHit.g.h"
+#include "ModuleBindings/Reducers/ResolveHitBatch.g.h"
+#include "ModuleBindings/Reducers/SaveCharacter.g.h"
 #include "ModuleBindings/Reducers/SeedEntities.g.h"
+#include "ModuleBindings/Reducers/ServerHeartbeat.g.h"
 #include "ModuleBindings/Reducers/SpawnProjectile.g.h"
+#include "ModuleBindings/Reducers/SpawnProjectilesBatch.g.h"
+#include "ModuleBindings/Reducers/StressMove.g.h"
+#include "ModuleBindings/Reducers/StressRecord.g.h"
+#include "ModuleBindings/Reducers/StressReset.g.h"
+#include "ModuleBindings/Reducers/TestCombatPipeline.g.h"
+#include "ModuleBindings/Reducers/UpdateProgression.g.h"
+#include "ModuleBindings/Types/BodyUpdateType.g.h"
 #include "Types/Builtins.h"
 #include "SpacetimeDBClient.g.generated.h"
 
@@ -47,10 +70,17 @@ class USubscriptionHandle;
 class UBenchCounterTable;
 class UBenchEntityTable;
 class UBenchTickLogTable;
+class UCharacterStatsTable;
+class UCombatEventTable;
+class UFanoutEntityTable;
+class UFanoutTickLogTable;
 class UPhysicsBodyTable;
 class UPlayerTable;
 class UPlayerAccountTable;
+class UStressResultTable;
 class UWorldEntityTable;
+class UZonePopulationTable;
+class UZoneServerTable;
 /***/
 
 // Delegates using the generated connection type. These wrap the base
@@ -126,7 +156,9 @@ private:
 UENUM(BlueprintType, Category = "SpacetimeDB")
 enum class EReducerTag : uint8
 {
+    AssignPlayerToZone,
     AuthenticateWithEos,
+    BenchBatchPhysics,
     BenchBurst,
     BenchBurstUpdate,
     BenchComplex,
@@ -139,12 +171,32 @@ enum class EReducerTag : uint8
     BenchStopTick,
     ClearEntities,
     CreatePlayer,
+    DeregisterZoneServer,
+    DrainZoneServer,
+    FanoutReset,
+    FanoutSeed,
+    FanoutStart,
+    FanoutStop,
+    LoadCharacter,
     MovePlayer,
     PhysicsCleanup,
     PhysicsReset,
     PhysicsUpdate,
+    PhysicsUpdateBatch,
+    RegisterZoneServer,
+    ResolveHeal,
+    ResolveHit,
+    ResolveHitBatch,
+    SaveCharacter,
     SeedEntities,
-    SpawnProjectile
+    ServerHeartbeat,
+    SpawnProjectile,
+    SpawnProjectilesBatch,
+    StressMove,
+    StressRecord,
+    StressReset,
+    TestCombatPipeline,
+    UpdateProgression
 };
 
 USTRUCT(BlueprintType)
@@ -156,13 +208,29 @@ public:
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
     EReducerTag Tag = static_cast<EReducerTag>(0);
 
-    TVariant<FAuthenticateWithEosArgs, FBenchBurstArgs, FBenchBurstUpdateArgs, FBenchComplexArgs, FBenchMediumArgs, FBenchMemoryArgs, FBenchResetArgs, FBenchSeedArgs, FBenchSimpleArgs, FBenchStartTickArgs, FBenchStopTickArgs, FClearEntitiesArgs, FCreatePlayerArgs, FMovePlayerArgs, FPhysicsCleanupArgs, FPhysicsResetArgs, FPhysicsUpdateArgs, FSeedEntitiesArgs, FSpawnProjectileArgs> Data;
+    TVariant<FAssignPlayerToZoneArgs, FAuthenticateWithEosArgs, FBenchBatchPhysicsArgs, FBenchBurstArgs, FBenchBurstUpdateArgs, FBenchComplexArgs, FBenchMediumArgs, FBenchMemoryArgs, FBenchResetArgs, FBenchSeedArgs, FBenchSimpleArgs, FBenchStartTickArgs, FBenchStopTickArgs, FClearEntitiesArgs, FCreatePlayerArgs, FDeregisterZoneServerArgs, FDrainZoneServerArgs, FFanoutResetArgs, FFanoutSeedArgs, FFanoutStartArgs, FFanoutStopArgs, FLoadCharacterArgs, FMovePlayerArgs, FPhysicsCleanupArgs, FPhysicsResetArgs, FPhysicsUpdateArgs, FPhysicsUpdateBatchArgs, FRegisterZoneServerArgs, FResolveHealArgs, FResolveHitArgs, FResolveHitBatchArgs, FSaveCharacterArgs, FSeedEntitiesArgs, FServerHeartbeatArgs, FSpawnProjectileArgs, FSpawnProjectilesBatchArgs, FStressMoveArgs, FStressRecordArgs, FStressResetArgs, FTestCombatPipelineArgs, FUpdateProgressionArgs> Data;
 
     // Optional metadata
     UPROPERTY(BlueprintReadOnly, Category = "SpacetimeDB")
     FString ReducerName;
     uint32 ReducerId = 0;
     uint32 RequestId = 0;
+
+    static FReducer AssignPlayerToZone(const FAssignPlayerToZoneArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::AssignPlayerToZone;
+        Out.Data.Set<FAssignPlayerToZoneArgs>(Value);
+        Out.ReducerName = TEXT("assign_player_to_zone");
+        return Out;
+    }
+
+    FORCEINLINE bool IsAssignPlayerToZone() const { return Tag == EReducerTag::AssignPlayerToZone; }
+    FORCEINLINE FAssignPlayerToZoneArgs GetAsAssignPlayerToZone() const
+    {
+        ensureMsgf(IsAssignPlayerToZone(), TEXT("Reducer does not hold AssignPlayerToZone!"));
+        return Data.Get<FAssignPlayerToZoneArgs>();
+    }
 
     static FReducer AuthenticateWithEos(const FAuthenticateWithEosArgs& Value)
     {
@@ -178,6 +246,22 @@ public:
     {
         ensureMsgf(IsAuthenticateWithEos(), TEXT("Reducer does not hold AuthenticateWithEos!"));
         return Data.Get<FAuthenticateWithEosArgs>();
+    }
+
+    static FReducer BenchBatchPhysics(const FBenchBatchPhysicsArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::BenchBatchPhysics;
+        Out.Data.Set<FBenchBatchPhysicsArgs>(Value);
+        Out.ReducerName = TEXT("bench_batch_physics");
+        return Out;
+    }
+
+    FORCEINLINE bool IsBenchBatchPhysics() const { return Tag == EReducerTag::BenchBatchPhysics; }
+    FORCEINLINE FBenchBatchPhysicsArgs GetAsBenchBatchPhysics() const
+    {
+        ensureMsgf(IsBenchBatchPhysics(), TEXT("Reducer does not hold BenchBatchPhysics!"));
+        return Data.Get<FBenchBatchPhysicsArgs>();
     }
 
     static FReducer BenchBurst(const FBenchBurstArgs& Value)
@@ -372,6 +456,118 @@ public:
         return Data.Get<FCreatePlayerArgs>();
     }
 
+    static FReducer DeregisterZoneServer(const FDeregisterZoneServerArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::DeregisterZoneServer;
+        Out.Data.Set<FDeregisterZoneServerArgs>(Value);
+        Out.ReducerName = TEXT("deregister_zone_server");
+        return Out;
+    }
+
+    FORCEINLINE bool IsDeregisterZoneServer() const { return Tag == EReducerTag::DeregisterZoneServer; }
+    FORCEINLINE FDeregisterZoneServerArgs GetAsDeregisterZoneServer() const
+    {
+        ensureMsgf(IsDeregisterZoneServer(), TEXT("Reducer does not hold DeregisterZoneServer!"));
+        return Data.Get<FDeregisterZoneServerArgs>();
+    }
+
+    static FReducer DrainZoneServer(const FDrainZoneServerArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::DrainZoneServer;
+        Out.Data.Set<FDrainZoneServerArgs>(Value);
+        Out.ReducerName = TEXT("drain_zone_server");
+        return Out;
+    }
+
+    FORCEINLINE bool IsDrainZoneServer() const { return Tag == EReducerTag::DrainZoneServer; }
+    FORCEINLINE FDrainZoneServerArgs GetAsDrainZoneServer() const
+    {
+        ensureMsgf(IsDrainZoneServer(), TEXT("Reducer does not hold DrainZoneServer!"));
+        return Data.Get<FDrainZoneServerArgs>();
+    }
+
+    static FReducer FanoutReset(const FFanoutResetArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::FanoutReset;
+        Out.Data.Set<FFanoutResetArgs>(Value);
+        Out.ReducerName = TEXT("fanout_reset");
+        return Out;
+    }
+
+    FORCEINLINE bool IsFanoutReset() const { return Tag == EReducerTag::FanoutReset; }
+    FORCEINLINE FFanoutResetArgs GetAsFanoutReset() const
+    {
+        ensureMsgf(IsFanoutReset(), TEXT("Reducer does not hold FanoutReset!"));
+        return Data.Get<FFanoutResetArgs>();
+    }
+
+    static FReducer FanoutSeed(const FFanoutSeedArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::FanoutSeed;
+        Out.Data.Set<FFanoutSeedArgs>(Value);
+        Out.ReducerName = TEXT("fanout_seed");
+        return Out;
+    }
+
+    FORCEINLINE bool IsFanoutSeed() const { return Tag == EReducerTag::FanoutSeed; }
+    FORCEINLINE FFanoutSeedArgs GetAsFanoutSeed() const
+    {
+        ensureMsgf(IsFanoutSeed(), TEXT("Reducer does not hold FanoutSeed!"));
+        return Data.Get<FFanoutSeedArgs>();
+    }
+
+    static FReducer FanoutStart(const FFanoutStartArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::FanoutStart;
+        Out.Data.Set<FFanoutStartArgs>(Value);
+        Out.ReducerName = TEXT("fanout_start");
+        return Out;
+    }
+
+    FORCEINLINE bool IsFanoutStart() const { return Tag == EReducerTag::FanoutStart; }
+    FORCEINLINE FFanoutStartArgs GetAsFanoutStart() const
+    {
+        ensureMsgf(IsFanoutStart(), TEXT("Reducer does not hold FanoutStart!"));
+        return Data.Get<FFanoutStartArgs>();
+    }
+
+    static FReducer FanoutStop(const FFanoutStopArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::FanoutStop;
+        Out.Data.Set<FFanoutStopArgs>(Value);
+        Out.ReducerName = TEXT("fanout_stop");
+        return Out;
+    }
+
+    FORCEINLINE bool IsFanoutStop() const { return Tag == EReducerTag::FanoutStop; }
+    FORCEINLINE FFanoutStopArgs GetAsFanoutStop() const
+    {
+        ensureMsgf(IsFanoutStop(), TEXT("Reducer does not hold FanoutStop!"));
+        return Data.Get<FFanoutStopArgs>();
+    }
+
+    static FReducer LoadCharacter(const FLoadCharacterArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::LoadCharacter;
+        Out.Data.Set<FLoadCharacterArgs>(Value);
+        Out.ReducerName = TEXT("load_character");
+        return Out;
+    }
+
+    FORCEINLINE bool IsLoadCharacter() const { return Tag == EReducerTag::LoadCharacter; }
+    FORCEINLINE FLoadCharacterArgs GetAsLoadCharacter() const
+    {
+        ensureMsgf(IsLoadCharacter(), TEXT("Reducer does not hold LoadCharacter!"));
+        return Data.Get<FLoadCharacterArgs>();
+    }
+
     static FReducer MovePlayer(const FMovePlayerArgs& Value)
     {
         FReducer Out;
@@ -436,6 +632,102 @@ public:
         return Data.Get<FPhysicsUpdateArgs>();
     }
 
+    static FReducer PhysicsUpdateBatch(const FPhysicsUpdateBatchArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::PhysicsUpdateBatch;
+        Out.Data.Set<FPhysicsUpdateBatchArgs>(Value);
+        Out.ReducerName = TEXT("physics_update_batch");
+        return Out;
+    }
+
+    FORCEINLINE bool IsPhysicsUpdateBatch() const { return Tag == EReducerTag::PhysicsUpdateBatch; }
+    FORCEINLINE FPhysicsUpdateBatchArgs GetAsPhysicsUpdateBatch() const
+    {
+        ensureMsgf(IsPhysicsUpdateBatch(), TEXT("Reducer does not hold PhysicsUpdateBatch!"));
+        return Data.Get<FPhysicsUpdateBatchArgs>();
+    }
+
+    static FReducer RegisterZoneServer(const FRegisterZoneServerArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::RegisterZoneServer;
+        Out.Data.Set<FRegisterZoneServerArgs>(Value);
+        Out.ReducerName = TEXT("register_zone_server");
+        return Out;
+    }
+
+    FORCEINLINE bool IsRegisterZoneServer() const { return Tag == EReducerTag::RegisterZoneServer; }
+    FORCEINLINE FRegisterZoneServerArgs GetAsRegisterZoneServer() const
+    {
+        ensureMsgf(IsRegisterZoneServer(), TEXT("Reducer does not hold RegisterZoneServer!"));
+        return Data.Get<FRegisterZoneServerArgs>();
+    }
+
+    static FReducer ResolveHeal(const FResolveHealArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::ResolveHeal;
+        Out.Data.Set<FResolveHealArgs>(Value);
+        Out.ReducerName = TEXT("resolve_heal");
+        return Out;
+    }
+
+    FORCEINLINE bool IsResolveHeal() const { return Tag == EReducerTag::ResolveHeal; }
+    FORCEINLINE FResolveHealArgs GetAsResolveHeal() const
+    {
+        ensureMsgf(IsResolveHeal(), TEXT("Reducer does not hold ResolveHeal!"));
+        return Data.Get<FResolveHealArgs>();
+    }
+
+    static FReducer ResolveHit(const FResolveHitArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::ResolveHit;
+        Out.Data.Set<FResolveHitArgs>(Value);
+        Out.ReducerName = TEXT("resolve_hit");
+        return Out;
+    }
+
+    FORCEINLINE bool IsResolveHit() const { return Tag == EReducerTag::ResolveHit; }
+    FORCEINLINE FResolveHitArgs GetAsResolveHit() const
+    {
+        ensureMsgf(IsResolveHit(), TEXT("Reducer does not hold ResolveHit!"));
+        return Data.Get<FResolveHitArgs>();
+    }
+
+    static FReducer ResolveHitBatch(const FResolveHitBatchArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::ResolveHitBatch;
+        Out.Data.Set<FResolveHitBatchArgs>(Value);
+        Out.ReducerName = TEXT("resolve_hit_batch");
+        return Out;
+    }
+
+    FORCEINLINE bool IsResolveHitBatch() const { return Tag == EReducerTag::ResolveHitBatch; }
+    FORCEINLINE FResolveHitBatchArgs GetAsResolveHitBatch() const
+    {
+        ensureMsgf(IsResolveHitBatch(), TEXT("Reducer does not hold ResolveHitBatch!"));
+        return Data.Get<FResolveHitBatchArgs>();
+    }
+
+    static FReducer SaveCharacter(const FSaveCharacterArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::SaveCharacter;
+        Out.Data.Set<FSaveCharacterArgs>(Value);
+        Out.ReducerName = TEXT("save_character");
+        return Out;
+    }
+
+    FORCEINLINE bool IsSaveCharacter() const { return Tag == EReducerTag::SaveCharacter; }
+    FORCEINLINE FSaveCharacterArgs GetAsSaveCharacter() const
+    {
+        ensureMsgf(IsSaveCharacter(), TEXT("Reducer does not hold SaveCharacter!"));
+        return Data.Get<FSaveCharacterArgs>();
+    }
+
     static FReducer SeedEntities(const FSeedEntitiesArgs& Value)
     {
         FReducer Out;
@@ -450,6 +742,22 @@ public:
     {
         ensureMsgf(IsSeedEntities(), TEXT("Reducer does not hold SeedEntities!"));
         return Data.Get<FSeedEntitiesArgs>();
+    }
+
+    static FReducer ServerHeartbeat(const FServerHeartbeatArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::ServerHeartbeat;
+        Out.Data.Set<FServerHeartbeatArgs>(Value);
+        Out.ReducerName = TEXT("server_heartbeat");
+        return Out;
+    }
+
+    FORCEINLINE bool IsServerHeartbeat() const { return Tag == EReducerTag::ServerHeartbeat; }
+    FORCEINLINE FServerHeartbeatArgs GetAsServerHeartbeat() const
+    {
+        ensureMsgf(IsServerHeartbeat(), TEXT("Reducer does not hold ServerHeartbeat!"));
+        return Data.Get<FServerHeartbeatArgs>();
     }
 
     static FReducer SpawnProjectile(const FSpawnProjectileArgs& Value)
@@ -468,13 +776,113 @@ public:
         return Data.Get<FSpawnProjectileArgs>();
     }
 
+    static FReducer SpawnProjectilesBatch(const FSpawnProjectilesBatchArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::SpawnProjectilesBatch;
+        Out.Data.Set<FSpawnProjectilesBatchArgs>(Value);
+        Out.ReducerName = TEXT("spawn_projectiles_batch");
+        return Out;
+    }
+
+    FORCEINLINE bool IsSpawnProjectilesBatch() const { return Tag == EReducerTag::SpawnProjectilesBatch; }
+    FORCEINLINE FSpawnProjectilesBatchArgs GetAsSpawnProjectilesBatch() const
+    {
+        ensureMsgf(IsSpawnProjectilesBatch(), TEXT("Reducer does not hold SpawnProjectilesBatch!"));
+        return Data.Get<FSpawnProjectilesBatchArgs>();
+    }
+
+    static FReducer StressMove(const FStressMoveArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::StressMove;
+        Out.Data.Set<FStressMoveArgs>(Value);
+        Out.ReducerName = TEXT("stress_move");
+        return Out;
+    }
+
+    FORCEINLINE bool IsStressMove() const { return Tag == EReducerTag::StressMove; }
+    FORCEINLINE FStressMoveArgs GetAsStressMove() const
+    {
+        ensureMsgf(IsStressMove(), TEXT("Reducer does not hold StressMove!"));
+        return Data.Get<FStressMoveArgs>();
+    }
+
+    static FReducer StressRecord(const FStressRecordArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::StressRecord;
+        Out.Data.Set<FStressRecordArgs>(Value);
+        Out.ReducerName = TEXT("stress_record");
+        return Out;
+    }
+
+    FORCEINLINE bool IsStressRecord() const { return Tag == EReducerTag::StressRecord; }
+    FORCEINLINE FStressRecordArgs GetAsStressRecord() const
+    {
+        ensureMsgf(IsStressRecord(), TEXT("Reducer does not hold StressRecord!"));
+        return Data.Get<FStressRecordArgs>();
+    }
+
+    static FReducer StressReset(const FStressResetArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::StressReset;
+        Out.Data.Set<FStressResetArgs>(Value);
+        Out.ReducerName = TEXT("stress_reset");
+        return Out;
+    }
+
+    FORCEINLINE bool IsStressReset() const { return Tag == EReducerTag::StressReset; }
+    FORCEINLINE FStressResetArgs GetAsStressReset() const
+    {
+        ensureMsgf(IsStressReset(), TEXT("Reducer does not hold StressReset!"));
+        return Data.Get<FStressResetArgs>();
+    }
+
+    static FReducer TestCombatPipeline(const FTestCombatPipelineArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::TestCombatPipeline;
+        Out.Data.Set<FTestCombatPipelineArgs>(Value);
+        Out.ReducerName = TEXT("test_combat_pipeline");
+        return Out;
+    }
+
+    FORCEINLINE bool IsTestCombatPipeline() const { return Tag == EReducerTag::TestCombatPipeline; }
+    FORCEINLINE FTestCombatPipelineArgs GetAsTestCombatPipeline() const
+    {
+        ensureMsgf(IsTestCombatPipeline(), TEXT("Reducer does not hold TestCombatPipeline!"));
+        return Data.Get<FTestCombatPipelineArgs>();
+    }
+
+    static FReducer UpdateProgression(const FUpdateProgressionArgs& Value)
+    {
+        FReducer Out;
+        Out.Tag = EReducerTag::UpdateProgression;
+        Out.Data.Set<FUpdateProgressionArgs>(Value);
+        Out.ReducerName = TEXT("update_progression");
+        return Out;
+    }
+
+    FORCEINLINE bool IsUpdateProgression() const { return Tag == EReducerTag::UpdateProgression; }
+    FORCEINLINE FUpdateProgressionArgs GetAsUpdateProgression() const
+    {
+        ensureMsgf(IsUpdateProgression(), TEXT("Reducer does not hold UpdateProgression!"));
+        return Data.Get<FUpdateProgressionArgs>();
+    }
+
     FORCEINLINE bool operator==(const FReducer& Other) const
     {
         if (Tag != Other.Tag || ReducerId != Other.ReducerId || RequestId != Other.RequestId || ReducerName != Other.ReducerName) return false;
         switch (Tag)
         {
+        case EReducerTag::AssignPlayerToZone:
+            return GetAsAssignPlayerToZone() == Other.GetAsAssignPlayerToZone();
         case EReducerTag::AuthenticateWithEos:
             return GetAsAuthenticateWithEos() == Other.GetAsAuthenticateWithEos();
+        case EReducerTag::BenchBatchPhysics:
+            return GetAsBenchBatchPhysics() == Other.GetAsBenchBatchPhysics();
         case EReducerTag::BenchBurst:
             return GetAsBenchBurst() == Other.GetAsBenchBurst();
         case EReducerTag::BenchBurstUpdate:
@@ -499,6 +907,20 @@ public:
             return GetAsClearEntities() == Other.GetAsClearEntities();
         case EReducerTag::CreatePlayer:
             return GetAsCreatePlayer() == Other.GetAsCreatePlayer();
+        case EReducerTag::DeregisterZoneServer:
+            return GetAsDeregisterZoneServer() == Other.GetAsDeregisterZoneServer();
+        case EReducerTag::DrainZoneServer:
+            return GetAsDrainZoneServer() == Other.GetAsDrainZoneServer();
+        case EReducerTag::FanoutReset:
+            return GetAsFanoutReset() == Other.GetAsFanoutReset();
+        case EReducerTag::FanoutSeed:
+            return GetAsFanoutSeed() == Other.GetAsFanoutSeed();
+        case EReducerTag::FanoutStart:
+            return GetAsFanoutStart() == Other.GetAsFanoutStart();
+        case EReducerTag::FanoutStop:
+            return GetAsFanoutStop() == Other.GetAsFanoutStop();
+        case EReducerTag::LoadCharacter:
+            return GetAsLoadCharacter() == Other.GetAsLoadCharacter();
         case EReducerTag::MovePlayer:
             return GetAsMovePlayer() == Other.GetAsMovePlayer();
         case EReducerTag::PhysicsCleanup:
@@ -507,10 +929,36 @@ public:
             return GetAsPhysicsReset() == Other.GetAsPhysicsReset();
         case EReducerTag::PhysicsUpdate:
             return GetAsPhysicsUpdate() == Other.GetAsPhysicsUpdate();
+        case EReducerTag::PhysicsUpdateBatch:
+            return GetAsPhysicsUpdateBatch() == Other.GetAsPhysicsUpdateBatch();
+        case EReducerTag::RegisterZoneServer:
+            return GetAsRegisterZoneServer() == Other.GetAsRegisterZoneServer();
+        case EReducerTag::ResolveHeal:
+            return GetAsResolveHeal() == Other.GetAsResolveHeal();
+        case EReducerTag::ResolveHit:
+            return GetAsResolveHit() == Other.GetAsResolveHit();
+        case EReducerTag::ResolveHitBatch:
+            return GetAsResolveHitBatch() == Other.GetAsResolveHitBatch();
+        case EReducerTag::SaveCharacter:
+            return GetAsSaveCharacter() == Other.GetAsSaveCharacter();
         case EReducerTag::SeedEntities:
             return GetAsSeedEntities() == Other.GetAsSeedEntities();
+        case EReducerTag::ServerHeartbeat:
+            return GetAsServerHeartbeat() == Other.GetAsServerHeartbeat();
         case EReducerTag::SpawnProjectile:
             return GetAsSpawnProjectile() == Other.GetAsSpawnProjectile();
+        case EReducerTag::SpawnProjectilesBatch:
+            return GetAsSpawnProjectilesBatch() == Other.GetAsSpawnProjectilesBatch();
+        case EReducerTag::StressMove:
+            return GetAsStressMove() == Other.GetAsStressMove();
+        case EReducerTag::StressRecord:
+            return GetAsStressRecord() == Other.GetAsStressRecord();
+        case EReducerTag::StressReset:
+            return GetAsStressReset() == Other.GetAsStressReset();
+        case EReducerTag::TestCombatPipeline:
+            return GetAsTestCombatPipeline() == Other.GetAsTestCombatPipeline();
+        case EReducerTag::UpdateProgression:
+            return GetAsUpdateProgression() == Other.GetAsUpdateProgression();
         default: return false;
         }
     }
@@ -525,6 +973,19 @@ class NYX_API UReducerBpLib : public UBlueprintFunctionLibrary
 private:
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer AssignPlayerToZone(const FAssignPlayerToZoneArgs& Value) {
+        return FReducer::AssignPlayerToZone(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsAssignPlayerToZone(const FReducer& Reducer) { return Reducer.IsAssignPlayerToZone(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FAssignPlayerToZoneArgs GetAsAssignPlayerToZone(const FReducer& Reducer) {
+        return Reducer.GetAsAssignPlayerToZone();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
     static FReducer AuthenticateWithEos(const FAuthenticateWithEosArgs& Value) {
         return FReducer::AuthenticateWithEos(Value);
     }
@@ -535,6 +996,19 @@ private:
     UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
     static FAuthenticateWithEosArgs GetAsAuthenticateWithEos(const FReducer& Reducer) {
         return Reducer.GetAsAuthenticateWithEos();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer BenchBatchPhysics(const FBenchBatchPhysicsArgs& Value) {
+        return FReducer::BenchBatchPhysics(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsBenchBatchPhysics(const FReducer& Reducer) { return Reducer.IsBenchBatchPhysics(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FBenchBatchPhysicsArgs GetAsBenchBatchPhysics(const FReducer& Reducer) {
+        return Reducer.GetAsBenchBatchPhysics();
     }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
@@ -694,6 +1168,97 @@ private:
     }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer DeregisterZoneServer(const FDeregisterZoneServerArgs& Value) {
+        return FReducer::DeregisterZoneServer(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsDeregisterZoneServer(const FReducer& Reducer) { return Reducer.IsDeregisterZoneServer(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FDeregisterZoneServerArgs GetAsDeregisterZoneServer(const FReducer& Reducer) {
+        return Reducer.GetAsDeregisterZoneServer();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer DrainZoneServer(const FDrainZoneServerArgs& Value) {
+        return FReducer::DrainZoneServer(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsDrainZoneServer(const FReducer& Reducer) { return Reducer.IsDrainZoneServer(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FDrainZoneServerArgs GetAsDrainZoneServer(const FReducer& Reducer) {
+        return Reducer.GetAsDrainZoneServer();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer FanoutReset(const FFanoutResetArgs& Value) {
+        return FReducer::FanoutReset(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsFanoutReset(const FReducer& Reducer) { return Reducer.IsFanoutReset(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FFanoutResetArgs GetAsFanoutReset(const FReducer& Reducer) {
+        return Reducer.GetAsFanoutReset();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer FanoutSeed(const FFanoutSeedArgs& Value) {
+        return FReducer::FanoutSeed(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsFanoutSeed(const FReducer& Reducer) { return Reducer.IsFanoutSeed(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FFanoutSeedArgs GetAsFanoutSeed(const FReducer& Reducer) {
+        return Reducer.GetAsFanoutSeed();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer FanoutStart(const FFanoutStartArgs& Value) {
+        return FReducer::FanoutStart(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsFanoutStart(const FReducer& Reducer) { return Reducer.IsFanoutStart(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FFanoutStartArgs GetAsFanoutStart(const FReducer& Reducer) {
+        return Reducer.GetAsFanoutStart();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer FanoutStop(const FFanoutStopArgs& Value) {
+        return FReducer::FanoutStop(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsFanoutStop(const FReducer& Reducer) { return Reducer.IsFanoutStop(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FFanoutStopArgs GetAsFanoutStop(const FReducer& Reducer) {
+        return Reducer.GetAsFanoutStop();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer LoadCharacter(const FLoadCharacterArgs& Value) {
+        return FReducer::LoadCharacter(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsLoadCharacter(const FReducer& Reducer) { return Reducer.IsLoadCharacter(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FLoadCharacterArgs GetAsLoadCharacter(const FReducer& Reducer) {
+        return Reducer.GetAsLoadCharacter();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
     static FReducer MovePlayer(const FMovePlayerArgs& Value) {
         return FReducer::MovePlayer(Value);
     }
@@ -746,6 +1311,84 @@ private:
     }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer PhysicsUpdateBatch(const FPhysicsUpdateBatchArgs& Value) {
+        return FReducer::PhysicsUpdateBatch(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsPhysicsUpdateBatch(const FReducer& Reducer) { return Reducer.IsPhysicsUpdateBatch(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FPhysicsUpdateBatchArgs GetAsPhysicsUpdateBatch(const FReducer& Reducer) {
+        return Reducer.GetAsPhysicsUpdateBatch();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer RegisterZoneServer(const FRegisterZoneServerArgs& Value) {
+        return FReducer::RegisterZoneServer(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsRegisterZoneServer(const FReducer& Reducer) { return Reducer.IsRegisterZoneServer(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FRegisterZoneServerArgs GetAsRegisterZoneServer(const FReducer& Reducer) {
+        return Reducer.GetAsRegisterZoneServer();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer ResolveHeal(const FResolveHealArgs& Value) {
+        return FReducer::ResolveHeal(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsResolveHeal(const FReducer& Reducer) { return Reducer.IsResolveHeal(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FResolveHealArgs GetAsResolveHeal(const FReducer& Reducer) {
+        return Reducer.GetAsResolveHeal();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer ResolveHit(const FResolveHitArgs& Value) {
+        return FReducer::ResolveHit(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsResolveHit(const FReducer& Reducer) { return Reducer.IsResolveHit(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FResolveHitArgs GetAsResolveHit(const FReducer& Reducer) {
+        return Reducer.GetAsResolveHit();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer ResolveHitBatch(const FResolveHitBatchArgs& Value) {
+        return FReducer::ResolveHitBatch(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsResolveHitBatch(const FReducer& Reducer) { return Reducer.IsResolveHitBatch(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FResolveHitBatchArgs GetAsResolveHitBatch(const FReducer& Reducer) {
+        return Reducer.GetAsResolveHitBatch();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer SaveCharacter(const FSaveCharacterArgs& Value) {
+        return FReducer::SaveCharacter(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsSaveCharacter(const FReducer& Reducer) { return Reducer.IsSaveCharacter(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FSaveCharacterArgs GetAsSaveCharacter(const FReducer& Reducer) {
+        return Reducer.GetAsSaveCharacter();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
     static FReducer SeedEntities(const FSeedEntitiesArgs& Value) {
         return FReducer::SeedEntities(Value);
     }
@@ -759,6 +1402,19 @@ private:
     }
 
     UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer ServerHeartbeat(const FServerHeartbeatArgs& Value) {
+        return FReducer::ServerHeartbeat(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsServerHeartbeat(const FReducer& Reducer) { return Reducer.IsServerHeartbeat(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FServerHeartbeatArgs GetAsServerHeartbeat(const FReducer& Reducer) {
+        return Reducer.GetAsServerHeartbeat();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
     static FReducer SpawnProjectile(const FSpawnProjectileArgs& Value) {
         return FReducer::SpawnProjectile(Value);
     }
@@ -769,6 +1425,84 @@ private:
     UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
     static FSpawnProjectileArgs GetAsSpawnProjectile(const FReducer& Reducer) {
         return Reducer.GetAsSpawnProjectile();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer SpawnProjectilesBatch(const FSpawnProjectilesBatchArgs& Value) {
+        return FReducer::SpawnProjectilesBatch(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsSpawnProjectilesBatch(const FReducer& Reducer) { return Reducer.IsSpawnProjectilesBatch(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FSpawnProjectilesBatchArgs GetAsSpawnProjectilesBatch(const FReducer& Reducer) {
+        return Reducer.GetAsSpawnProjectilesBatch();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer StressMove(const FStressMoveArgs& Value) {
+        return FReducer::StressMove(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsStressMove(const FReducer& Reducer) { return Reducer.IsStressMove(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FStressMoveArgs GetAsStressMove(const FReducer& Reducer) {
+        return Reducer.GetAsStressMove();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer StressRecord(const FStressRecordArgs& Value) {
+        return FReducer::StressRecord(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsStressRecord(const FReducer& Reducer) { return Reducer.IsStressRecord(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FStressRecordArgs GetAsStressRecord(const FReducer& Reducer) {
+        return Reducer.GetAsStressRecord();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer StressReset(const FStressResetArgs& Value) {
+        return FReducer::StressReset(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsStressReset(const FReducer& Reducer) { return Reducer.IsStressReset(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FStressResetArgs GetAsStressReset(const FReducer& Reducer) {
+        return Reducer.GetAsStressReset();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer TestCombatPipeline(const FTestCombatPipelineArgs& Value) {
+        return FReducer::TestCombatPipeline(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsTestCombatPipeline(const FReducer& Reducer) { return Reducer.IsTestCombatPipeline(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FTestCombatPipelineArgs GetAsTestCombatPipeline(const FReducer& Reducer) {
+        return Reducer.GetAsTestCombatPipeline();
+    }
+
+    UFUNCTION(BlueprintCallable, Category = "SpacetimeDB|Reducer")
+    static FReducer UpdateProgression(const FUpdateProgressionArgs& Value) {
+        return FReducer::UpdateProgression(Value);
+    }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static bool IsUpdateProgression(const FReducer& Reducer) { return Reducer.IsUpdateProgression(); }
+
+    UFUNCTION(BlueprintPure, Category = "SpacetimeDB|Reducer")
+    static FUpdateProgressionArgs GetAsUpdateProgression(const FReducer& Reducer) {
+        return Reducer.GetAsUpdateProgression();
     }
 };
 
@@ -1151,7 +1885,11 @@ class NYX_API USetReducerFlags : public USetReducerFlagsBase
 
 public:
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void AssignPlayerToZone(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void AuthenticateWithEos(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void BenchBatchPhysics(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void BenchBurst(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
@@ -1177,6 +1915,20 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void CreatePlayer(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void DeregisterZoneServer(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void DrainZoneServer(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void FanoutReset(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void FanoutSeed(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void FanoutStart(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void FanoutStop(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void LoadCharacter(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void MovePlayer(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void PhysicsCleanup(ECallReducerFlags Flag);
@@ -1185,9 +1937,35 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void PhysicsUpdate(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void PhysicsUpdateBatch(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void RegisterZoneServer(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void ResolveHeal(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void ResolveHit(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void ResolveHitBatch(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void SaveCharacter(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void SeedEntities(ECallReducerFlags Flag);
 	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void ServerHeartbeat(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
 	void SpawnProjectile(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void SpawnProjectilesBatch(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void StressMove(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void StressRecord(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void StressReset(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void TestCombatPipeline(ECallReducerFlags Flag);
+	UFUNCTION(BlueprintCallable, Category = "SpacetimeDB")
+	void UpdateProgression(ECallReducerFlags Flag);
 
 };
 
@@ -1210,6 +1988,18 @@ public:
     UBenchTickLogTable* BenchTickLog;
 
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UCharacterStatsTable* CharacterStats;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UCombatEventTable* CombatEvent;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UFanoutEntityTable* FanoutEntity;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UFanoutTickLogTable* FanoutTickLog;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     UPhysicsBodyTable* PhysicsBody;
 
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
@@ -1219,7 +2009,16 @@ public:
     UPlayerAccountTable* PlayerAccount;
 
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UStressResultTable* StressResult;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     UWorldEntityTable* WorldEntity;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UZonePopulationTable* ZonePopulation;
+
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    UZoneServerTable* ZoneServer;
 
 };
 
@@ -1230,6 +2029,21 @@ class NYX_API URemoteReducers : public UObject
     GENERATED_BODY()
 
 public:
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+        FAssignPlayerToZoneHandler,
+        const FReducerEventContext&, Context,
+        const FString&, ZoneId,
+        const FSpacetimeDBIdentity&, PlayerIdentity
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FAssignPlayerToZoneHandler OnAssignPlayerToZone;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void AssignPlayerToZone(const FString& ZoneId, const FSpacetimeDBIdentity& PlayerIdentity);
+
+    bool InvokeAssignPlayerToZone(const FReducerEventContext& Context, const UAssignPlayerToZoneReducer* Args);
+    bool InvokeAssignPlayerToZoneWithArgs(const FReducerEventContext& Context, const FAssignPlayerToZoneArgs& Args);
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
         FAuthenticateWithEosHandler,
@@ -1246,6 +2060,21 @@ public:
 
     bool InvokeAuthenticateWithEos(const FReducerEventContext& Context, const UAuthenticateWithEosReducer* Args);
     bool InvokeAuthenticateWithEosWithArgs(const FReducerEventContext& Context, const FAuthenticateWithEosArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+        FBenchBatchPhysicsHandler,
+        const FReducerEventContext&, Context,
+        uint32, BodyCount,
+        uint32, Iterations
+    );
+    // NOTE: Not exposed to Blueprint because uint32, uint32 types are not Blueprint-compatible
+    FBenchBatchPhysicsHandler OnBenchBatchPhysics;
+
+    // NOTE: Not exposed to Blueprint because uint32, uint32 types are not Blueprint-compatible
+    void BenchBatchPhysics(const uint32 BodyCount, const uint32 Iterations);
+
+    bool InvokeBenchBatchPhysics(const FReducerEventContext& Context, const UBenchBatchPhysicsReducer* Args);
+    bool InvokeBenchBatchPhysicsWithArgs(const FReducerEventContext& Context, const FBenchBatchPhysicsArgs& Args);
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
         FBenchBurstHandler,
@@ -1409,6 +2238,103 @@ public:
     bool InvokeCreatePlayer(const FReducerEventContext& Context, const UCreatePlayerReducer* Args);
     bool InvokeCreatePlayerWithArgs(const FReducerEventContext& Context, const FCreatePlayerArgs& Args);
 
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FDeregisterZoneServerHandler,
+        const FReducerEventContext&, Context,
+        const FString&, ServerId
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FDeregisterZoneServerHandler OnDeregisterZoneServer;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void DeregisterZoneServer(const FString& ServerId);
+
+    bool InvokeDeregisterZoneServer(const FReducerEventContext& Context, const UDeregisterZoneServerReducer* Args);
+    bool InvokeDeregisterZoneServerWithArgs(const FReducerEventContext& Context, const FDeregisterZoneServerArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FDrainZoneServerHandler,
+        const FReducerEventContext&, Context,
+        const FString&, ServerId
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FDrainZoneServerHandler OnDrainZoneServer;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void DrainZoneServer(const FString& ServerId);
+
+    bool InvokeDrainZoneServer(const FReducerEventContext& Context, const UDrainZoneServerReducer* Args);
+    bool InvokeDrainZoneServerWithArgs(const FReducerEventContext& Context, const FDrainZoneServerArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FFanoutResetHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FFanoutResetHandler OnFanoutReset;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void FanoutReset();
+
+    bool InvokeFanoutReset(const FReducerEventContext& Context, const UFanoutResetReducer* Args);
+    bool InvokeFanoutResetWithArgs(const FReducerEventContext& Context, const FFanoutResetArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FFanoutSeedHandler,
+        const FReducerEventContext&, Context,
+        uint32, Count
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FFanoutSeedHandler OnFanoutSeed;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void FanoutSeed(const uint32 Count);
+
+    bool InvokeFanoutSeed(const FReducerEventContext& Context, const UFanoutSeedReducer* Args);
+    bool InvokeFanoutSeedWithArgs(const FReducerEventContext& Context, const FFanoutSeedArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FFanoutStartHandler,
+        const FReducerEventContext&, Context,
+        uint64, IntervalMs
+    );
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    FFanoutStartHandler OnFanoutStart;
+
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    void FanoutStart(const uint64 IntervalMs);
+
+    bool InvokeFanoutStart(const FReducerEventContext& Context, const UFanoutStartReducer* Args);
+    bool InvokeFanoutStartWithArgs(const FReducerEventContext& Context, const FFanoutStartArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FFanoutStopHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FFanoutStopHandler OnFanoutStop;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void FanoutStop();
+
+    bool InvokeFanoutStop(const FReducerEventContext& Context, const UFanoutStopReducer* Args);
+    bool InvokeFanoutStopWithArgs(const FReducerEventContext& Context, const FFanoutStopArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+        FLoadCharacterHandler,
+        const FReducerEventContext&, Context,
+        const FSpacetimeDBIdentity&, Identity,
+        const FString&, DisplayName
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FLoadCharacterHandler OnLoadCharacter;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void LoadCharacter(const FSpacetimeDBIdentity& Identity, const FString& DisplayName);
+
+    bool InvokeLoadCharacter(const FReducerEventContext& Context, const ULoadCharacterReducer* Args);
+    bool InvokeLoadCharacterWithArgs(const FReducerEventContext& Context, const FLoadCharacterArgs& Args);
+
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(
         FMovePlayerHandler,
         const FReducerEventContext&, Context,
@@ -1475,6 +2401,106 @@ public:
     bool InvokePhysicsUpdateWithArgs(const FReducerEventContext& Context, const FPhysicsUpdateArgs& Args);
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FPhysicsUpdateBatchHandler,
+        const FReducerEventContext&, Context,
+        const TArray<FBodyUpdateType>&, Updates
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FPhysicsUpdateBatchHandler OnPhysicsUpdateBatch;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void PhysicsUpdateBatch(const TArray<FBodyUpdateType>& Updates);
+
+    bool InvokePhysicsUpdateBatch(const FReducerEventContext& Context, const UPhysicsUpdateBatchReducer* Args);
+    bool InvokePhysicsUpdateBatchWithArgs(const FReducerEventContext& Context, const FPhysicsUpdateBatchArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_SixParams(
+        FRegisterZoneServerHandler,
+        const FReducerEventContext&, Context,
+        const FString&, ServerId,
+        const FString&, ZoneId,
+        const FString&, ContainerIp,
+        uint16, Port,
+        uint32, MaxEntities
+    );
+    // NOTE: Not exposed to Blueprint because uint16, uint32 types are not Blueprint-compatible
+    FRegisterZoneServerHandler OnRegisterZoneServer;
+
+    // NOTE: Not exposed to Blueprint because uint16, uint32 types are not Blueprint-compatible
+    void RegisterZoneServer(const FString& ServerId, const FString& ZoneId, const FString& ContainerIp, const uint16 Port, const uint32 MaxEntities);
+
+    bool InvokeRegisterZoneServer(const FReducerEventContext& Context, const URegisterZoneServerReducer* Args);
+    bool InvokeRegisterZoneServerWithArgs(const FReducerEventContext& Context, const FRegisterZoneServerArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+        FResolveHealHandler,
+        const FReducerEventContext&, Context,
+        const FSpacetimeDBIdentity&, HealerId,
+        const FSpacetimeDBIdentity&, TargetId,
+        uint32, SkillId
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FResolveHealHandler OnResolveHeal;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void ResolveHeal(const FSpacetimeDBIdentity& HealerId, const FSpacetimeDBIdentity& TargetId, const uint32 SkillId);
+
+    bool InvokeResolveHeal(const FReducerEventContext& Context, const UResolveHealReducer* Args);
+    bool InvokeResolveHealWithArgs(const FReducerEventContext& Context, const FResolveHealArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+        FResolveHitHandler,
+        const FReducerEventContext&, Context,
+        const FSpacetimeDBIdentity&, AttackerId,
+        const FSpacetimeDBIdentity&, DefenderId,
+        uint32, SkillId
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FResolveHitHandler OnResolveHit;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void ResolveHit(const FSpacetimeDBIdentity& AttackerId, const FSpacetimeDBIdentity& DefenderId, const uint32 SkillId);
+
+    bool InvokeResolveHit(const FReducerEventContext& Context, const UResolveHitReducer* Args);
+    bool InvokeResolveHitWithArgs(const FReducerEventContext& Context, const FResolveHitArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+        FResolveHitBatchHandler,
+        const FReducerEventContext&, Context,
+        const FSpacetimeDBIdentity&, AttackerId,
+        const TArray<FSpacetimeDBIdentity>&, DefenderIds,
+        uint32, SkillId
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FResolveHitBatchHandler OnResolveHitBatch;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void ResolveHitBatch(const FSpacetimeDBIdentity& AttackerId, const TArray<FSpacetimeDBIdentity>& DefenderIds, const uint32 SkillId);
+
+    bool InvokeResolveHitBatch(const FReducerEventContext& Context, const UResolveHitBatchReducer* Args);
+    bool InvokeResolveHitBatchWithArgs(const FReducerEventContext& Context, const FResolveHitBatchArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_EightParams(
+        FSaveCharacterHandler,
+        const FReducerEventContext&, Context,
+        const FSpacetimeDBIdentity&, Identity,
+        int32, CurrentHp,
+        int32, CurrentMp,
+        double, PosX,
+        double, PosY,
+        double, PosZ,
+        const FString&, ZoneId
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FSaveCharacterHandler OnSaveCharacter;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void SaveCharacter(const FSpacetimeDBIdentity& Identity, const int32 CurrentHp, const int32 CurrentMp, const double PosX, const double PosY, const double PosZ, const FString& ZoneId);
+
+    bool InvokeSaveCharacter(const FReducerEventContext& Context, const USaveCharacterReducer* Args);
+    bool InvokeSaveCharacterWithArgs(const FReducerEventContext& Context, const FSaveCharacterArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
         FSeedEntitiesHandler,
         const FReducerEventContext&, Context,
         uint32, Count
@@ -1487,6 +2513,21 @@ public:
 
     bool InvokeSeedEntities(const FReducerEventContext& Context, const USeedEntitiesReducer* Args);
     bool InvokeSeedEntitiesWithArgs(const FReducerEventContext& Context, const FSeedEntitiesArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+        FServerHeartbeatHandler,
+        const FReducerEventContext&, Context,
+        const FString&, ServerId,
+        uint32, EntityCount
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FServerHeartbeatHandler OnServerHeartbeat;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void ServerHeartbeat(const FString& ServerId, const uint32 EntityCount);
+
+    bool InvokeServerHeartbeat(const FReducerEventContext& Context, const UServerHeartbeatReducer* Args);
+    bool InvokeServerHeartbeatWithArgs(const FReducerEventContext& Context, const FServerHeartbeatArgs& Args);
 
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_SevenParams(
         FSpawnProjectileHandler,
@@ -1506,6 +2547,93 @@ public:
 
     bool InvokeSpawnProjectile(const FReducerEventContext& Context, const USpawnProjectileReducer* Args);
     bool InvokeSpawnProjectileWithArgs(const FReducerEventContext& Context, const FSpawnProjectileArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(
+        FSpawnProjectilesBatchHandler,
+        const FReducerEventContext&, Context,
+        uint32, Count
+    );
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    FSpawnProjectilesBatchHandler OnSpawnProjectilesBatch;
+
+    // NOTE: Not exposed to Blueprint because uint32 types are not Blueprint-compatible
+    void SpawnProjectilesBatch(const uint32 Count);
+
+    bool InvokeSpawnProjectilesBatch(const FReducerEventContext& Context, const USpawnProjectilesBatchReducer* Args);
+    bool InvokeSpawnProjectilesBatchWithArgs(const FReducerEventContext& Context, const FSpawnProjectilesBatchArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+        FStressMoveHandler,
+        const FReducerEventContext&, Context,
+        uint64, EntityId,
+        double, Dx,
+        double, Dy
+    );
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    FStressMoveHandler OnStressMove;
+
+    // NOTE: Not exposed to Blueprint because uint64 types are not Blueprint-compatible
+    void StressMove(const uint64 EntityId, const double Dx, const double Dy);
+
+    bool InvokeStressMove(const FReducerEventContext& Context, const UStressMoveReducer* Args);
+    bool InvokeStressMoveWithArgs(const FReducerEventContext& Context, const FStressMoveArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_ThreeParams(
+        FStressRecordHandler,
+        const FReducerEventContext&, Context,
+        uint32, ClientCount,
+        uint64, WindowMs
+    );
+    // NOTE: Not exposed to Blueprint because uint32, uint64 types are not Blueprint-compatible
+    FStressRecordHandler OnStressRecord;
+
+    // NOTE: Not exposed to Blueprint because uint32, uint64 types are not Blueprint-compatible
+    void StressRecord(const uint32 ClientCount, const uint64 WindowMs);
+
+    bool InvokeStressRecord(const FReducerEventContext& Context, const UStressRecordReducer* Args);
+    bool InvokeStressRecordWithArgs(const FReducerEventContext& Context, const FStressRecordArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FStressResetHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FStressResetHandler OnStressReset;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void StressReset();
+
+    bool InvokeStressReset(const FReducerEventContext& Context, const UStressResetReducer* Args);
+    bool InvokeStressResetWithArgs(const FReducerEventContext& Context, const FStressResetArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(
+        FTestCombatPipelineHandler,
+        const FReducerEventContext&, Context
+    );
+    UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
+    FTestCombatPipelineHandler OnTestCombatPipeline;
+
+    UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
+    void TestCombatPipeline();
+
+    bool InvokeTestCombatPipeline(const FReducerEventContext& Context, const UTestCombatPipelineReducer* Args);
+    bool InvokeTestCombatPipelineWithArgs(const FReducerEventContext& Context, const FTestCombatPipelineArgs& Args);
+
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(
+        FUpdateProgressionHandler,
+        const FReducerEventContext&, Context,
+        const FSpacetimeDBIdentity&, Identity,
+        uint32, NewLevel,
+        uint64, NewExperience
+    );
+    // NOTE: Not exposed to Blueprint because uint32, uint64 types are not Blueprint-compatible
+    FUpdateProgressionHandler OnUpdateProgression;
+
+    // NOTE: Not exposed to Blueprint because uint32, uint64 types are not Blueprint-compatible
+    void UpdateProgression(const FSpacetimeDBIdentity& Identity, const uint32 NewLevel, const uint64 NewExperience);
+
+    bool InvokeUpdateProgression(const FReducerEventContext& Context, const UUpdateProgressionReducer* Args);
+    bool InvokeUpdateProgressionWithArgs(const FReducerEventContext& Context, const FUpdateProgressionArgs& Args);
 
     // Internal error handling
     DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FInternalOnUnhandledReducerError, const FReducerEventContext&, Context, const FString&, Error);

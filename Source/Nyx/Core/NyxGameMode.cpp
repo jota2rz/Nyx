@@ -4,23 +4,62 @@
 #include "Nyx/Nyx.h"
 #include "Nyx/Core/NyxGameInstance.h"
 #include "Nyx/Online/NyxAuthSubsystem.h"
-#include "Nyx/Core/NyxNetworkSubsystem.h"
-#include "Nyx/World/NyxEntityManager.h"
-#include "ModuleBindings/SpacetimeDBClient.g.h"
+#include "Nyx/Player/NyxCharacter.h"
+#include "Nyx/Server/NyxServerSubsystem.h"
+#include "GameFramework/PlayerController.h"
 
 ANyxGameMode::ANyxGameMode()
 {
-	// No default pawn — we'll spawn the local player via entity manager
-	DefaultPawnClass = nullptr;
+	// Default pawn is NyxCharacter — standard ACharacter with CMC
+	DefaultPawnClass = ANyxCharacter::StaticClass();
 }
 
 void ANyxGameMode::StartPlay()
 {
 	Super::StartPlay();
-	UE_LOG(LogNyx, Log, TEXT("NyxGameMode::StartPlay"));
 
-	if (bAutoLoginMock)
+	const bool bDedicated = IsRunningDedicatedServer();
+	UE_LOG(LogNyx, Log, TEXT("NyxGameMode::StartPlay (DedicatedServer=%s)"),
+		bDedicated ? TEXT("true") : TEXT("false"));
+
+	if (bDedicated)
 	{
+		// ── Dedicated Server: connect to SpacetimeDB ──
+		UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+		if (ServerSub)
+		{
+			// Parse config from command-line overrides or use defaults
+			FString CmdHost, CmdDB, CmdZone, CmdServerId;
+			if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeHost="), CmdHost))
+			{
+				SpacetimeDBHost = CmdHost;
+			}
+			if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeDB="), CmdDB))
+			{
+				DatabaseName = CmdDB;
+			}
+			if (FParse::Value(FCommandLine::Get(), TEXT("-ZoneId="), CmdZone))
+			{
+				ZoneId = CmdZone;
+			}
+			if (FParse::Value(FCommandLine::Get(), TEXT("-ServerId="), CmdServerId))
+			{
+				DedicatedServerId = CmdServerId;
+			}
+
+			UE_LOG(LogNyx, Log, TEXT("DediServer connecting to SpacetimeDB: Host=%s DB=%s Zone=%s Server=%s"),
+				*SpacetimeDBHost, *DatabaseName, *ZoneId, *DedicatedServerId);
+
+			ServerSub->ConnectAndRegister(SpacetimeDBHost, DatabaseName, ZoneId, DedicatedServerId, 500);
+		}
+		else
+		{
+			UE_LOG(LogNyx, Error, TEXT("NyxServerSubsystem not found! ShouldCreateSubsystem returned false?"));
+		}
+	}
+	else if (bAutoLoginMock)
+	{
+		// ── Standalone/PIE: mock auto-login for development ──
 		UE_LOG(LogNyx, Log, TEXT("Auto-login with mock backend enabled"));
 
 		UNyxGameInstance* GI = Cast<UNyxGameInstance>(GetGameInstance());
@@ -30,60 +69,87 @@ void ANyxGameMode::StartPlay()
 		}
 		else
 		{
-			// GameInstance may not be NyxGameInstance if not configured yet
-			// This is expected on first run before setting the GameInstance class
 			UE_LOG(LogNyx, Warning,
-				TEXT("GameInstance is not UNyxGameInstance. Set GameInstanceClass in Project Settings or DefaultEngine.ini."));
+				TEXT("GameInstance is not UNyxGameInstance. Set GameInstanceClass in Project Settings."));
 		}
 	}
 }
 
 void ANyxGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	UNyxEntityManager* EntityMgr = GetWorld()->GetSubsystem<UNyxEntityManager>();
-	if (EntityMgr)
+	if (IsRunningDedicatedServer())
 	{
-		EntityMgr->StopListening();
+		UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+		if (ServerSub)
+		{
+			ServerSub->Shutdown();
+		}
 	}
 
 	Super::EndPlay(EndPlayReason);
 }
 
+void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
+{
+	Super::PostLogin(NewPlayer);
+
+	if (!NewPlayer) return;
+
+	UE_LOG(LogNyx, Log, TEXT("PostLogin: %s"), *NewPlayer->GetName());
+
+	if (IsRunningDedicatedServer())
+	{
+		// Get the spawned NyxCharacter pawn
+		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(NewPlayer->GetPawn());
+		if (NyxChar)
+		{
+			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+			if (ServerSub)
+			{
+				// Use a display name — in production this would come from auth/EOS
+				FString PlayerName = NewPlayer->GetName();
+				ServerSub->OnPlayerJoined(NyxChar, PlayerName);
+			}
+		}
+		else
+		{
+			UE_LOG(LogNyx, Warning, TEXT("PostLogin: Player pawn is not ANyxCharacter"));
+		}
+	}
+}
+
+void ANyxGameMode::Logout(AController* Exiting)
+{
+	if (IsRunningDedicatedServer() && Exiting)
+	{
+		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(Exiting->GetPawn());
+		if (NyxChar)
+		{
+			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+			if (ServerSub)
+			{
+				ServerSub->OnPlayerLeft(NyxChar);
+			}
+		}
+	}
+
+	Super::Logout(Exiting);
+}
+
 void ANyxGameMode::EnterWorld()
 {
-	UE_LOG(LogNyx, Log, TEXT("EnterWorld: Setting up world subscription and creating player"));
+	UE_LOG(LogNyx, Log, TEXT("EnterWorld: Legacy/standalone path"));
 
-	UGameInstance* GI = GetGameInstance();
-	if (!GI) return;
-
-	UNyxNetworkSubsystem* NetworkSub = GI->GetSubsystem<UNyxNetworkSubsystem>();
-	if (!NetworkSub) return;
-
-	// Subscribe to spawn area (0, 0, 0 for now)
-	NetworkSub->UpdateSpatialSubscription(FVector::ZeroVector);
-
-	// Start entity manager FIRST so it catches the OnInsert from CreatePlayer
-	UNyxEntityManager* EntityMgr = GetWorld()->GetSubsystem<UNyxEntityManager>();
-	if (EntityMgr)
+	// This path is for standalone/PIE development only.
+	// On dedicated server, PostLogin handles everything.
+	if (IsRunningDedicatedServer())
 	{
-		EntityMgr->StartListening();
+		UE_LOG(LogNyx, Warning, TEXT("EnterWorld called on dedicated server — this should not happen"));
+		return;
 	}
 
-	// Now create the player — the OnInsert will be caught by EntityManager
-	UDbConnection* Conn = NetworkSub->GetSpacetimeDBConnection();
-	if (Conn && Conn->Reducers)
-	{
-		UNyxAuthSubsystem* AuthSub = GI->GetSubsystem<UNyxAuthSubsystem>();
-		FString PlayerName = AuthSub ? AuthSub->GetLocalPlayerIdentity().DisplayName : TEXT("Player");
-		if (PlayerName.IsEmpty()) PlayerName = TEXT("Player");
-
-		Conn->Reducers->CreatePlayer(PlayerName);
-		UE_LOG(LogNyx, Log, TEXT("EnterWorld: Called CreatePlayer('%s')"), *PlayerName);
-	}
-	else
-	{
-		UE_LOG(LogNyx, Warning, TEXT("EnterWorld: No SpacetimeDB connection available for CreatePlayer"));
-	}
+	// Legacy: standalone mode placeholder
+	UE_LOG(LogNyx, Log, TEXT("EnterWorld: Standalone mode — no SpacetimeDB connection from client"));
 }
 
 void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)
