@@ -173,6 +173,10 @@ private:
 	UPROPERTY()
 	TMap<FString, TObjectPtr<ANyxCharacter>> PendingLoads;
 
+	/** Players who joined before SpacetimeDB was connected (PostLogin fires before StartPlay in listen server). */
+	UPROPERTY()
+	TMap<FString, TObjectPtr<ANyxCharacter>> EarlyJoinQueue;
+
 	bool bRegistered = false;
 	int32 MaxEntities = 300;
 

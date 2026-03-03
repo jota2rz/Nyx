@@ -87,6 +87,7 @@ void UNyxServerSubsystem::Shutdown()
 
 	ManagedCharacters.Empty();
 	PendingLoads.Empty();
+	EarlyJoinQueue.Empty();
 	bRegistered = false;
 }
 
@@ -168,6 +169,20 @@ void UNyxServerSubsystem::HandleSubscriptionApplied(FSubscriptionEventContext Co
 	// Start heartbeat and auto-save timers
 	StartHeartbeat();
 	StartAutoSave();
+
+	// ── Process players who joined before SpacetimeDB was ready ──
+	// In PIE listen server, PostLogin for the local player fires BEFORE
+	// StartPlay, so their OnPlayerJoined call gets queued.
+	if (EarlyJoinQueue.Num() > 0)
+	{
+		UE_LOG(LogNyxServer, Log, TEXT("Processing %d early-join queued player(s)..."), EarlyJoinQueue.Num());
+		TMap<FString, TObjectPtr<ANyxCharacter>> QueueCopy = EarlyJoinQueue;
+		EarlyJoinQueue.Empty();
+		for (auto& Pair : QueueCopy)
+		{
+			OnPlayerJoined(Pair.Value.Get(), Pair.Key);
+		}
+	}
 }
 
 void UNyxServerSubsystem::HandleSubscriptionError(FErrorContext Context)
@@ -179,9 +194,12 @@ void UNyxServerSubsystem::HandleSubscriptionError(FErrorContext Context)
 
 void UNyxServerSubsystem::OnPlayerJoined(ANyxCharacter* Character, const FString& PlayerDisplayName)
 {
-	if (!SpacetimeDBConnection || !SpacetimeDBConnection->Reducers)
+	if (!SpacetimeDBConnection || !SpacetimeDBConnection->Reducers || !bRegistered)
 	{
-		UE_LOG(LogNyxServer, Error, TEXT("Cannot load character — no SpacetimeDB connection"));
+		// PostLogin fires before StartPlay in listen server mode,
+		// so the SpacetimeDB connection may not exist yet. Queue for later.
+		EarlyJoinQueue.Add(PlayerDisplayName, Character);
+		UE_LOG(LogNyxServer, Log, TEXT("Player joined before SpacetimeDB ready, queued: %s"), *PlayerDisplayName);
 		return;
 	}
 
