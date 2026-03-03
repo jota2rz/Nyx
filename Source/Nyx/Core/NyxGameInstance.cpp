@@ -83,6 +83,13 @@ void UNyxGameInstance::OnLoginComplete(bool bSuccess, const FString& ErrorMessag
 
 void UNyxGameInstance::RegisterConsoleCommands()
 {
+	// In PIE with multiple worlds, each world gets its own GameInstance.
+	// Console commands are global singletons — skip if already registered.
+	if (IConsoleManager::Get().FindConsoleObject(TEXT("Nyx.Connect")) != nullptr)
+	{
+		return;
+	}
+
 	// Nyx.Connect [Host] [Database] — connect directly to SpacetimeDB (bypasses auth)
 	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("Nyx.Connect"),

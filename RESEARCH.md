@@ -3711,20 +3711,33 @@ This test verifies the complete Option 4 server-side flow:
 ```
 PIE Listen Server (acts as dedicated server)
     │
+    ├─ PostLogin(Player0) → queued (SpacetimeDB not ready yet)
+    │
     ├─ StartPlay → IsNyxServer() ✓ → ConnectAndRegister(SpacetimeDB)
     │
-    ├─ PostLogin(Player1) → GeneratePlayerIdentity("PC_0")
-    │   └─ LoadCharacter(fakeId_0, "PC_0") → SpacetimeDB
+    ├─ HandleSubscriptionApplied → RegisterZone → drain EarlyJoinQueue
+    │   └─ OnPlayerJoined(PC_0) → GeneratePlayerIdentity → LoadCharacter → OnInsert
     │
-    ├─ PostLogin(Player2) → GeneratePlayerIdentity("PC_1")
-    │   └─ LoadCharacter(fakeId_1, "PC_1") → SpacetimeDB
+    ├─ PostLogin(Player1) → OnPlayerJoined(PC_1) → LoadCharacter from cache
     │
-    ├─ OnInsert(character_stats) → ApplyCharacterStats → Replication → Client
+    ├─ ApplyCharacterStats → Replication → OnRep_CurrentHP on client
     │
-    ├─ [Future] ResolveHit → OnUpdate → HP decrease → OnRep_CurrentHP on client
+    ├─ [Future] ResolveHit → OnUpdate → HP decrease → client replication
     │
     └─ Logout → SaveCharacter → OnPlayerLeft
 ```
+
+### Test Results (PASS)
+
+Tested with PIE "Play As Listen Server" + 2 players. SpacetimeDB Docker on port 3000.
+
+**Verified behaviors:**
+- **Early-join queue:** Player 0 (local) queued before SpacetimeDB connects, processed after subscription applied
+- **Per-player identities:** PC_0=`0xa8bb3410...`, PC_1=`0x1746360c...` (different MD5 hashes)
+- **Stats from SpacetimeDB:** Both players: Level=1, HP=1000/1000, MP=500/500, ATK=15, DEF=10
+- **Cache path:** PC_1 loaded from local cache (subscription data already contained the row)
+- **Client replication:** `OnRep_CurrentHP` fired for both characters on the client
+- **Net roles correct:** `ROLE_Authority` (server), `ROLE_AutonomousProxy` (own pawn), `ROLE_SimulatedProxy` (other pawn)
 
 ### Files Changed
 
