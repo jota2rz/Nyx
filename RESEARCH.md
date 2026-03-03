@@ -1028,6 +1028,157 @@ After completing these spikes, we'll have clarity on:
 | **AI system** | A) WASM module, B) Sidecar UE5 process, C) Hybrid | Spike 7, 8 ✅ → **Option C**: WASM for AI decisions + UE5 sidecar for physics/pathfinding |
 | **Physics simulation** | A) Client-only, B) UE5 sidecar, C) WASM | Spike 8 ✅ → **Option B** (sidecar validated) |
 | **Module language** | A) Rust (performance), B) C# (familiarity) | Spike 2, 7 ✅ → **Option A** (Rust, performance critical for WASM throughput) |
+| **Networking architecture** | A) SpacetimeDB-only, B) Hybrid relay + SpacetimeDB, C) UE5 dedicated server + SpacetimeDB persistence | Spike 9 — **pending** |
+
+---
+
+## Spike 9: Sidecar Scalability & 1000-Player Chunk Viability
+
+**Goal:** Determine whether the current SpacetimeDB + sidecar architecture can support 1000 concurrent players in a single chunk, and if not, identify the architectural changes needed.
+
+**Duration:** 2–3 days
+
+**Status:** NOT STARTED
+
+### The 1000-Player Problem
+
+Nyx's vision is a seamless open world where large player concentrations (sieges, cities, world events) must work without sharding or instancing. The target: **1000 simultaneously active players in one chunk**.
+
+Our Spike 7 benchmarks reveal a fundamental constraint:
+
+#### Math: Can SpacetimeDB handle 1000 players?
+
+**Reducer throughput (Spike 7):** ~218 reducers/sec (simple: 1 read + 1 update)
+
+| Scenario | Reducer calls needed | Available | Verdict |
+|----------|---------------------|-----------|--------|
+| 1000 players × 20 Hz movement | 20,000 /sec | 218 /sec | **91× over capacity** |
+| 1000 players × 10 Hz movement | 10,000 /sec | 218 /sec | **46× over capacity** |
+| 1000 players × 5 Hz movement | 5,000 /sec | 218 /sec | **23× over capacity** |
+| 1000 players × 1 Hz movement | 1,000 /sec | 218 /sec | **4.6× over capacity** |
+| 100 players × 20 Hz movement | 2,000 /sec | 218 /sec | **9× over capacity** |
+| 10 players × 20 Hz movement | 200 /sec | 218 /sec | ✅ Just fits |
+
+**Batched throughput (Spike 7):** Even with a single scheduled reducer processing all moves in one transaction:
+- `bench_burst_update`: 1,000 entity find+update ops in 1 call → **~166 entity updates/sec**
+- 1,000 players at 5 Hz batched tick → need 5,000 entity updates/sec → **30× over capacity**
+- 1,000 players at 1 Hz → need 1,000 entity updates/sec → **6× over capacity**
+
+**Critical insight:** SpacetimeDB executes all reducers serially in a single WASM thread. This is a fundamental architectural property, not a tuning issue. Batching helps with per-reducer overhead but doesn't change the sequential entity update cost (~6ms per entity update).
+
+#### What about subscription fan-out?
+
+Even if we solved the write throughput, the read side has limits:
+- 1000 players updating at 10 Hz = 10,000 row changes/sec in the `player` table
+- Each of those 1000 clients receives `OnUpdate` for every visible player
+- 1000 visible players × 10 Hz = **10,000 `OnUpdate` callbacks/sec per client**
+- × 1000 clients = **10 million events/sec** total WebSocket throughput from SpacetimeDB
+- This is an O(N²) fan-out problem that scales poorly regardless of server architecture
+
+### Architectural Analysis: How do other MMOs handle this?
+
+| Game | Max density | Architecture | Notes |
+|------|-----------|-------------|-------|
+| **EVE Online** | 6000+ per system | Single-threaded Python (Stackless) + Time Dilation | Slows simulation to 10% speed at high load |
+| **Planetside 2** | 1000+ per zone | Custom C++ dedicated servers, 15 Hz tick | Spatial partitioning, aggressive LOD |
+| **WoW Classic** | ~300 before severe lag | C++ dedicated server, 20 Hz tick | World bosses cause mass disconnects |
+| **New World** | ~100 per settlement | Lumberyard C++ server | Severe lag at 200+ |
+| **BitCraft** | Unknown (sandbox, low density by design) | SpacetimeDB WASM, hex grid | No physics, turn-based movement |
+
+**Key observation:** Even AAA studios with custom C++ servers running compiled (not WASM) code struggle beyond ~300 players. 1000 players is only achieved with time dilation (EVE) or purpose-built C++ engines (Planetside 2).
+
+### Three Candidate Architectures
+
+#### Option A: SpacetimeDB-Only (Current)
+```
+Client ──WebSocket──► SpacetimeDB (WASM) ◄──WebSocket── Sidecar
+                     (all state + movement)
+```
+- **Max capacity:** ~10 concurrent moving players (from our benchmarks)
+- **Pros:** Simple, single source of truth, no additional infrastructure
+- **Cons:** Serial WASM execution is a hard ceiling
+- **Verdict:** Not viable for 1000 players. Not viable for 100 players.
+
+#### Option B: Hybrid Relay + SpacetimeDB
+```
+Client ──UDP──► Position Relay (Rust/C++) ──broadcast──► Nearby Clients
+  │                    │
+  │                    ├── Snapshot @ 1 Hz ──► SpacetimeDB (authoritative state)
+  └──WebSocket──► SpacetimeDB (inventory, combat, chat, persistence)
+```
+- **Position relay** handles high-frequency position sync via UDP multicast/broadcast
+- **SpacetimeDB** handles authoritative game state: inventory, combat outcomes, chat, persistence, AI decisions
+- **Relay sends position snapshots** to SpacetimeDB at low frequency (1 Hz) for persistence and server-side validation
+- **Max capacity:** UDP relay can handle thousands of position updates/sec. SpacetimeDB only processes ~1 reducer/sec per player (low-frequency actions)
+- **Pros:** Decouples real-time movement from persistent state. SpacetimeDB stays the authoritative game database.
+- **Cons:** Two networking stacks (UDP relay + WebSocket). Position relay must handle spatial filtering. Anti-cheat validation happens at low frequency.
+- **Reference:** This is essentially how Planetside 2 and most FPS MMOs work — fast position relay + slower authoritative server
+
+#### Option C: UE5 Dedicated Server + SpacetimeDB Persistence
+```
+Client ──UE5 NetDriver──► UE5 Dedicated Server (Chaos physics, movement, combat)
+                                    │
+                                    └── State sync ──► SpacetimeDB (persistence, cross-server state)
+```
+- **UE5 dedicated server** handles all real-time gameplay (movement, physics, combat, AI) using native UE5 replication
+- **SpacetimeDB** acts as the persistence layer and cross-server state coordinator (accounts, inventory, world state)
+- **Max capacity:** UE5 dedicated servers handle ~100 players per instance. Multiple servers with seamless travel for open world.
+- **Pros:** Leverages UE5's mature networking stack, Chaos physics, AI, all built-in. SpacetimeDB provides the MMO persistence layer.
+- **Cons:** Requires UE5 dedicated server infrastructure. SpacetimeDB becomes a database, not the game server. Loses SpacetimeDB's reducer-as-game-logic paradigm. MultiServer Replication plugin (evaluated in Spike 8) becomes relevant.
+
+### What Spike 9 Will Benchmark
+
+Before choosing an architecture, we need hard numbers on the unknowns:
+
+#### Test 1: Batched Physics Update Throughput
+Replace per-body `physics_update` calls with a single `physics_update_batch(Vec<BodyUpdate>)` reducer.
+- Measure: How many body updates per batched reducer call before tick overrun?
+- Target: 100+ bodies per batch at 30 Hz
+- Compare: Per-body calls (current) vs. batch calls
+
+#### Test 2: Multi-Client Reducer Contention
+Connect 10, 50, 100 simultaneous clients, each calling `move_player` at 10 Hz.
+- Measure: Reducer queue depth, average latency per call, dropped/delayed reducers
+- Target: Determine the real per-client throughput under contention
+- Tool: Python/Rust script to spawn N WebSocket clients
+
+#### Test 3: Subscription Fan-Out Stress
+Seed N entities in one chunk, update all at M Hz via scheduled tick, measure:
+- Client-side `OnUpdate` callback rate and CPU cost
+- SpacetimeDB WebSocket bandwidth per client
+- Point where client falls behind or WebSocket backpressures
+- Test matrix: N ∈ {50, 100, 200, 500}, M ∈ {10, 20, 30} Hz
+
+#### Test 4: Sidecar Body Capacity
+Fire the sidecar with N concurrent physics bodies (Euler + gravity, not Chaos yet):
+- Measure: CPU time per physics step, reducer call latency, bodies-per-frame budget
+- Find: Maximum bodies at 30 Hz before frame overrun
+- Vary: With and without batch reducer
+
+#### Test 5: UDP Relay Prototype (if Tests 1-3 confirm SpacetimeDB-only is unviable)
+Build a minimal Rust UDP relay that:
+- Accepts position packets from N clients
+- Broadcasts to clients in the same spatial partition
+- Snapshots to SpacetimeDB at 1 Hz
+- Measure: Throughput at 100, 500, 1000 clients
+
+### Expected Outcome
+
+Based on the analysis above, the most likely result is:
+
+1. **SpacetimeDB-only (Option A) will be confirmed unviable** for >~10 moving players
+2. **Batched reducers will improve throughput** but not by the 100× needed
+3. **Architecture decision will be between Option B (hybrid relay) and Option C (UE5 dedicated server)**
+4. **Option B preserves SpacetimeDB as the game logic engine** (reducers handle combat, inventory, AI), which aligns with our Phase 0 investment
+5. **Option C is the safe fallback** — proven architecture, but reduces SpacetimeDB to a database
+
+The spike will produce the benchmark data needed to make this decision with confidence rather than speculation.
+
+### Files to Create/Modify
+- `server/nyx-server/spacetimedb/src/lib.rs` — Add `physics_update_batch` reducer, multi-client test reducers
+- `Source/Nyx/Sidecar/NyxSidecarSubsystem.cpp` — Batch update mode
+- `tools/stress_client/` — Multi-client stress test tool (Python or Rust)
+- `tools/udp_relay/` — Minimal UDP position relay prototype (if needed)
 
 ---
 
@@ -1041,8 +1192,9 @@ After completing these spikes, we'll have clarity on:
 | Week 2 | Spike 6 (Prediction) ✅ | **DONE** — prediction + reconciliation verified, 0 cm error |
 | Week 2–3 | Spike 7 (WASM Perf) ✅ | **DONE** — 218 reducers/sec, 1000 entities/tick at 100ms, 512MB memory OK |
 | Week 3 | Spike 8 (Sidecar) ✅ | **DONE** — UE5 sidecar architecture validated, MultiServer Replication evaluated |
+| Week 3–4 | Spike 9 (Scalability) | **PENDING** — Batched throughput, multi-client contention, fan-out stress, sidecar capacity, UDP relay prototype |
 
-**Total estimated time: ~3 weeks**
+**Total estimated time: ~4 weeks**
 
 ---
 
