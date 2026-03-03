@@ -52,6 +52,11 @@ void ANyxCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
+	UE_LOG(LogNyx, Log, TEXT("NyxCharacter::BeginPlay  Name=%s  Role=%s  HasAuthority=%s"),
+		*GetName(),
+		*UEnum::GetValueAsString(GetLocalRole()),
+		HasAuthority() ? TEXT("true") : TEXT("false"));
+
 	// Add input mapping context for the local player
 	if (APlayerController* PC = Cast<APlayerController>(GetController()))
 	{
@@ -150,6 +155,9 @@ void ANyxCharacter::SetCurrentMP(int32 NewMP)
 
 void ANyxCharacter::OnRep_CurrentHP()
 {
+	UE_LOG(LogNyx, Log, TEXT("[Client] OnRep_CurrentHP for %s: HP=%d/%d"),
+		*GetDisplayName(), CurrentHP, MaxHP);
+
 	OnHPChanged.Broadcast(CurrentHP, MaxHP);
 
 	if (CurrentHP <= 0)

@@ -18,11 +18,11 @@ void ANyxGameMode::StartPlay()
 {
 	Super::StartPlay();
 
-	const bool bDedicated = IsRunningDedicatedServer();
-	UE_LOG(LogNyx, Log, TEXT("NyxGameMode::StartPlay (DedicatedServer=%s)"),
-		bDedicated ? TEXT("true") : TEXT("false"));
+	const bool bServer = IsNyxServer();
+	UE_LOG(LogNyx, Log, TEXT("NyxGameMode::StartPlay (IsNyxServer=%s  NetMode=%d)"),
+		bServer ? TEXT("true") : TEXT("false"), static_cast<int32>(GetNetMode()));
 
-	if (bDedicated)
+	if (bServer)
 	{
 		// ── Dedicated Server: connect to SpacetimeDB ──
 		UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
@@ -77,7 +77,7 @@ void ANyxGameMode::StartPlay()
 
 void ANyxGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
-	if (IsRunningDedicatedServer())
+	if (IsNyxServer())
 	{
 		UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
 		if (ServerSub)
@@ -97,7 +97,7 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 
 	UE_LOG(LogNyx, Log, TEXT("PostLogin: %s"), *NewPlayer->GetName());
 
-	if (IsRunningDedicatedServer())
+	if (IsNyxServer())
 	{
 		// Get the spawned NyxCharacter pawn
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(NewPlayer->GetPawn());
@@ -120,7 +120,7 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 
 void ANyxGameMode::Logout(AController* Exiting)
 {
-	if (IsRunningDedicatedServer() && Exiting)
+	if (IsNyxServer() && Exiting)
 	{
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(Exiting->GetPawn());
 		if (NyxChar)
@@ -150,6 +150,14 @@ void ANyxGameMode::EnterWorld()
 
 	// Legacy: standalone mode placeholder
 	UE_LOG(LogNyx, Log, TEXT("EnterWorld: Standalone mode — no SpacetimeDB connection from client"));
+}
+
+bool ANyxGameMode::IsNyxServer() const
+{
+	// True for dedicated servers, listen servers, and PIE "Play As Listen Server"
+	return IsRunningDedicatedServer()
+		|| GetNetMode() == NM_ListenServer
+		|| GetNetMode() == NM_DedicatedServer;
 }
 
 void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)

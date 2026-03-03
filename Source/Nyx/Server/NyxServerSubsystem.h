@@ -39,7 +39,9 @@ class NYX_API UNyxServerSubsystem : public UGameInstanceSubsystem
 	GENERATED_BODY()
 
 public:
-	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
+	// Always create — the subsystem is inert until ConnectAndRegister() is called.
+	// This allows it to work on dedicated servers, listen servers, and standalone (with -NyxServer).
+	virtual bool ShouldCreateSubsystem(UObject* Outer) const override { return true; }
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
 	virtual void Deinitialize() override;
 
@@ -186,4 +188,11 @@ private:
 
 	/** Helper: identity to map key */
 	static FString IdentityKey(const FSpacetimeDBIdentity& Id);
+
+	/**
+	 * Generate a deterministic per-player SpacetimeDB identity from a display name.
+	 * This is a placeholder until EOS auth provides real per-player identities.
+	 * Uses MD5 hash of the name to produce a unique 32-byte identity.
+	 */
+	static FSpacetimeDBIdentity GeneratePlayerIdentity(const FString& PlayerDisplayName);
 };

@@ -3621,6 +3621,124 @@ This confirms that the UE5 dedicated server → SpacetimeDB connection model is 
 
 ---
 
+## Spike 11 — Dedicated Server Session Test (PIE Listen Server)
+
+**Goal:** Validate the full NyxServerSubsystem flow with multiple players in PIE "Play As Listen Server" mode — player join → character load from SpacetimeDB → stat application → replication to clients.
+
+### Changes Made
+
+#### 1. `IsNyxServer()` — Server Detection for PIE
+
+`IsRunningDedicatedServer()` returns `false` in PIE, blocking the entire server flow. Added `ANyxGameMode::IsNyxServer()` that also checks `GetNetMode()`:
+
+```cpp
+bool ANyxGameMode::IsNyxServer() const
+{
+    return IsRunningDedicatedServer()
+        || GetNetMode() == NM_ListenServer
+        || GetNetMode() == NM_DedicatedServer;
+}
+```
+
+All `IsRunningDedicatedServer()` calls in `StartPlay`, `PostLogin`, `Logout`, and `EndPlay` replaced with `IsNyxServer()`. This allows the SpacetimeDB connection + character management flow to activate during PIE listen server testing.
+
+#### 2. Per-Player Identity Generation
+
+**Problem discovered:** `character_stats` table uses `#[primary_key] identity: Identity`. The old code used the server's own WebSocket identity for *all* players — meaning only one character row could ever exist. Every player login would overwrite the same row.
+
+**Fix:** Generate deterministic per-player "fake" identities from the display name via MD5 hash:
+
+```cpp
+FSpacetimeDBIdentity UNyxServerSubsystem::GeneratePlayerIdentity(const FString& DisplayName)
+{
+    FMD5 Md5;
+    FTCHARToUTF8 Utf8(*DisplayName);
+    Md5.Update((const uint8*)Utf8.Get(), Utf8.Length());
+    uint8 Digest[16];
+    Md5.Final(Digest);
+
+    TArray<uint8> Bytes;
+    Bytes.SetNumUninitialized(32);
+    FMemory::Memcpy(Bytes.GetData(), Digest, 16);           // first 16 = MD5
+    for (int32 i = 0; i < 16; i++)
+        Bytes[16 + i] = Digest[i] ^ (i + 0xA5);           // second 16 = XOR'd
+    return FSpacetimeDBIdentity::FromBigEndian(Bytes);
+}
+```
+
+Properties:
+- **Deterministic:** Same display name → same identity → existing character loaded on rejoin
+- **Unique:** Different display names → different identities → separate character rows
+- **Forward-compatible:** When EOS auth is wired, fake identities are replaced with real per-player ones
+
+#### 3. `ShouldCreateSubsystem` → Always True
+
+Changed from `IsRunningDedicatedServer()` to `return true` (inline in header). The subsystem is inert until `ConnectAndRegister()` is explicitly called by the GameMode, so creating it unconditionally is safe. This ensures it exists in PIE listen-server mode.
+
+#### 4. `OnPlayerLeft` Key Fix
+
+Fixed a key mismatch bug: `OnPlayerJoined` keyed `PendingLoads` and `ManagedCharacters` by `PlayerDisplayName`, but `OnPlayerLeft` was trying to use `IdentityKey(SpacetimeIdentity)` as key. Now consistently uses `Character->GetDisplayName()`.
+
+#### 5. Debug Logging
+
+- `NyxCharacter::BeginPlay` — logs net role (`ROLE_Authority`, `ROLE_SimulatedProxy`, etc.) and `HasAuthority()`
+- `NyxCharacter::OnRep_CurrentHP` — logs replicated HP values on the client
+- `NyxGameMode::StartPlay` — logs `IsNyxServer` result and `NetMode` enum value
+
+#### 6. Server Build Target
+
+Created `NyxServer.Target.cs` (`TargetType.Server`) for future dedicated server executable builds.
+
+### Testing Instructions
+
+1. **Start SpacetimeDB:** `docker compose up -d` (port 3000)
+2. **Open UE5 Editor** with the Nyx project
+3. **PIE Settings:** Play → Advanced Settings → "Play As Listen Server", Number of Players = 2
+4. **Hit Play** — the listen server acts as the "dedicated server" and connects to SpacetimeDB
+5. **Verify in Output Log:**
+   - `[LogNyxServer] NyxServerSubsystem initialized — standby mode`
+   - `[LogNyx] NyxGameMode::StartPlay (IsNyxServer=true  NetMode=2)` (2 = NM_ListenServer)
+   - `[LogNyxServer] Requested character load: PlayerController_0`
+   - `[LogNyxServer] Requested character load: PlayerController_1`
+   - `[LogNyxServer] Character loaded from SpacetimeDB: PlayerController_0 HP=1000/1000`
+   - `[LogNyx] NyxCharacter::BeginPlay  Role=ROLE_Authority  HasAuthority=true` (server)
+   - `[LogNyx] [Client] OnRep_CurrentHP for ...: HP=1000/1000` (client receives replication)
+
+### Architecture Validation
+
+This test verifies the complete Option 4 server-side flow:
+
+```
+PIE Listen Server (acts as dedicated server)
+    │
+    ├─ StartPlay → IsNyxServer() ✓ → ConnectAndRegister(SpacetimeDB)
+    │
+    ├─ PostLogin(Player1) → GeneratePlayerIdentity("PC_0")
+    │   └─ LoadCharacter(fakeId_0, "PC_0") → SpacetimeDB
+    │
+    ├─ PostLogin(Player2) → GeneratePlayerIdentity("PC_1")
+    │   └─ LoadCharacter(fakeId_1, "PC_1") → SpacetimeDB
+    │
+    ├─ OnInsert(character_stats) → ApplyCharacterStats → Replication → Client
+    │
+    ├─ [Future] ResolveHit → OnUpdate → HP decrease → OnRep_CurrentHP on client
+    │
+    └─ Logout → SaveCharacter → OnPlayerLeft
+```
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `Source/Nyx/Core/NyxGameMode.h` | Added `IsNyxServer()` declaration |
+| `Source/Nyx/Core/NyxGameMode.cpp` | Added `IsNyxServer()` impl; replaced 4× `IsRunningDedicatedServer()` |
+| `Source/Nyx/Server/NyxServerSubsystem.h` | `ShouldCreateSubsystem` → inline `return true`; added `GeneratePlayerIdentity` |
+| `Source/Nyx/Server/NyxServerSubsystem.cpp` | Removed old `ShouldCreateSubsystem` body; rewrote `OnPlayerJoined`; fixed `OnPlayerLeft` key; added `GeneratePlayerIdentity` impl |
+| `Source/Nyx/Player/NyxCharacter.cpp` | Added BeginPlay net role log; added `OnRep_CurrentHP` replication log |
+| `Source/NyxServer.Target.cs` | New — Server build target (`TargetType.Server`) |
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal

@@ -12,16 +12,10 @@ DEFINE_LOG_CATEGORY_STATIC(LogNyxServer, Log, All);
 
 // ─── Subsystem Lifecycle ───────────────────────────────────────────
 
-bool UNyxServerSubsystem::ShouldCreateSubsystem(UObject* Outer) const
-{
-	// Only create on dedicated servers (or listen servers)
-	return IsRunningDedicatedServer();
-}
-
 void UNyxServerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
 	Super::Initialize(Collection);
-	UE_LOG(LogNyxServer, Log, TEXT("NyxServerSubsystem initialized (dedicated server mode)"));
+	UE_LOG(LogNyxServer, Log, TEXT("NyxServerSubsystem initialized — standby mode (inert until ConnectAndRegister)"));
 }
 
 void UNyxServerSubsystem::Deinitialize()
@@ -191,14 +185,15 @@ void UNyxServerSubsystem::OnPlayerJoined(ANyxCharacter* Character, const FString
 		return;
 	}
 
-	// TODO: In the full auth pipeline, the SpacetimeDB identity comes from
-	// EOS auth (client authenticates → server receives verified identity).
-	// For now, generate a deterministic placeholder identity from the display name.
-	// The LoadCharacter reducer accepts an explicit identity parameter,
-	// so the server can pass whatever identity it wants.
-
-	// Use display name as a temporary key until proper auth is wired up
+	// Generate a deterministic per-player identity from the display name.
+	// In production, this would come from EOS auth (client authenticates →
+	// server receives verified identity). For now, we deterministically
+	// derive a unique identity from the player's name.
+	const FSpacetimeDBIdentity PlayerIdentity = GeneratePlayerIdentity(PlayerDisplayName);
 	const FString Key = PlayerDisplayName;
+
+	UE_LOG(LogNyxServer, Log, TEXT("Player joined: %s (identity=%s...)"),
+		*PlayerDisplayName, *PlayerIdentity.ToHex().Left(16));
 
 	// Check if stats are already in the local cache
 	if (SpacetimeDBConnection->Db && SpacetimeDBConnection->Db->CharacterStats)
@@ -212,7 +207,8 @@ void UNyxServerSubsystem::OnPlayerJoined(ANyxCharacter* Character, const FString
 				Character->ApplyCharacterStats(Stats);
 				ManagedCharacters.Add(Key, Character);
 				OnCharacterLoaded.Broadcast(Character, Stats);
-				UE_LOG(LogNyxServer, Log, TEXT("Character loaded from cache: %s"), *Stats.DisplayName);
+				UE_LOG(LogNyxServer, Log, TEXT("Character loaded from cache: %s (HP=%d/%d)"),
+					*Stats.DisplayName, Stats.CurrentHp, Stats.MaxHp);
 				return;
 			}
 		}
@@ -222,14 +218,8 @@ void UNyxServerSubsystem::OnPlayerJoined(ANyxCharacter* Character, const FString
 	PendingLoads.Add(Key, Character);
 	ManagedCharacters.Add(Key, Character);
 
-	// LoadCharacter reducer takes (Identity, DisplayName).
-	// Since the server has a single SpacetimeDB connection, we pass its own identity
-	// as a placeholder. The Rust module will create/find the character_stats row.
-	// TODO: Pass the actual player SpacetimeDB identity from EOS auth.
-	FSpacetimeDBIdentity ServerIdentity;
-	SpacetimeDBConnection->TryGetIdentity(ServerIdentity);
-	SpacetimeDBConnection->Reducers->LoadCharacter(ServerIdentity, PlayerDisplayName);
-	UE_LOG(LogNyxServer, Log, TEXT("Requested character load for %s"), *PlayerDisplayName);
+	SpacetimeDBConnection->Reducers->LoadCharacter(PlayerIdentity, PlayerDisplayName);
+	UE_LOG(LogNyxServer, Log, TEXT("Requested character load: %s"), *PlayerDisplayName);
 }
 
 void UNyxServerSubsystem::OnPlayerLeft(ANyxCharacter* Character)
@@ -239,7 +229,8 @@ void UNyxServerSubsystem::OnPlayerLeft(ANyxCharacter* Character)
 	// Save character state before removing
 	SaveCharacterState(Character);
 
-	const FString Key = IdentityKey(Character->SpacetimeIdentity);
+	// Use DisplayName as key (matches OnPlayerJoined key)
+	const FString Key = Character->GetDisplayName();
 	ManagedCharacters.Remove(Key);
 	PendingLoads.Remove(Key);
 
@@ -410,4 +401,26 @@ void UNyxServerSubsystem::AutoSaveAllCharacters()
 FString UNyxServerSubsystem::IdentityKey(const FSpacetimeDBIdentity& Id)
 {
 	return Id.ToHex();
+}
+
+FSpacetimeDBIdentity UNyxServerSubsystem::GeneratePlayerIdentity(const FString& PlayerDisplayName)
+{
+	// Deterministic per-player identity: MD5 hash of display name, doubled to fill 32 bytes.
+	// In production, this is replaced by the real SpacetimeDB identity from EOS auth.
+	FMD5 Md5Gen;
+	FTCHARToUTF8 NameUtf8(*PlayerDisplayName);
+	Md5Gen.Update(reinterpret_cast<const uint8*>(NameUtf8.Get()), NameUtf8.Length());
+	uint8 Digest[16];
+	Md5Gen.Final(Digest);
+
+	TArray<uint8> IdentityBytes;
+	IdentityBytes.SetNumUninitialized(32);
+	FMemory::Memcpy(IdentityBytes.GetData(), Digest, 16);
+	// XOR with index to make second half different from first
+	for (int32 i = 0; i < 16; i++)
+	{
+		IdentityBytes[16 + i] = Digest[i] ^ static_cast<uint8>(i + 0xA5);
+	}
+
+	return FSpacetimeDBIdentity::FromBigEndian(IdentityBytes);
 }

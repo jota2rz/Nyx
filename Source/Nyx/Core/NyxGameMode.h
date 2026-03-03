@@ -77,6 +77,13 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Server")
 	FString DedicatedServerId = TEXT("server-1");
 
+	/**
+	 * Returns true when running as any kind of server (dedicated, listen, or PIE listen).
+	 * Use this instead of IsRunningDedicatedServer() so the SpacetimeDB flow
+	 * also activates when testing with "Play As Listen Server" in PIE.
+	 */
+	bool IsNyxServer() const;
+
 private:
 	void OnAuthStateChanged(ENyxAuthState NewState);
 };
