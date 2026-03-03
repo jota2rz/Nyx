@@ -2951,11 +2951,27 @@ Multiple servers share the SAME physical zone, each authoritative over a subset 
 └─────────────────────────────────────────────────────────┘
 ```
 
-**How it works:**
-- When a zone becomes "hot" (population exceeds threshold), orchestrator spins up additional servers for the same zone
-- Each server runs a full UE5 world simulation but is authoritative over only its assigned players/NPCs
-- MultiServer Replication handles cross-server visibility: Server A's players can see Server B's players
-- When Player (on Server A) attacks Player (on Server B), the interaction crosses server boundaries via MultiServer's replication channel
+**How it works — what "overlapped" means concretely:**
+- All servers load the **same map** (same terrain, buildings, collision geometry)
+- All servers are connected via UE5's MultiServer Replication channel (internal, low-latency)
+- Each server is authoritative over only its assigned entities — it runs their CMC, processes their inputs, owns their state
+- Each server also has **read-only mirrors** of the other servers' entities — it knows where ALL players are (for relevancy/visibility) but only ticks CMC for its own subset
+- Each client connects to exactly ONE server — whichever owns their entity. The client doesn't know or care which server it's on.
+
+**Entity assignment strategies:**
+- **Round-robin:** Player 1 → Server A, Player 2 → Server B, Player 3 → Server C, Player 4 → Server A... (simplest)
+- **Spatial clustering within zone:** Players in the north courtyard → Server A, south gate → Server B (reduces cross-server interactions)
+- **Dynamic rebalance:** If Server A's region empties, migrate remaining entities to Server B and shut down Server A
+
+**Cross-server interaction example:**
+1. Player 50 (on Server A) swings a sword at Player 400 (on Server B)
+2. Server A detects the collision (it has Player 400's position as a read-only mirror)
+3. Server A sends to SpacetimeDB: `resolve_hit(attacker=50, defender=400, skill=sword)`
+4. SpacetimeDB calculates damage, updates Player 400's HP atomically
+5. Server B receives the subscription update: "Player 400 HP changed"
+6. Server B replicates the HP update to Player 400's client
+
+**Key insight:** This is NOT spatial partitioning (where each server owns a different geographic area). All servers share the **same geographic space**. The split is by **entity ownership**, not by **location**. This is what makes it work for a hot zone where everyone is in the same place.
 
 **Pros:**
 - Uses UE5's MultiServer Replication (designed for this)
@@ -3197,6 +3213,169 @@ The production architecture for 1000+ players in one zone combines three pattern
 - **Physics-heavy combat:** If every ability involves full physics simulation (ragdolls, destructibles), the CMC budget gets saturated even with LOD. Simplify physics for dense scenarios.
 - **MultiServer plugin stability:** The plugin is experimental. It may not handle dynamic entity reassignment smoothly. Needs thorough stress-testing.
 
+#### Container Auto-Scaling for Hot Zones
+
+Yes — new UE5 dedicated servers can be **dynamically spun up as containers** and joined into the MultiServer Replication network when a zone exceeds its player threshold. This is the operational model that makes Pattern A + C + D practical in production.
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        Orchestrator Service                             │
+│  (Kubernetes controller / custom service / SpacetimeDB reducer)         │
+│                                                                        │
+│  Monitors: zone_population table in SpacetimeDB                        │
+│  Rules:                                                                │
+│    zone_players > 300  → spin up additional server container            │
+│    zone_players < 200  → drain & terminate excess server container      │
+│    zone_players > 600  → spin up third server container                 │
+└────────────────────────────┬────────────────────────────────────────────┘
+                             │ container lifecycle
+                             ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Container Runtime (Kubernetes / ECS)                  │
+│                                                                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                 │
+│  │ Container 1   │  │ Container 2   │  │ Container 3   │  ← auto-scaled │
+│  │ UE5 DedServer │  │ UE5 DedServer │  │ UE5 DedServer │                │
+│  │ Zone: Castle  │  │ Zone: Castle  │  │ Zone: Castle  │                │
+│  │ Entities:     │  │ Entities:     │  │ Entities:     │                │
+│  │ 1-300         │  │ 301-600       │  │ 601-900       │                │
+│  │               │  │               │  │               │                │
+│  │ ↕ MultiServer │  │ ↕ MultiServer │  │ ↕ MultiServer │                │
+│  └───────┬───────┘  └───────┬───────┘  └───────┬───────┘                │
+│          │                  │                  │                        │
+│          └──────────────────┼──────────────────┘                        │
+│                             │ ws://stdb:3000                            │
+│                             ▼                                           │
+│                  ┌──────────────────┐                                    │
+│                  │ Container 0       │                                    │
+│                  │ SpacetimeDB 2.0   │                                    │
+│                  │ (always running)  │                                    │
+│                  └──────────────────┘                                    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+##### Scale-Up Protocol (New Server Joins)
+
+1. **Trigger:** Orchestrator detects `zone_players > THRESHOLD` (e.g., 300) via SpacetimeDB subscription or polling
+2. **Spin up:** Orchestrator launches a new UE5 dedicated server container with the same map/zone configuration
+3. **Bootstrap:** New server starts, loads the map, connects to SpacetimeDB (loads world state)
+4. **Join MultiServer mesh:** New server announces itself to the MultiServer Replication network. Existing servers add it as a peer.
+5. **Entity migration:** Orchestrator assigns a subset of entities to the new server:
+   - New players joining the zone are assigned to the new server (no migration needed)
+   - Optionally, some entities from overloaded servers can be migrated (authority transfer)
+   - During migration: old server relinquishes authority → new server assumes authority → client reconnects to new server (seamless, no loading screen)
+6. **Steady state:** All servers in the zone operate as peers, each authoritative over their entity subset
+
+**Bootstrap time estimate:**
+- Container start: ~5-10 seconds (pre-pulled UE5 server image)
+- Map load: ~10-20 seconds (depends on map complexity, can be optimized with pak streaming)
+- SpacetimeDB connection: ~1 second
+- MultiServer mesh join: ~2-5 seconds
+- **Total: ~20-40 seconds** from trigger to accepting players
+- Mitigation: keep 1-2 warm standby containers per region (pre-loaded, idle, instant join)
+
+##### Scale-Down Protocol (Server Drains)
+
+1. **Trigger:** Orchestrator detects `zone_players < LOW_THRESHOLD` (e.g., 200) sustained for N minutes
+2. **Drain:** Server marked for draining — no new players assigned to it
+3. **Entity migration:** Remaining entities migrated to surviving servers (authority transfer)
+4. **Disconnect:** Once entity count reaches 0, server disconnects from MultiServer mesh
+5. **Terminate:** Container is stopped and released
+
+##### SpacetimeDB's Role in Orchestration
+
+SpacetimeDB is the natural coordination point because all servers already connect to it:
+
+```rust
+// Zone server registry — SpacetimeDB table
+#[table(name = zone_servers, public)]
+pub struct ZoneServer {
+    #[primary_key]
+    pub server_id: String,
+    pub zone_id: String,
+    pub container_ip: String,
+    pub port: u16,
+    pub entity_count: u32,
+    pub max_entities: u32,
+    pub status: String,  // "active", "draining", "standby"
+    pub joined_at: u64,
+}
+
+// Zone population tracking
+#[table(name = zone_population, public)]
+pub struct ZonePopulation {
+    #[primary_key]
+    pub zone_id: String,
+    pub total_players: u32,
+    pub server_count: u32,
+    pub needs_scale_up: bool,
+    pub needs_scale_down: bool,
+}
+
+// Reducer: called by orchestrator to register a new server
+#[reducer]
+pub fn register_zone_server(
+    ctx: &ReducerContext,
+    server_id: String,
+    zone_id: String,
+    container_ip: String,
+    port: u16,
+) {
+    ctx.db.zone_servers().insert(ZoneServer {
+        server_id,
+        zone_id,
+        container_ip,
+        port,
+        entity_count: 0,
+        max_entities: 300,
+        status: "active".to_string(),
+        joined_at: ctx.timestamp.to_duration_since_unix_epoch().as_millis() as u64,
+    });
+    // Recalculate zone population
+    recalculate_zone_population(ctx, &zone_id);
+}
+
+// Reducer: called by server to assign a new player
+#[reducer]
+pub fn assign_player_to_server(
+    ctx: &ReducerContext,
+    player_id: u64,
+    zone_id: String,
+) -> String {
+    // Find the server in this zone with the fewest entities
+    let best_server = ctx.db.zone_servers().iter()
+        .filter(|s| s.zone_id == zone_id && s.status == "active")
+        .min_by_key(|s| s.entity_count)
+        .expect("No active servers for zone");
+
+    // Return the server's connection info
+    best_server.server_id.clone()
+}
+```
+
+**Orchestrator options:**
+- **Kubernetes Custom Controller:** Watches `zone_population` table, manages pod scaling via Kubernetes API
+- **SpacetimeDB Scheduled Reducer:** A reducer that runs periodically, checks thresholds, and triggers scale events (requires external container API call)
+- **Standalone service:** Lightweight Go/Rust service that subscribes to SpacetimeDB's `zone_population` table and calls Kubernetes/ECS/Docker APIs
+
+##### Challenges and Mitigations
+
+| Challenge | Mitigation |
+|-----------|------------|
+| 20-40s bootstrap is too slow for sudden sieges | Keep 1-2 warm standby containers per region (pre-loaded, idle) |
+| Entity migration causes player hitch | UE5 MultiServer authority transfer is designed for seamless handoff — test thoroughly |
+| Client needs to reconnect to new server | Use UE5's travel/reconnect mechanism — transparent to player if done during entity transfer |
+| Container image size (UE5 server is large) | Pre-pull images on all nodes; use layered Docker images with shared engine base |
+| Cost of idle standby containers | Standby containers use minimal CPU (no players = no ticking); memory cost ~500MB-1GB each |
+| Race conditions in entity assignment | SpacetimeDB ACID guarantees atomic assignment — no double-assignment possible |
+
+##### Why This Is Viable
+
+- **Fortnite model:** Epic runs UE5 dedicated servers as containers at massive scale (millions of concurrent matches). The engine is proven in containerized deployment.
+- **Stateless servers:** Each UE5 server is stateless — all persistent data lives in SpacetimeDB. Servers can be created and destroyed freely.
+- **SpacetimeDB as coordination bus:** Server registry, entity assignment, and population tracking are natural fits for SpacetimeDB tables with subscription-based reactivity.
+- **Linear cost scaling:** Only pay for servers when players are present. A zone with 50 players uses 1 server; a siege with 1000 uses 4; after the siege, back to 1.
+
 #### SpacetimeDB Integration Points
 
 The dedicated server talks to SpacetimeDB via the C++ or Rust SDK:
@@ -3339,15 +3518,21 @@ docker run --rm --pull always -p 3000:3000 clockworklabs/spacetime start
 | **What we reinvent** | Movement, combat, physics | Movement auth, combat | Movement, combat, physics | Nothing (use UE5 built-ins) |
 | **SpacetimeDB role** | Everything | Persistence + social | Everything | Persistence + social + economy |
 
-### Recommendation
+### Current Plan: Option 4 — Hybrid A + C + D
 
-**Option 4 is the recommended architecture** for achieving 1000+ visible WASD players with server-authoritative movement. It uses proven technology (UE5 NetDriver, CMC, ReplicationGraph) for real-time gameplay and SpacetimeDB for what it excels at — persistent, queryable, transactional game state.
+**Option 4 with Patterns A + C + D is the chosen production architecture.** This is no longer a recommendation — it is the active plan for Nyx.
 
-**Start with Option 1** if the goal is rapid prototyping with minimal infrastructure. It validates the event-driven movement model and can serve ~300-500 players per zone.
+**Architecture summary:**
+- **UE5 Dedicated Servers** (containerized, auto-scaled) handle all real-time gameplay: WASD movement via CMC, physics, hit detection, replication via ReplicationGraph
+- **Entity-Sharded MultiServer (Pattern A):** When a zone gets hot (300+ players), additional UE5 server containers spin up for the same zone. Each server is authoritative over a subset of entities. All servers share the same map and see all entities via read-only mirrors.
+- **SpacetimeDB Combat Compute (Pattern C):** UE5 handles hit detection (physics/geometry). SpacetimeDB resolves damage, stats, buffs via WASM reducers with ACID guarantees. Live-tunable, auditable, no state duplication.
+- **Aggressive Entity LOD (Pattern D):** Per-server simulation fidelity scales with distance — full CMC for ~100 close entities, simplified for medium, position-only for far. Keeps tick budget under 30ms.
+- **Container Auto-Scaling:** Kubernetes/ECS-managed. SpacetimeDB tracks zone population and server registry. Orchestrator scales servers up/down based on player thresholds. Warm standbys for instant surge response.
+- **Single-Connection Model:** Clients connect ONLY to UE5 via UDP. SpacetimeDB is internal-only, never exposed to the public internet.
 
-**Plan for Option 4** as the production architecture. The key insight from all the research: UE5's dedicated server already implements every optimization that L2 used to achieve 1000+ player sieges — spatial grid relevancy, rate-limited replication, delta compression, dormancy, priority bucketing, UDP transport with unreliable channels. Building these from scratch on top of SpacetimeDB's subscription model would take years and never match what Epic has refined over two decades.
+**Key insight from all research:** UE5's dedicated server already implements every optimization that L2 used to achieve 1000+ player sieges — spatial grid relevancy, rate-limited replication, delta compression, dormancy, priority bucketing, UDP transport with unreliable channels. Building these from scratch on top of SpacetimeDB's subscription model would take years and never match what Epic has refined over two decades. SpacetimeDB excels at persistence, ACID transactions, and combat rule enforcement — let each system do what it's best at.
 
-The Phase 0 spikes are NOT wasted — they validated SpacetimeDB's strengths (persistence, subscriptions, ACID transactions) and identified its limitations (fan-out ceiling, no UDP, subscription re-evaluation cost). This data directly informs how to partition responsibilities between UE5 dedicated servers and SpacetimeDB in Option 4.
+The Phase 0 spikes are NOT wasted — they validated SpacetimeDB's strengths (persistence, subscriptions, ACID transactions) and identified its limitations (fan-out ceiling, no UDP, subscription re-evaluation cost). This data directly informs how to partition responsibilities between UE5 dedicated servers and SpacetimeDB in the chosen architecture.
 
 ---
 
