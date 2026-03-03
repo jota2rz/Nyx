@@ -2096,6 +2096,197 @@ Redwood represents the **production-grade UE5 MMO backend** that Nyx would need 
 
 ---
 
+## Scaling SpacetimeDB Beyond 300 Players Per Zone
+
+> **Context:** Spike 9 Test 3b established a ceiling of ~200-300 WebSocket subscribers per zone on a 4C/8T machine (i3-12100), with ~280K events/sec peak throughput. This section analyzes SpacetimeDB 2.0's official scaling mechanisms and proposes an architecture to push well beyond that limit within Option A (SpacetimeDB-only).
+
+### Why 300 Is Not the Real Limit
+
+The Test 3b benchmark measured a worst-case scenario: **every subscriber sees every entity** (`SELECT * FROM fanout_entity`). All 100 entities update at 10 Hz, and all N subscribers receive all 100 updates per tick. This yields O(N × E) events per tick — the full fan-out.
+
+In production, players don't see the entire world. Spatial interest management means each client subscribes only to nearby entities. This fundamentally changes the scaling math:
+
+| Scenario | Subscribers | Entities Visible | Events/Tick | Events/Sec (10 Hz) |
+|----------|-------------|-----------------|-------------|-------------------|
+| **Test 3b (worst case)** | 200 | 100 (all) | 20,000 | 180,000 |
+| **Spatial: 50 per chunk** | 50 | 50 | 2,500 | 25,000 |
+| **4 chunks visible** | 200 total (50/chunk) | 200 (50/chunk × 4) | 10,000 | 100,000 |
+| **10 chunks, 500 players** | 500 total (50/chunk) | 200 (per player) | — | 250,000 |
+
+The last row shows 500 players each seeing 50 entities at 10 Hz = 250K events/sec total — within the measured 280K budget. The key is reducing per-subscriber entity count through spatial filtering.
+
+### Strategy 1: Subscription Query Deduplication (Zero-Cost)
+
+SpacetimeDB's subscription system provides a critical optimization from the official docs:
+
+> *"SpacetimeDB subscriptions are zero-copy. Subscribing to the same query more than once doesn't incur additional processing or serialization overhead."*
+
+**Impact:** When 50 players in the same chunk all subscribe to `SELECT * FROM entity WHERE chunk_x = 5 AND chunk_y = 3`, SpacetimeDB evaluates the query ONCE and shares the result. The subscription diff computation becomes O(unique_queries × delta) instead of O(total_subscribers × delta).
+
+The WebSocket broadcast (sending data to each client) is still O(subscribers), but the expensive server-side work (evaluating which rows changed for each query) is amortized across all subscribers sharing the same query.
+
+**Implementation:** Already working — Spike 5's chunk-based `WHERE` subscriptions naturally produce identical query strings for players in the same chunk.
+
+### Strategy 2: Anonymous Views — Shared Materialization
+
+SpacetimeDB 2.0's **Views** feature adds a powerful new tool. Anonymous views (`AnonymousViewContext`) are computed once and shared across ALL subscribers:
+
+> *"The database can materialize the view once and serve that same result to all subscribers. When the underlying data changes, it recomputes the view once and broadcasts the update to everyone."*
+
+**Region-based design pattern** (from official docs):
+
+```rust
+// All players in chunk (0,0) share this single materialized view
+// SpacetimeDB computes it ONCE, not per-subscriber
+entities_in_origin_chunk = anonymousView {
+    filter entities where chunk_x = 0 AND chunk_y = 0
+}
+```
+
+**Contrast with per-user views:** A `ViewContext` view that uses `ctx.sender()` (e.g., "entities near ME") must be computed separately for each subscriber. With 1,000 users, that's 1,000 computations. An anonymous view that returns "entities in region X" is computed once regardless of subscriber count.
+
+**Limitation:** Views cannot take parameters — each chunk needs a separate view definition or clients must use raw SQL subscriptions with WHERE filters. For dynamic worlds with many chunks, SQL subscriptions are more practical. The query deduplication from Strategy 1 provides similar benefits.
+
+### Strategy 3: Table Decomposition — Reduce Per-Entity Payload
+
+The official SpacetimeDB performance best practices explicitly recommend splitting tables by update frequency:
+
+```
+Consolidated (not recommended):
+  Player → id, name, position_x, position_y, velocity_x, velocity_y,
+           health, max_health, total_kills, audio_volume
+
+Decomposed (recommended):
+  PlayerState    → player_id, position_x, position_y (updates: 10 Hz)
+  PlayerHealth   → player_id, health, max_health     (updates: occasional)
+  PlayerStats    → player_id, total_kills, deaths     (updates: rare)
+  PlayerSettings → player_id, audio_volume            (updates: very rare)
+```
+
+**Impact on fan-out:** A 10 Hz position tick only triggers subscription updates for `PlayerState`, not the entire player entity. Clients subscribing to `PlayerStats` (leaderboard) don't receive position noise. This reduces:
+- **Serialization cost:** Smaller rows = faster serialization per update
+- **Wire bandwidth:** Less data per subscriber per tick
+- **Subscription diff cost:** Fewer columns changed = smaller diff
+
+**Estimated improvement:** If position data is ~24 bytes (3× f32 + player_id) vs ~120 bytes (full entity), that's 5× less data per entity update. The 280K events/sec limit may be partially bandwidth-bound, so smaller payloads could push it higher.
+
+### Strategy 4: Event Tables — Zero-Persistence Transient Data
+
+SpacetimeDB 2.0 introduces **event tables**: rows exist only for the duration of the transaction, are broadcast to subscribers on commit, then immediately deleted. No client-side cache, no `on_update`/`on_delete` callbacks — only `on_insert`.
+
+**Use cases for Nyx:**
+- Combat damage numbers (floating text)
+- VFX/SFX triggers (explosions, particles)
+- Transient notifications ("Player joined zone")
+- Debugging/telemetry data
+
+**Impact:** Event tables avoid accumulating rows in client caches. A combat-heavy zone with hundreds of damage events per second won't bloat subscriptions because events are ephemeral. RLS (Row-Level Security) can restrict which clients receive which events.
+
+### Strategy 5: RLS — Server-Side Data Filtering
+
+From the "What is SpacetimeDB?" documentation:
+
+> *"RLS filters restrict the data view server-side before subscriptions are evaluated. These filters can be used for access control or client scoping."*
+
+RLS operates BEFORE subscription evaluation, meaning filtered-out rows never enter the subscription diff pipeline. This is more efficient than client-side filtering because it reduces server-side computation, not just bandwidth.
+
+**Application to spatial interest management:** RLS could enforce that a client only receives entities within a certain range, providing a server-enforced backstop even if the client's subscription query is too broad.
+
+### Strategy 6: Direct Indexes — O(1) Entity Lookups
+
+SpacetimeDB supports **direct indexes** for dense sequential unsigned integers:
+
+> *"Direct indexes use array indexing instead of tree traversal, providing O(1) lookups."*
+
+For entity systems where IDs are auto-incrementing integers starting near 0 (which is how games typically work), direct indexes eliminate the B-tree traversal overhead in subscription diff evaluation. This is a micro-optimization but becomes meaningful at high entity counts.
+
+### Strategy 7: Multi-Database Sharding (Horizontal Scaling)
+
+SpacetimeDB supports deploying the same module to multiple independent databases:
+
+> *"You can deploy the same module to multiple databases (e.g. separate environments for testing, staging, production), each with its own independent data."*
+
+**Multi-database zone architecture:**
+
+```
+           ┌─── SpacetimeDB "nyx-zone-1" (Region A, ≤200 players)
+           │
+Router ────┼─── SpacetimeDB "nyx-zone-2" (Region B, ≤200 players)
+           │
+           ├─── SpacetimeDB "nyx-zone-3" (Region C, ≤200 players)
+           │
+           └─── SpacetimeDB "nyx-global"  (accounts, inventory, cross-zone state)
+```
+
+Each zone database runs the same module but handles a different spatial region. A lightweight router directs players to the correct database based on their world position. SpacetimeDB's **Procedures** (which support HTTP requests) enable cross-database communication for player transfers and shared state.
+
+**Cross-database coordination via Procedures:**
+- Player moves from Zone 1 → Zone 2: Zone 1 procedure calls Zone 2's HTTP API to create the player entity, then deletes from Zone 1
+- Global state (economy, world events): Written to `nyx-global`, read by zone databases on demand
+- Follows Redwood's Sync Items pattern: targeted cross-instance sync, NOT full state mesh
+
+**Scaling:** Linear with number of databases. Each database handles ≤200-300 players within its comfort zone. Ten databases across a single server host = 2,000-3,000 concurrent players. Across multiple hosts = effectively unlimited.
+
+### Strategy 8: Tiered Update Rates
+
+Not all entities need the same update frequency. A tiered approach reduces total events/sec:
+
+| Distance from Player | Update Rate | Entities Visible | Events/Sec (per player) |
+|---------------------|-------------|-----------------|----------------------|
+| Near (0-50m) | 10 Hz | ~20 | 200 |
+| Medium (50-200m) | 5 Hz | ~30 | 150 |
+| Far (200-500m) | 2 Hz | ~50 | 100 |
+| Very far (500m+) | 0 Hz (not subscribed) | 0 | 0 |
+| **Total** | — | **~100** | **450** |
+
+Compare to flat 10 Hz for all 100 visible entities = 1,000 events/sec per player. Tiered rates reduce it to 450 — a 55% reduction.
+
+**Implementation:** Multiple subscription groups per client. The position tick reducer updates a `near_entity_state` table at 10 Hz but a `far_entity_state` table at 2 Hz. Or maintain a single table but use separate scheduled ticks at different rates based on entity classification.
+
+### Revised Scaling Projections
+
+Combining all strategies on the same i3-12100 hardware (4C/8T, 280K events/sec measured capacity):
+
+| Configuration | Players | Visible/Player | Events/Sec Total | Feasible? |
+|--------------|---------|----------------|-----------------|-----------|
+| **Baseline (Test 3b)** | 200 | 100 (all) | 180K | ✅ Zero degradation |
+| **Spatial (50/chunk)** | 500 | 50 | 250K | ✅ Within budget |
+| **Spatial + tiered rates** | 700 | 100 (tiered) | 315K | ⚠️ Near limit |
+| **Spatial + decomposed tables** | 800 | 50 (position only) | 250K* | ✅ Smaller payloads |
+| **Multi-DB sharding (2 DBs)** | 500 | 50 | 125K per DB | ✅ Comfortable |
+| **Multi-DB sharding (4 DBs)** | 1,000 | 50 | 62.5K per DB | ✅ Easy |
+
+\*Events/sec may actually be higher capacity due to reduced per-event serialization size.
+
+**On production hardware** (dedicated server, e.g., AMD EPYC 7543 32C/64T, 2.8 GHz base / 3.7 GHz boost):
+- Single-thread performance roughly comparable to i3-12100 at base, lower at boost
+- Multi-threaded WebSocket broadcast could scale with core count (if SpacetimeDB parallelizes I/O)
+- Potentially 2-4× the events/sec capacity = 560K-1.1M events/sec
+- Single database: 500-1000 players with spatial partitioning
+- With sharding: 5,000+ concurrent players
+
+### Implementation Roadmap
+
+| Priority | Strategy | Effort | Player Impact |
+|----------|----------|--------|--------------|
+| **P0** | Spatial interest management (already have chunk-based WHERE from Spike 5) | Low | 200 → 500 |
+| **P1** | Table decomposition (PlayerState / PlayerHealth / PlayerStats) | Low | +20-30% headroom |
+| **P1** | Event tables for combat effects and transient data | Low | Cleaner architecture |
+| **P2** | Tiered update rates (near 10 Hz, far 2 Hz) | Medium | +30-50% headroom |
+| **P2** | Direct indexes for entity IDs | Low | Micro-optimization |
+| **P3** | Multi-database sharding with Procedures for cross-zone coordination | High | 1,000+ players |
+| **P3** | RLS filters for server-enforced interest management | Medium | Security + performance |
+
+### Bottom Line
+
+**SpacetimeDB can scale well beyond 300 players.** The 200-300 limit from Test 3b applies to subscribers who ALL see ALL entities — a worst case that doesn't occur in production. With spatial partitioning alone (P0), Option A scales to ~500 players per database instance. With table decomposition and tiered rates (P1-P2), 700-800 becomes achievable. With multi-database sharding (P3), the system scales horizontally to thousands.
+
+The strategies above are drawn directly from SpacetimeDB 2.0's official documentation (table decomposition, anonymous views, event tables, RLS, direct indexes, subscription deduplication) and production-proven patterns from BitCraft, Redwood, and OWS. None require fundamental changes to SpacetimeDB's architecture — they're all about using existing features effectively.
+
+**Key insight:** The bottleneck was never SpacetimeDB's database or WASM execution (400K entity updates/sec). It's the WebSocket fan-out, which is bounded by (total_subscribers × visible_entities × update_rate × row_size). Every strategy above attacks one or more of those four terms.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
@@ -2106,6 +2297,11 @@ Redwood represents the **production-grade UE5 MMO backend** that Nyx would need 
 - UE5.7 Documentation: https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-5-7-documentation
 - BitCraft (reference game built with SpacetimeDB): https://www.bitcraftonline.com/
 - Redwood MMO (UE5 backend infrastructure): https://redwoodmmo.com/docs/
+- SpacetimeDB 2.0 Subscriptions: https://spacetimedb.com/docs/clients/subscriptions
+- SpacetimeDB 2.0 Views: https://spacetimedb.com/docs/functions/views
+- SpacetimeDB 2.0 Table Performance: https://spacetimedb.com/docs/tables/performance
+- SpacetimeDB 2.0 Event Tables: https://spacetimedb.com/docs/tables/event-tables
+- SpacetimeDB 2.0 SQL Reference: https://spacetimedb.com/docs/reference/sql
 - BitCraft Server Source Code (Apache 2.0): https://github.com/clockworklabs/BitCraftPublic
 - MultiServer Replication Plugin (Experimental): https://dev.epicgames.com/community/learning/knowledge-base/xBvk/unreal-engine-experimental-an-introduction-to-the-multiserver-replication-plugin
 - MultiServer Replication API: https://dev.epicgames.com/documentation/en-us/unreal-engine/API/Plugins/MultiServerReplication
