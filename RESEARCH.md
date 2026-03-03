@@ -2908,6 +2908,295 @@ Single UE5 dedicated server caps at ~200-400 players (game thread bottleneck). M
 
 For a 1000-player siege: 3-4 servers each handling 250-350 players, with MultiServer Replication handling cross-boundary visibility. Players near server boundaries are replicated to both servers. SpacetimeDB serves as the shared persistence layer for all servers.
 
+#### Scaling a Hot Zone: 1000+ Players in One Location
+
+**The Problem:** Spatial sharding (MultiServer) works when players spread across different zones. But what happens when 1000+ players converge on a single location — a castle siege, a world boss, a capital city event? One UE5 dedicated server caps at ~200-400 players (game thread bottleneck). Spatial partitioning doesn't help because everyone is in the same spot.
+
+This is the hardest problem in MMO architecture. Every shipped game handles it differently:
+
+| Game | Approach | Result |
+|------|----------|--------|
+| **Eve Online** | Time Dilation (TiDi) — slow down simulation to 10% speed | 6000+ ships in one system, but everything is slow motion |
+| **Lineage 2** | Aggressive interest management — 3×3 region visibility, minimal per-player data, no physics | 1000+ visible as lightweight entities |
+| **PlanetSide 2** | Continent caps + hex population balance incentives | ~600-800 per continent, degrades under peak |
+| **New World** | Hard server cap (2000), no instancing | Lag at territory wars with 100v100 |
+| **Guild Wars 2** | Dynamic overflow instancing — split players into parallel instances | Breaks immersion but keeps performance |
+| **SpatialOS** | Multi-worker functional decomposition (physics worker, AI worker, etc.) | Technically works, extremely complex, company pivoted away |
+
+There are four patterns for handling the hot-zone problem. They aren't mutually exclusive — a production system would likely combine several.
+
+##### Pattern A: Entity-Sharded MultiServer (Overlapping Zones)
+
+Multiple servers share the SAME physical zone, each authoritative over a subset of entities:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                  Castle Siege Zone                        │
+│                                                         │
+│   ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
+│   │  Server A     │  │  Server B     │  │  Server C     │ │
+│   │  Entities     │  │  Entities     │  │  Entities     │ │
+│   │  1-333        │  │  334-666      │  │  667-1000     │ │
+│   │              │  │              │  │              │ │
+│   │  Authoritative│  │  Authoritative│  │  Authoritative│ │
+│   │  over its     │  │  over its     │  │  over its     │ │
+│   │  entities     │  │  entities     │  │  entities     │ │
+│   └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
+│          │                 │                 │          │
+│          └─────────────────┼─────────────────┘          │
+│                            ▼                            │
+│                   Cross-Server                          │
+│                   Replication                           │
+│                   (MultiServer)                         │
+└─────────────────────────────────────────────────────────┘
+```
+
+**How it works:**
+- When a zone becomes "hot" (population exceeds threshold), orchestrator spins up additional servers for the same zone
+- Each server runs a full UE5 world simulation but is authoritative over only its assigned players/NPCs
+- MultiServer Replication handles cross-server visibility: Server A's players can see Server B's players
+- When Player (on Server A) attacks Player (on Server B), the interaction crosses server boundaries via MultiServer's replication channel
+
+**Pros:**
+- Uses UE5's MultiServer Replication (designed for this)
+- Each server handles ~300-333 players — within proven limits
+- Standard CMC, ReplicationGraph, Actor model — no engine hacks
+- Entity assignment can be dynamic (rebalance based on spatial clusters)
+
+**Cons:**
+- Cross-server hit detection adds 1 tick of latency (33ms at 30 Hz)
+- MultiServer Replication plugin is experimental — needs battle-testing
+- Entity handoff complexity when players move between server authority
+- All servers must simulate awareness of ALL 1000 entities for relevancy (read-only mirrors)
+
+**Latency budget for cross-server combat:**
+- Player A (Server A) swings sword → Server A detects hit geometry
+- Server A → MultiServer channel → Server B: "Hit detected on your entity"
+- Server B applies damage, replicates HP update
+- Total added latency: ~1-2 ticks (33-66ms) — acceptable for MMO combat, not for fighting games
+
+##### Pattern B: Functional Decomposition (Movement Server + Combat Server)
+
+Split responsibilities by system — one server processes ALL movement, another processes ALL combat:
+
+```
+                    ┌──────────────────────┐
+                    │   Movement Server     │
+                    │                      │
+                    │ • CMC for all 1000   │
+                    │ • Position authority  │
+                    │ • Client connections  │
+                    │ • Replication         │
+                    │ • Physics/collision   │
+     clients ←UDP→ │                      │ ←internal→ ┌────────────────────┐
+                    │ "Sword swing at       │            │  Combat Server     │
+                    │  tick 4523, pos X,Y,Z"│  ────────► │                    │
+                    │                      │            │ • Damage formulas  │
+                    │ "Apply 147 dmg to    │  ◄──────── │ • Buff/debuff mgmt │
+                    │  entity 502,         │            │ • Stat resolution  │
+                    │  knockback (0,0,500)"│            │ • AoE computation  │
+                    └──────────────────────┘            │ • Cooldown tracking│
+                                                       └────────────────────┘
+```
+
+**How it works:**
+- Movement Server runs all client connections, CMC, physics, replication
+- When an ability activates, Movement Server sends the event + context (caster position, target position, ability ID) to Combat Server
+- Combat Server resolves: target selection (AoE radius), damage formula (stats × modifiers × armor), status effects
+- Combat Server returns results: damage amounts, knockback vectors, status effects to apply
+- Movement Server applies results (deduct HP, apply knockback velocity, replicate to clients)
+
+**Pros:**
+- Movement Server workload is reduced (no combat math)
+- Combat Server can be scaled independently (multiple combat workers)
+- Combat logic can be updated without touching the movement/replication server
+- Clean separation: UE5 handles the "physics" layer, combat server handles the "game rules" layer
+
+**Cons:**
+- **UE5 was NOT designed for this.** `UCharacterMovementComponent`, `AActor`, `UAbilitySystemComponent` all assume single-server authority. Splitting them across processes requires significant custom code.
+- **Tight coupling between systems:** Stuns stop movement. Roots prevent dashing. Knockbacks are velocity changes. Slows reduce `MaxWalkSpeed`. Every combat effect modifies movement state. The Combat Server must send movement-affecting results back to the Movement Server every tick.
+- **State duplication:** Combat Server needs positions for range checks, AoE geometry, line-of-sight. Movement Server must stream all 1000 positions to Combat Server every tick (~36KB/tick at 30Hz = 1.08 MB/s).
+- **Debugging nightmare:** A bug could be in the movement server, combat server, or the serialization between them.
+- **Single point of failure:** The Movement Server is STILL handling 1000 client connections and running CMC for all of them. If the bottleneck is CMC (which it usually is), this doesn't help.
+
+**Critical issue:** The real bottleneck for 1000+ players isn't combat math — it's `CharacterMovementComponent::PerformMovement()` running for every player every tick. Combat calculations are relatively cheap (~1-5μs per hit). CMC is expensive (~50-200μs per player per tick) because it does physics sweeps, floor checks, gravity, step-up detection. Offloading combat doesn't solve the actual bottleneck.
+
+**Verdict:** Functional decomposition sounds elegant but fights UE5's architecture. SpatialOS (Improbable) spent hundreds of millions building multi-worker game engine support and ultimately pivoted away from it. The systems are too tightly coupled for clean separation.
+
+##### Pattern C: SpacetimeDB as Combat Compute Engine
+
+Use SpacetimeDB WASM reducers for damage resolution, stat checks, and game-rule enforcement:
+
+```
+┌──────────────────────┐
+│  UE5 Dedicated Server │
+│                      │
+│  Hit detection:      │     WebSocket (BSATN)
+│  "Sword hit entity   │ ──────────────────────► ┌──────────────────┐
+│   502 at tick 4523"  │                          │  SpacetimeDB 2.0 │
+│                      │                          │                  │
+│  Result applied:     │ ◄────────────────────── │  WASM Reducer:   │
+│  "Entity 502 HP:     │    subscription update   │  resolve_hit()   │
+│   853→706, apply     │                          │                  │
+│   STUNNED 2.0s"      │                          │  • Load attacker │
+│                      │                          │    stats/equip   │
+└──────────────────────┘                          │  • Load defender │
+                                                  │    stats/armor   │
+                                                  │  • Apply formula │
+                                                  │  • Apply buffs   │
+                                                  │  • ACID commit   │
+                                                  │  • Return result │
+                                                  └──────────────────┘
+```
+
+**How it works:**
+- UE5 handles ALL real-time work: movement, physics, hit detection (geometry overlap, ray traces)
+- When a hit is confirmed (sword collider touches target hitbox), UE5 calls a SpacetimeDB reducer: `resolve_hit(attacker_id, defender_id, ability_id, hit_location)`
+- SpacetimeDB reducer loads both players' stats from tables, applies the damage formula, updates HP, applies status effects, logs the event, commits atomically
+- UE5 receives the result via subscription update and applies the visual/gameplay effects
+
+**Pros:**
+- **ACID combat transactions:** No double-damage, no item duplication, no race conditions. SpacetimeDB guarantees atomic state changes.
+- **Live-tunable:** Change damage formulas by publishing a new WASM module — no server restart, no client patch
+- **Perfect audit trail:** Every hit, every damage event logged in event tables with full context
+- **Stats always in-DB:** No state duplication. Player stats, equipment, buffs live in SpacetimeDB tables. The reducer reads the authoritative source every time.
+- **Already benchmarked:** Spike 7 measured ~1-5μs per WASM reducer call. Damage resolution is simple math.
+
+**Cons:**
+- **WebSocket latency:** 1-5ms round-trip over internal network. Not an issue for damage resolution (the visual hit already plays client-side immediately via prediction), but adds 1-2 ticks of delay before HP bar updates.
+- **Not suitable for frame-dependent combat:** If combat requires physics-level precision (projectile trajectory, dodge iframes at 60Hz), the round-trip to SpacetimeDB is too slow. Works fine for tab-target or action-MMO combat where hit detection is done server-side in UE5.
+- **Load under mass combat:** 1000 players all fighting = potentially hundreds of `resolve_hit()` calls per second. SpacetimeDB's single-writer model means these serialize. At ~5μs each, 200 hits/sec = 1ms of total compute — trivial. At 2000 hits/sec = 10ms — still fine.
+- **AoE complexity:** An AoE skill hitting 50 targets = 50 reducer calls or 1 batch reducer. Batch is better.
+
+**What goes to SpacetimeDB vs stays in UE5:**
+
+| Responsibility | Where | Why |
+|---------------|-------|-----|
+| Hit detection (geometry) | UE5 | Needs physics engine, colliders, line-of-sight |
+| Projectile simulation | UE5 | Needs physics, frame-by-frame trajectory |
+| Damage formula | SpacetimeDB | Needs stats/equipment tables, ACID guarantees |
+| Stat/buff resolution | SpacetimeDB | Authoritative source for all character data |
+| HP deduction | SpacetimeDB | ACID — prevents negative HP, race conditions |
+| Status effect application | SpacetimeDB | Track duration, stacking rules, caps |
+| Combat logging | SpacetimeDB | Event tables, queryable audit trail |
+| Death/respawn trigger | SpacetimeDB → UE5 | SpacetimeDB detects HP ≤ 0, notifies server |
+| Visual effects (particle, animation) | UE5 | Client-side prediction on hit, confirmed by server |
+| Knockback velocity | UE5 | Physics vector applied locally, no DB needed |
+
+**Latency flow for a sword attack:**
+1. **T+0ms:** Client swings sword, sends input to UE5 server
+2. **T+0ms:** Client plays swing animation locally (prediction)
+3. **T+16ms:** UE5 server receives input, runs hit detection (physics overlap)
+4. **T+17ms:** Hit confirmed → UE5 calls SpacetimeDB: `resolve_hit(attacker, defender, skill)`
+5. **T+19ms:** SpacetimeDB reducer executes: load stats → calculate 147 damage → update HP → commit
+6. **T+22ms:** UE5 receives subscription update: "Entity 502 HP = 706, STUNNED 2.0s"
+7. **T+22ms:** UE5 replicates to clients: HP bar update, stun visual effect
+8. **T+55ms:** Clients see HP bar change (next client tick)
+
+Total added latency from SpacetimeDB: ~5ms. The player's client already sees the sword swing animation at T+0, so the "feel" of combat is instant. The HP bar updating 55ms later is imperceptible.
+
+##### Pattern D: Aggressive LOD + Graceful Degradation
+
+Instead of throwing more servers at the problem, reduce what each server needs to simulate:
+
+```
+Distance from player    Simulation fidelity        Update rate
+─────────────────────   ─────────────────────────   ───────────
+0-30m (close)           Full CMC + full replication   10-30 Hz
+30-80m (medium)         Simplified movement, no physics  5 Hz
+80-200m (far)           Position-only snapshots         1-2 Hz
+200-500m (distant)      Cluster blobs (10 players → 1 "blob" entity)  0.5 Hz
+500m+ (out of range)    Not simulated, not replicated    0 Hz
+```
+
+**Key technique: Entity LOD (not just visual LOD)**
+- Close players: full `CharacterMovementComponent`, full animation replication, full combat
+- Medium players: simplified movement (linear interpolation, no physics sweeps), basic animation state
+- Far players: position + rotation only, no CMC, no collision, batch-updated
+- Distant players: aggregated into "crowd blobs" — a single replicated actor represents a group
+
+**Impact on server cost:**
+- Without LOD: 1000 players × 200μs CMC = 200ms/tick → impossible at 30 Hz (33ms budget)
+- With LOD: 100 close × 200μs + 200 medium × 50μs + 300 far × 10μs + 400 distant × 0μs = 33ms → just barely fits
+
+**Combined with MultiServer (Pattern A):**
+- 3 servers × 333 players each
+- Each server applies LOD within its entity set
+- 333 players with LOD: 100 close × 200μs + 133 medium × 50μs + 100 far × 10μs = 27.65ms → comfortable at 30 Hz
+
+##### Recommended Hybrid: Patterns A + C + D
+
+The production architecture for 1000+ players in one zone combines three patterns:
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Hot Zone (Siege)                              │
+│                                                                     │
+│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐        │
+│  │  UE5 Server A   │  │  UE5 Server B   │  │  UE5 Server C   │        │
+│  │  ~333 entities  │  │  ~333 entities  │  │  ~333 entities  │        │
+│  │                │  │                │  │                │        │
+│  │  Entity LOD:   │  │  Entity LOD:   │  │  Entity LOD:   │        │
+│  │  100 full CMC  │  │  100 full CMC  │  │  100 full CMC  │        │
+│  │  133 simplified│  │  133 simplified│  │  133 simplified│        │
+│  │  100 pos-only  │  │  100 pos-only  │  │  100 pos-only  │        │
+│  │                │  │                │  │                │        │
+│  │  ↕ MultiServer │  │  ↕ MultiServer │  │  ↕ MultiServer │        │
+│  └───────┬────────┘  └───────┬────────┘  └───────┬────────┘        │
+│          │                   │                   │                  │
+│          └───────────────────┼───────────────────┘                  │
+│                              │ WebSocket (BSATN)                    │
+│                              ▼                                      │
+│                   ┌──────────────────┐                               │
+│                   │  SpacetimeDB 2.0 │                               │
+│                   │                  │                               │
+│                   │  • resolve_hit() │                               │
+│                   │  • apply_buff()  │                               │
+│                   │  • ACID combat   │                               │
+│                   │  • Audit logging │                               │
+│                   │  • Persistence   │                               │
+│                   └──────────────────┘                               │
+└─────────────────────────────────────────────────────────────────────┘
+         ▲                    ▲                    ▲
+    UDP  │               UDP  │               UDP  │
+    ┌────┴────┐         ┌────┴────┐         ┌────┴────┐
+    │ Clients │         │ Clients │         │ Clients │
+    │ 1-333   │         │ 334-666 │         │ 667-1000│
+    └─────────┘         └─────────┘         └─────────┘
+```
+
+**How it works together:**
+
+1. **Normal state:** One UE5 server handles the zone with up to ~300 players
+2. **Crowd threshold:** When zone population exceeds 300, orchestrator spins up Server B and starts entity-sharding (Pattern A)
+3. **Siege event:** At 600+, Server C joins. Each server is authoritative over ~333 players
+4. **Entity LOD (Pattern D):** Each server applies aggressive simulation LOD. Only ~100 nearby entities get full CMC per server. Total game-thread cost stays under 30ms
+5. **Combat via SpacetimeDB (Pattern C):** All three servers send hit events to SpacetimeDB. Damage resolution, stat checks, buff management happen in WASM reducers with ACID guarantees. No combat state duplication between servers.
+6. **Cross-server combat:** Player on Server A attacks Player on Server B → Server A detects hit geometry → calls SpacetimeDB `resolve_hit()` → SpacetimeDB updates defender's HP → Server B receives subscription update → replicates to defender's client. Added latency: ~5-10ms.
+
+**Why this avoids Pattern B's problems:**
+- No functional splitting of UE5 systems — each server runs a standard UE5 game loop
+- CMC stays on the same server as the player's connection — no cross-server movement authority
+- Combat math is offloaded to SpacetimeDB (not another UE5 server) so there's no UE5-to-UE5 synchronization for game rules
+- SpacetimeDB's ACID transactions prevent combat exploits that arise from multi-server state disagreement
+
+**Scaling math:**
+
+| Players | Servers | Entities/server | Full CMC/server | Tick budget used |
+|---------|---------|-----------------|-----------------|-----------------|
+| 300     | 1       | 300             | ~100 (LOD)      | ~25ms (ok)       |
+| 600     | 2       | 300             | ~100 (LOD)      | ~25ms (ok)       |
+| 1000    | 3       | 333             | ~100 (LOD)      | ~28ms (ok)       |
+| 1500    | 5       | 300             | ~100 (LOD)      | ~25ms (ok)       |
+| 2000    | 7       | ~286            | ~100 (LOD)      | ~25ms (ok)       |
+
+**Theoretical ceiling:** Limited by cross-server replication bandwidth, not compute. Each server must be aware of all ~1000 entities (read-only mirrors) for relevancy. At 1000 entities × ~40 bytes position data × 10 Hz average = ~400KB/s per server — manageable over internal network.
+
+**What breaks this model:**
+- **> 5000 players in one spot:** Cross-server replication becomes the bottleneck. Each server mirrors ~5000 entities. Consider Eve Online-style time dilation here.
+- **Physics-heavy combat:** If every ability involves full physics simulation (ragdolls, destructibles), the CMC budget gets saturated even with LOD. Simplify physics for dense scenarios.
+- **MultiServer plugin stability:** The plugin is experimental. It may not handle dynamic entity reassignment smoothly. Needs thorough stress-testing.
+
 #### SpacetimeDB Integration Points
 
 The dedicated server talks to SpacetimeDB via the C++ or Rust SDK:
