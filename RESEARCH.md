@@ -988,16 +988,118 @@ LogNyx: Sidecar: Body 1 deleted
 | **AI steering** | Not included | Physics-aware RVO avoidance |
 | **Scale** | Single instance | Multiple sidecar instances per zone |
 
-### MultiServer Replication Plugin (Evaluated, Deferred)
+### MultiServer Replication Plugin — Deep Dive
 
-The UE5.7 `MultiServerReplication` plugin (experimental, by Epic) was evaluated for this spike:
+The UE5.7 `MultiServerReplication` plugin (experimental, by Epic) was evaluated for Spike 8 and given a full source-code deep dive for Option C viability. The plugin lives at `Engine/Plugins/Runtime/MultiServerReplication/` and consists of two modules: `MultiServerReplication` and `MultiServerConfiguration`.
 
-- **What it does:** Connects multiple UE5 dedicated servers via beacons + proxy servers that aggregate actor replication to clients
-- **Key classes:** `UMultiServerNode`, `AMultiServerBeaconClient`, `UProxyNetDriver`
-- **Why deferred:** Assumes standard UE5 networking (NetDriver, actor replication, RPCs). Nyx uses SpacetimeDB for all state — no UE5 replication happening. The plugin would require either:
-  - Dual networking stacks (SpacetimeDB + UE5 replication) — complex
-  - Architecture reversal (UE5 servers primary, SpacetimeDB persistence only) — major refactor
-- **When relevant:** If Nyx later needs multiple physics sidecar zones with seamless player migration, MultiServer Replication could coordinate the sidecar fleet. But this is a Phase 2+ concern, not Phase 0.
+#### Architecture
+
+Two subsystems work together:
+
+1. **Proxy Server (`UProxyNetDriver`)** — A transparent network relay between game clients and multiple backend UE5 dedicated servers. Clients connect to the proxy as if it were a normal game server. The proxy opens **one connection per backend server** for each client.
+2. **Beacon Mesh (`UMultiServerNode`)** — Peer-to-peer server-to-server communication via `AMultiServerBeaconClient` subclasses. Used for level visibility sync and custom cross-server RPCs.
+
+**Key classes:** `UProxyNetDriver`, `UProxyBackendNetDriver`, `ANoPawnPlayerController`, `UMultiServerNode`, `AMultiServerBeaconClient`, `AMultiServerBeaconHost`
+
+**Topology:** Star — one proxy, N backend game servers. Server count is **fixed at launch** (no dynamic add/remove). Config via command-line:
+- `-ProxyGameServers=IP1:Port1,IP2:Port2` — register backend servers
+- `-ProxyClientPrimaryGameServer=N|random` — which server is primary for new clients
+- `-ProxyCyclePrimaryGameServer` — round-robin primary assignment
+- `-MultiServerPeers=`, `-MultiServerNumServers=` — for beacon mesh setup
+
+#### Primary vs. Non-Primary Server Connections
+
+For each client connected to the proxy:
+
+| | Primary Server | Non-Primary Server(s) |
+|---|---|---|
+| **Player controller** | Full game `APlayerController` + pawn | `ANoPawnPlayerController` (no pawn, no presence) |
+| **Actor state replication** | Full (transforms, properties) | **Full** — standard UE relevancy applies |
+| **Server → Client RPCs** | Forwarded to client | **Dropped** by proxy |
+| **Client → Server RPCs** | Forwarded to server | **Not routed** — proxy only sends to primary |
+| **Authority** | `ROLE_Authority` for its own actors | `ROLE_Authority` for its own actors |
+
+The proxy strips `ROLE_Authority` from any locally-spawned actors and replicates all actors from backend servers as `ROLE_SimulatedProxy` / `ROLE_AutonomousProxy` with role swapping enabled.
+
+#### Border Relevancy — How Cross-Server Visibility Works
+
+**There is no explicit "overlap zone" or "border region" concept.** Cross-server visibility is entirely emergent from UE's standard relevancy system:
+
+1. The proxy periodically sends the player's position to each non-primary server via `ServerSetViewTargetPosition(FVector)` RPC.
+2. The non-primary server's `ANoPawnPlayerController` **literally moves itself** to that position:
+   ```cpp
+   void ANoPawnPlayerController::ServerSetViewTargetPosition_Implementation(FVector ViewTargetPos)
+   {
+       AActor* Actor = Cast<AActor>(this);
+       Actor->SetActorLocation(ViewTargetPos);
+   }
+   ```
+3. Standard UE relevancy (`AActor::IsNetRelevantFor()` + net cull distance) determines which actors on each server are relevant to that virtual viewpoint.
+4. All relevant actors are replicated to the proxy, which aggregates state from all servers and replicates to the client.
+
+The "overlap range" is therefore simply **each actor's net cull distance**. If a player at a border is within the net cull distance of actors on both Server A and Server B, both servers replicate those actors, and the client sees all of them.
+
+**Rate limiting:** The position sync interval is controlled by `net.proxy.NonPrimarySetViewTargetInterval` (default **1.0 second**). Non-primary servers can see the player position up to 1 second stale, creating a latency zone at borders. For action gameplay, this should be tuned down (e.g., 0.1s), at the cost of increased non-primary server load.
+
+**Proxy-side position sync:** Since the proxy doesn't simulate movement, it manually syncs pawn positions from `ReplicatedMovement` for its own relevancy calculations:
+```cpp
+// PrepareStateForRelevancy() — called before each relevancy pass
+for (const auto& ObjectInfo : GetNetworkObjectList().GetAllObjects())
+{
+    APawn* Pawn = Cast<APawn>(ObjectInfo->Actor);
+    if (!Pawn) continue;
+    Pawn->SetActorLocation(Pawn->GetReplicatedMovement().Location);
+}
+```
+
+#### Cross-Server Interaction — Critical Limitation
+
+**RPCs only flow through the primary server.** A player on Server A cannot directly interact (attack, trade, pick up) with an actor owned by Server B via this plugin alone:
+
+- **Client → Server:** Proxy forwards RPCs to the primary server only. No mechanism to target a non-primary server.
+- **Server → Client:** Proxy drops RPCs from non-primary servers.
+
+Cross-server interaction requires building custom server-to-server RPCs via `AMultiServerBeaconClient` subclasses on the beacon mesh. The plugin provides the plumbing (beacon connections, level visibility sync) but **not** the game-level cross-server logic.
+
+#### Player Migration
+
+The plugin does **not trigger migration itself**. Game servers decide when to migrate a player (e.g., player crosses a spatial boundary). The proxy reacts by observing player controller swaps:
+
+- Route gets `ANoPawnPlayerController` → was formerly primary, now becoming non-primary
+- Route gets a game `APlayerController` → was formerly non-primary, now becoming primary
+
+The migration state machine handles **order-independent events** — the two controller changes can arrive in either order:
+```cpp
+struct FPlayerControllerReassignment
+{
+    bool bReceivedNoPawnPlayerController = false;
+    bool bReceivedGamePlayerController = false;
+    uint64 PreviousClientHandshakeId = 0;
+    uint64 ClientHandshakeId = 0;
+};
+```
+
+Actors closed with `EChannelCloseReason::Migrated` are **preserved on the proxy** (not destroyed), enabling seamless re-use when re-replicated from the destination server. Shared `NetGUIDCache` across all backends ensures the same actor object is reused.
+
+#### Level Streaming Integration
+
+The beacon system syncs level visibility between servers — each server knows which streaming levels the other has loaded, via `ServerUpdateLevelVisibility` RPCs in `AMultiServerBeaconClient::OnConnected()`. Dynamic level add/remove events are also tracked.
+
+**No World Partition or DataLayer integration** exists in the plugin. No references to `UWorldPartition`, `UDataLayerInstance`, or `FWorldPartitionStreamingSource` anywhere in the source.
+
+#### Implications for Nyx Option C
+
+| Capability | Assessment |
+|---|---|
+| **Visual border seamlessness** | **Yes** — actors from neighboring servers render correctly within net cull distance |
+| **Interaction at borders** | **No** — requires custom beacon RPC layer for cross-server combat/trade |
+| **Migration trigger** | **Manual** — game must implement spatial boundary detection and PC swap |
+| **Auto-scaling** | **No** — server count fixed at launch, no dynamic add/remove |
+| **Spatial partitioning** | **No** — the plugin doesn't partition the world; game must assign zones to servers |
+| **1000 players in one area** | **No** — doesn't change the ~100-player-per-UE5-server ceiling; stitches multiple zones together |
+| **World Partition** | **No integration** — level streaming only, no WP streaming sources |
+
+**Bottom line:** The plugin is viable for stitching multiple UE5 servers (~100 players each) into a seamless open world with visual continuity at borders. But it requires significant custom work for cross-server interaction, migration triggers, and spatial zone assignment. It does **not** solve the 1000-players-in-one-area problem — it distributes players across servers, with each server still capped at ~100.
 
 ### Deliverable
 - [x] Server `physics_body` table + spawn/update/cleanup/reset reducers
@@ -1005,7 +1107,7 @@ The UE5.7 `MultiServerReplication` plugin (experimental, by Epic) was evaluated 
 - [x] Euler-integration physics simulation with gravity
 - [x] Console commands: `Nyx.StartSidecar`, `Nyx.StopSidecar`, `Nyx.Shoot`, `Nyx.PhysicsReset`
 - [x] Architecture validated: same communication pattern works for separate process
-- [x] MultiServer Replication plugin evaluated and deferred
+- [x] MultiServer Replication plugin evaluated — full source-code deep dive completed (border relevancy, migration, cross-server RPC limitations)
 
 ### Gotchas
 
@@ -1124,7 +1226,7 @@ Client ──UE5 NetDriver──► UE5 Dedicated Server (Chaos physics, movemen
 - **SpacetimeDB** acts as the persistence layer and cross-server state coordinator (accounts, inventory, world state)
 - **Max capacity:** UE5 dedicated servers handle ~100 players per instance. Multiple servers with seamless travel for open world.
 - **Pros:** Leverages UE5's mature networking stack, Chaos physics, AI, all built-in. SpacetimeDB provides the MMO persistence layer.
-- **Cons:** Requires UE5 dedicated server infrastructure. SpacetimeDB becomes a database, not the game server. Loses SpacetimeDB's reducer-as-game-logic paradigm. MultiServer Replication plugin (evaluated in Spike 8) becomes relevant.
+- **Cons:** Requires UE5 dedicated server infrastructure. SpacetimeDB becomes a database, not the game server. Loses SpacetimeDB's reducer-as-game-logic paradigm. MultiServer Replication plugin becomes relevant — deep dive (Spike 8 section) shows it provides visual border seamlessness but requires custom beacon RPCs for cross-server interaction, manual migration triggers, and has no auto-scaling or World Partition integration.
 
 ### What Spike 9 Will Benchmark
 
@@ -1191,7 +1293,7 @@ The spike will produce the benchmark data needed to make this decision with conf
 | Week 2 | Spike 5 (Spatial) ✅ | **DONE** — chunk-based subscriptions working with 10K entities |
 | Week 2 | Spike 6 (Prediction) ✅ | **DONE** — prediction + reconciliation verified, 0 cm error |
 | Week 2–3 | Spike 7 (WASM Perf) ✅ | **DONE** — 218 reducers/sec, 1000 entities/tick at 100ms, 512MB memory OK |
-| Week 3 | Spike 8 (Sidecar) ✅ | **DONE** — UE5 sidecar architecture validated, MultiServer Replication evaluated |
+| Week 3 | Spike 8 (Sidecar) ✅ | **DONE** — UE5 sidecar architecture validated, MultiServer Replication deep dive completed |
 | Week 3–4 | Spike 9 (Scalability) | **PENDING** — Batched throughput, multi-client contention, fan-out stress, sidecar capacity, UDP relay prototype |
 
 **Total estimated time: ~4 weeks**
