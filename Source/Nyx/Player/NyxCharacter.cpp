@@ -9,7 +9,10 @@
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
+#include "InputMappingContext.h"
+#include "InputAction.h"
 #include "Net/UnrealNetwork.h"
+#include "UObject/ConstructorHelpers.h"
 
 ANyxCharacter::ANyxCharacter()
 {
@@ -46,6 +49,52 @@ ANyxCharacter::ANyxCharacter()
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	Camera->SetupAttachment(SpringArm, USpringArmComponent::SocketName);
 	Camera->bUsePawnControlRotation = false;
+
+	// ──── Mannequin mesh + animation ────
+	static ConstructorHelpers::FObjectFinder<USkeletalMesh> MeshFinder(
+		TEXT("/Game/Characters/Mannequins/Meshes/SK_Mannequin"));
+	if (MeshFinder.Succeeded())
+	{
+		GetMesh()->SetSkeletalMesh(MeshFinder.Object);
+		GetMesh()->SetRelativeLocation(FVector(0.f, 0.f, -96.f));
+		GetMesh()->SetRelativeRotation(FRotator(0.f, -90.f, 0.f));
+	}
+
+	static ConstructorHelpers::FClassFinder<UAnimInstance> AnimFinder(
+		TEXT("/Game/Characters/Mannequins/Anims/Unarmed/ABP_Unarmed"));
+	if (AnimFinder.Succeeded())
+	{
+		GetMesh()->SetAnimInstanceClass(AnimFinder.Class);
+	}
+
+	// ──── Enhanced Input assets ────
+	static ConstructorHelpers::FObjectFinder<UInputMappingContext> IMCFinder(
+		TEXT("/Game/Input/IMC_Default"));
+	if (IMCFinder.Succeeded())
+	{
+		DefaultMappingContext = IMCFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<UInputAction> MoveFinder(
+		TEXT("/Game/Input/Actions/IA_Move"));
+	if (MoveFinder.Succeeded())
+	{
+		MoveAction = MoveFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<UInputAction> LookFinder(
+		TEXT("/Game/Input/Actions/IA_Look"));
+	if (LookFinder.Succeeded())
+	{
+		LookAction = LookFinder.Object;
+	}
+
+	static ConstructorHelpers::FObjectFinder<UInputAction> JumpFinder(
+		TEXT("/Game/Input/Actions/IA_Jump"));
+	if (JumpFinder.Succeeded())
+	{
+		JumpAction = JumpFinder.Object;
+	}
 }
 
 void ANyxCharacter::BeginPlay()
