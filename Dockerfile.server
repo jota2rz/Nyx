@@ -1,0 +1,73 @@
+# Nyx MMO — Linux Dedicated Server
+#
+# Build context: project root (C:\UE\Nyx)
+#
+# Prerequisites (built on Windows, cross-compiled for Linux):
+#   - Binaries/Linux/NyxServer          (ELF binary)
+#   - Binaries/Linux/libEOSSDK-Linux-Shipping.so
+#   - Saved/Cooked/LinuxServer/          (cooked content)
+#   - Config/                            (project ini files)
+#
+# Build:
+#   docker build -f Dockerfile.server -t nyx-server .
+#
+# Run standalone:
+#   docker run --rm -p 7777:7777/udp nyx-server
+
+FROM ubuntu:22.04
+
+# Prevent interactive prompts during install
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Runtime dependencies for UE5 dedicated server
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libfreetype6 \
+    libfontconfig1 \
+    libc6 \
+    libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/nyx
+
+# ── Binary + shared libs ──────────────────────────────────────────
+COPY Binaries/Linux/NyxServer           Nyx/Binaries/Linux/
+COPY Binaries/Linux/libEOSSDK-Linux-Shipping.so Nyx/Binaries/Linux/
+
+# ── Cooked project content ────────────────────────────────────────
+COPY Saved/Cooked/LinuxServer/Nyx/Content/  Nyx/Content/
+COPY Saved/Cooked/LinuxServer/Nyx/Metadata/ Nyx/Metadata/
+
+# ── Cooked engine content + plugins ───────────────────────────────
+COPY Saved/Cooked/LinuxServer/Engine/       Engine/
+
+# ── Project plugin descriptors ────────────────────────────────────
+COPY Saved/Cooked/LinuxServer/Nyx/Plugins/ Nyx/Plugins/
+
+# ── Project configuration ─────────────────────────────────────────
+COPY Config/ Nyx/Config/
+
+# ── Project descriptor (required by engine to locate project) ─────
+COPY Nyx.uproject Nyx/
+
+# Make the binary executable
+RUN chmod +x Nyx/Binaries/Linux/NyxServer
+
+# UE5 refuses to run as root — create a non-root user
+RUN groupadd -r nyx && useradd -r -g nyx -d /opt/nyx nyx \
+    && chown -R nyx:nyx /opt/nyx
+USER nyx
+
+# Game port (UDP)
+EXPOSE 7777/udp
+
+# Environment variables for runtime configuration
+ENV NYX_SPACETIME_HOST=spacetimedb:3000
+ENV NYX_SPACETIME_DB=nyx
+ENV NYX_PORT=7777
+
+ENTRYPOINT ["./Nyx/Binaries/Linux/NyxServer"]
+CMD ["Nyx", \
+     "-server", "-log", "-unattended", "-nosplash", "-nosound", "-NullRHI", \
+     "-port=7777", \
+     "-SpacetimeHost=spacetimedb:3000"]

@@ -15,6 +15,19 @@
 void UNyxGameInstance::Init()
 {
 	Super::Init();
+
+	// Allow command-line overrides for containerized / headless deployment
+	FString CmdHost;
+	if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeHost="), CmdHost, false))
+	{
+		SpacetimeDBHost = CmdHost;
+	}
+	FString CmdDb;
+	if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeDb="), CmdDb, false))
+	{
+		SpacetimeDBDatabaseName = CmdDb;
+	}
+
 	UE_LOG(LogNyx, Log, TEXT("NyxGameInstance initialized"));
 	UE_LOG(LogNyx, Log, TEXT("  SpacetimeDB Host: %s"), *SpacetimeDBHost);
 	UE_LOG(LogNyx, Log, TEXT("  Database: %s"), *SpacetimeDBDatabaseName);

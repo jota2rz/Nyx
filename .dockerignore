@@ -1,10 +1,19 @@
-# Don't send these to Docker daemon
-Binaries/
-DerivedDataCache/
-Intermediate/
-Saved/
-Content/
-.vs/
-*.sln
-*.uproject
-build_output.txt
+# Nyx Docker — exclude everything, then whitelist server files
+*
+
+# Linux binary + shared libs
+!Binaries/Linux/NyxServer
+!Binaries/Linux/libEOSSDK-Linux-Shipping.so
+
+# Cooked content for LinuxServer
+!Saved/Cooked/LinuxServer/
+
+# Project configuration
+!Config/
+
+# Project descriptor
+!Nyx.uproject
+
+# Exclude debug symbols (huge, not needed at runtime)
+Binaries/Linux/NyxServer.debug
+Binaries/Linux/NyxServer.sym

@@ -4,13 +4,17 @@
 #   SpacetimeDB (persistence/combat compute) + UE5 Dedicated Servers (real-time gameplay)
 #
 # Usage:
-#   docker compose up -d              # Start SpacetimeDB
-#   docker compose logs -f spacetimedb # Watch logs
+#   docker compose up -d              # Start full stack
+#   docker compose logs -f spacetimedb # Watch SpacetimeDB logs
+#   docker compose logs -f nyx-server  # Watch game server logs
 #   docker compose down               # Stop everything
 #
-# After starting, publish the module:
+# First-time setup (after SpacetimeDB is up):
 #   cd server/nyx-server/spacetimedb
 #   spacetime publish nyx --clear-database
+#
+# Build the server image:
+#   docker compose build nyx-server
 
 services:
   # ── SpacetimeDB 2.0 ─────────────────────────────────────────────
@@ -28,12 +32,26 @@ services:
       - SPACETIMEDB_DATA_DIR=/stdb
     restart: unless-stopped
     healthcheck:
-      # SpacetimeDB doesn't have a health endpoint, so check if port is open
-      test: ["CMD-SHELL", "nc -z localhost 3000 || exit 1"]
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/v1/ping"]
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
+
+  # ── UE5 Dedicated Server ────────────────────────────────────────
+  # Real-time gameplay: physics, movement replication, client connections.
+  # Cross-compiled from Windows → Linux, cooked for LinuxServer platform.
+  nyx-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: nyx-server
+    ports:
+      - "7777:7777/udp"  # Game client connections
+    depends_on:
+      spacetimedb:
+        condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   stdb-data:
