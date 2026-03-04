@@ -5,7 +5,7 @@
 # Prerequisites (built on Windows, cross-compiled for Linux):
 #   - Binaries/Linux/NyxServer          (ELF binary)
 #   - Binaries/Linux/libEOSSDK-Linux-Shipping.so
-#   - Saved/Cooked/LinuxServer/          (cooked content)
+#   - Saved/Cooked/LinuxServer/          (cooked content + engine runtime files)
 #   - Config/                            (project ini files)
 #
 # Build:
@@ -26,36 +26,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1 \
     libc6 \
     libstdc++6 \
+    tini \
     && rm -rf /var/lib/apt/lists/*
+
+# UE5 refuses to run as root — create a non-root user BEFORE copying files
+RUN groupadd -r nyx && useradd -r -g nyx -d /opt/nyx -s /usr/sbin/nologin nyx
 
 WORKDIR /opt/nyx
 
 # ── Binary + shared libs ──────────────────────────────────────────
-COPY Binaries/Linux/NyxServer           Nyx/Binaries/Linux/
-COPY Binaries/Linux/libEOSSDK-Linux-Shipping.so Nyx/Binaries/Linux/
+COPY --chown=nyx:nyx Binaries/Linux/NyxServer           Nyx/Binaries/Linux/
+COPY --chown=nyx:nyx Binaries/Linux/libEOSSDK-Linux-Shipping.so Nyx/Binaries/Linux/
 
 # ── Cooked project content ────────────────────────────────────────
-COPY Saved/Cooked/LinuxServer/Nyx/Content/  Nyx/Content/
-COPY Saved/Cooked/LinuxServer/Nyx/Metadata/ Nyx/Metadata/
+COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Nyx/Content/  Nyx/Content/
+COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Nyx/Metadata/ Nyx/Metadata/
 
 # ── Cooked engine content + plugins ───────────────────────────────
-COPY Saved/Cooked/LinuxServer/Engine/       Engine/
+COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Engine/       Engine/
 
 # ── Project plugin descriptors ────────────────────────────────────
-COPY Saved/Cooked/LinuxServer/Nyx/Plugins/ Nyx/Plugins/
+COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Nyx/Plugins/ Nyx/Plugins/
 
 # ── Project configuration ─────────────────────────────────────────
-COPY Config/ Nyx/Config/
+COPY --chown=nyx:nyx Config/ Nyx/Config/
 
 # ── Project descriptor (required by engine to locate project) ─────
-COPY Nyx.uproject Nyx/
+COPY --chown=nyx:nyx Nyx.uproject Nyx/
 
-# Make the binary executable
-RUN chmod +x Nyx/Binaries/Linux/NyxServer
+# Make the binary executable and prune ICU locales (keep only English)
+RUN chmod +x Nyx/Binaries/Linux/NyxServer \
+    && find Engine/Content/Internationalization -mindepth 1 -maxdepth 1 \
+       -type d ! -name 'en' ! -name 'icudt*' -exec rm -rf {} +
 
-# UE5 refuses to run as root — create a non-root user
-RUN groupadd -r nyx && useradd -r -g nyx -d /opt/nyx nyx \
-    && chown -R nyx:nyx /opt/nyx
 USER nyx
 
 # Game port (UDP)
@@ -66,7 +69,8 @@ ENV NYX_SPACETIME_HOST=spacetimedb:3000
 ENV NYX_SPACETIME_DB=nyx
 ENV NYX_PORT=7777
 
-ENTRYPOINT ["./Nyx/Binaries/Linux/NyxServer"]
+# tini handles PID 1 duties (signal forwarding, zombie reaping)
+ENTRYPOINT ["/usr/bin/tini", "--", "./Nyx/Binaries/Linux/NyxServer"]
 CMD ["Nyx", \
      "-server", "-log", "-unattended", "-nosplash", "-nosound", "-NullRHI", \
      "-port=7777", \

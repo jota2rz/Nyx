@@ -29,20 +29,21 @@ void ANyxGameMode::StartPlay()
 		if (ServerSub)
 		{
 			// Parse config from command-line overrides or use defaults
+			// bShouldStopOnSeparator=false so host:port values aren't truncated at the colon
 			FString CmdHost, CmdDB, CmdZone, CmdServerId;
-			if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeHost="), CmdHost))
+			if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeHost="), CmdHost, false))
 			{
 				SpacetimeDBHost = CmdHost;
 			}
-			if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeDB="), CmdDB))
+			if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeDB="), CmdDB, false))
 			{
 				DatabaseName = CmdDB;
 			}
-			if (FParse::Value(FCommandLine::Get(), TEXT("-ZoneId="), CmdZone))
+			if (FParse::Value(FCommandLine::Get(), TEXT("-ZoneId="), CmdZone, false))
 			{
 				ZoneId = CmdZone;
 			}
-			if (FParse::Value(FCommandLine::Get(), TEXT("-ServerId="), CmdServerId))
+			if (FParse::Value(FCommandLine::Get(), TEXT("-ServerId="), CmdServerId, false))
 			{
 				DedicatedServerId = CmdServerId;
 			}
