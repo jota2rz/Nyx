@@ -3752,6 +3752,297 @@ Tested with PIE "Play As Listen Server" + 2 players. SpacetimeDB Docker on port 
 
 ---
 
+## Phase 1: Dedicated Server Build & Docker Containerization ✅
+
+**Goal:** Build a standalone Linux dedicated server from the UE5.7 project, containerize it with Docker, and run it alongside SpacetimeDB in Docker Compose.
+
+**Status:** COMPLETE — Both containers starting, "Game Engine Initialized" confirmed.
+
+**Commit:** `fb757bc` (Docker containerization: LinuxServer in Docker Compose)
+
+---
+
+### Step 1: Windows Dedicated Server Build ✅
+
+Built `NyxServer.exe` (Win64, Development) using the `NyxServer.Target.cs` created in Spike 11.
+
+```
+NyxServer.exe — 266 MB (Win64, Development, monolithic)
+```
+
+**Build command:**
+```powershell
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Build\BatchFiles\Build.bat" `
+    NyxServer Win64 Development "C:\UE\Nyx\Nyx.uproject" -waitmutex
+```
+
+**Third-party engine patches required** (inside `C:\Program Files\Epic Games\UE_5.7\`):
+
+| Library | Issue | Fix |
+|---------|-------|-----|
+| **msdfgen** v1.12.1 | Missing source files (binary-only UE install has no `.cpp` files) | Downloaded 60 core source files from msdfgen GitHub release |
+| **AHEasing** | `double` implicit conversion warnings (treated as errors) | Forced `float` casts, `static` linkage, `#pragma` suppression |
+| **mimalloc** | Missing `mi_ext_set_win32_allocators` symbol (linker error) | Added a no-op stub function |
+| **SSEMathFun** | Missing header file | Downloaded `sse_mathfun.h`; added `f` suffixes on float constants |
+
+> **Note:** These patches are in the engine install directory, NOT in the project repo. If the engine is reinstalled or updated, they must be reapplied. Backup the patched files.
+
+**Compile warnings remaining (non-fatal, suppressed with pragmas):**
+- msdfgen: `-Wshadow` warnings in edge-coloring and equation-solver code
+- AHEasing: Implicit `double → float` truncation in easing functions
+- SSEMathFun: `double → float` truncation in SSE constant definitions
+
+---
+
+### Step 2: Windows Content Cook ✅
+
+Cooked content for `WindowsServer` platform using UnrealEditor-Cmd:
+
+```powershell
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+    "C:\UE\Nyx\Nyx.uproject" -run=cook -targetplatform=WindowsServer -unattended
+```
+
+**Result:** 1144 files, 0 errors, 0 warnings. Output at `Saved/Cooked/WindowsServer/`.
+
+---
+
+### Step 3: Windows Server Launch Test ✅
+
+```powershell
+& "C:\UE\Nyx\Binaries\Win64\NyxServer.exe" Nyx -server -log -unattended -nosplash -nosound
+```
+
+Server started successfully — "Game Engine Initialized", all Nyx subsystems loaded.
+
+---
+
+### Step 4: Linux Cross-Compilation ✅
+
+**Toolchain:** `v26_clang-20.1.8-rockylinux8` installed at `C:\UnrealToolchains\`
+
+**Environment setup (required for every new terminal):**
+```powershell
+$env:LINUX_MULTIARCH_ROOT = "C:\UnrealToolchains\v26_clang-20.1.8-rockylinux8\"
+```
+
+**Build command:**
+```powershell
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Build\BatchFiles\Build.bat" `
+    NyxServer Linux Development "C:\UE\Nyx\Nyx.uproject" -waitmutex
+```
+
+**Additional clang-specific fixes:**
+- SSEMathFun: Casts for clang's stricter `-Wdouble-promotion` enforcement
+- AHEasing: `#pragma clang diagnostic ignored` for float truncation
+- msdfgen: `#pragma clang diagnostic ignored "-Wshadow"` in affected files
+
+**Result:**
+```
+NyxServer       — 250 MB (Linux ELF, Development, monolithic)
+NyxServer.debug — 1.1 GB (debug symbols, excluded from Docker)
+NyxServer.sym   — separate symbol file (excluded from Docker)
+```
+
+> **Important:** `InstalledBuild.txt` must be deleted from the engine root for Server target compilation to work with a binary/launcher UE install. The Launcher may recreate it — restore from `.bak` if it needs to update the engine.
+
+---
+
+### Step 5: Linux Content Cook ✅
+
+```powershell
+& "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor-Cmd.exe" `
+    "C:\UE\Nyx\Nyx.uproject" -run=cook -targetplatform=LinuxServer -unattended
+```
+
+**Result:** 574 packages, 1144 files, 0 errors, 0 warnings. Output at `Saved/Cooked/LinuxServer/`.
+
+---
+
+### Step 6: Docker Containerization ✅
+
+#### Architecture
+
+```
+Docker Compose
+├── spacetimedb (clockworklabs/spacetime:latest)
+│   ├── Port 3000/tcp — WebSocket (BSATN)
+│   ├── Volume: stdb-data:/stdb
+│   └── Healthcheck: curl -sf http://localhost:3000/v1/ping
+│
+└── nyx-server (Dockerfile.server, ubuntu:22.04)
+    ├── Port 7777/udp — Game client connections
+    ├── depends_on: spacetimedb (service_healthy)
+    └── CMD: NyxServer Nyx -server -log -NullRHI -port=7777 ...
+```
+
+#### Docker Image Contents
+
+| Layer | Size | Description |
+|-------|------|-------------|
+| `NyxServer` binary | 251 MB | Monolithic Linux ELF (Development) |
+| `libEOSSDK-Linux-Shipping.so` | 26 MB | Epic Online Services shared library |
+| Engine content (cooked) | 20 MB | Cooked engine assets (shaders, materials) |
+| Engine ICU data | 110 MB | Internationalization (17553 files) |
+| Engine plugin assets (cooked) | 108 MB | Cooked content for engine plugins |
+| Engine plugin descriptors | 0.7 MB | 775 `.uplugin` JSON files |
+| Engine config | 1 MB | 85 `.ini` files (DataDrivenPlatformInfo, etc.) |
+| Project content (cooked) | 2.4 MB | Game-specific cooked assets |
+| Project metadata | 3.5 MB | Asset registry, shader library |
+| Ubuntu base + runtime deps | ~104 MB | libc6, libstdc++6, libfreetype6, etc. |
+| `chown -R` layer | **605 MB** | File ownership duplication (see optimizations below) |
+| **Total image** | **1.88 GB** | |
+
+#### Crashes Fixed During Containerization
+
+| # | Error | Root Cause | Fix |
+|---|-------|------------|-----|
+| 1 | "Refusing to run with root privileges" | UE5 forbids running as root | `groupadd/useradd` non-root `nyx` user |
+| 2 | "Failed to open descriptor file ../../../Nyx/Nyx.uproject" | Binary expects project file at relative path | `COPY Nyx.uproject Nyx/` |
+| 3 | "ICU data directory was not discovered" | Engine needs ICU data for text/locale | Copy `Engine/Content/Internationalization/` from engine install (110 MB) |
+| 4 | `Assertion failed: IsValid(Platform)` in DataDrivenShaderPlatformInfo | Chassis Debug Draw tries to init shader platform | Add `-NullRHI` flag (no GPU in container); copy `Engine/Config/` from engine install |
+| 5 | "Unable to find information about module 'EnhancedInput' in plugin 'EnhancedInput'" | Engine needs `.uplugin` descriptors even for monolithic builds | Copy 775 `.uplugin` files from engine install |
+
+#### Key Decisions
+
+- **`-NullRHI` flag:** Required for headless server in Docker — no GPU available in container. Disables all rendering.
+- **Non-root user:** UE5 flatly refuses to run as root. Created `nyx` user via Dockerfile.
+- **Monolithic build:** All modules statically linked into single binary, but engine still needs `.uplugin` descriptors at runtime for module metadata lookup.
+- **Container directory layout:** `/opt/nyx/Nyx/` (project) + `/opt/nyx/Engine/` (engine) — binary at `Nyx/Binaries/Linux/NyxServer` resolves `../../../` to `/opt/nyx/`.
+
+#### Command-Line Overrides
+
+Added to `NyxGameInstance::Init()` for containerized deployment:
+```cpp
+FString CmdHost;
+if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeHost="), CmdHost, false))
+    SpacetimeDBHost = CmdHost;
+FString CmdDb;
+if (FParse::Value(FCommandLine::Get(), TEXT("-SpacetimeDb="), CmdDb, false))
+    SpacetimeDBDatabaseName = CmdDb;
+```
+
+> **Note:** `bShouldStopOnSeparator=false` (4th param) is required because `host:port` contains a colon which `FParse::Value` treats as a separator by default.
+
+#### Non-Critical Warnings in Server Logs
+
+These appear during startup but don't affect functionality:
+- `LogAssetRegistry: Error: Failed to load premade asset registry` — No pak file (loose cooking)
+- `LogNNERuntimeORT: Error: Failed to find libonnxruntime.so.1.20` — ONNX runtime not needed for server
+- Various `LogSlateStyle: Warning` — UI styles missing (server has no UI)
+
+---
+
+### RunUAT Staging — Not Available for Binary Engine Installs
+
+Attempted to use `RunUAT.bat BuildCookRun -skipcook -stage -pak` to properly stage server files, but **AutomationTool failed to compile** because `BuildUAT.bat` doesn't exist in the binary/launcher engine distribution. Staging was done manually instead (copying engine files from install directory).
+
+---
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `Dockerfile.server` | New — Linux dedicated server container definition |
+| `.dockerignore` | Updated — whitelist pattern for server files only |
+| `docker-compose.yml` | Added `nyx-server` service alongside SpacetimeDB |
+| `Source/Nyx/Core/NyxGameInstance.cpp` | Added `-SpacetimeHost=` and `-SpacetimeDb=` cmd-line overrides |
+
+---
+
+### Future Optimizations
+
+#### 1. Docker Image Size Reduction (1.88 GB → estimated ~800 MB)
+
+**`chown -R` layer duplication (saves ~605 MB):**
+The `RUN chown -R nyx:nyx /opt/nyx` creates a 605 MB layer because Docker copy-on-write duplicates every file. Fix with `--chown` on COPY directives:
+```dockerfile
+COPY --chown=nyx:nyx Binaries/Linux/NyxServer Nyx/Binaries/Linux/
+# ... etc for all COPY lines
+```
+Then move `groupadd/useradd` BEFORE the COPY lines and remove the `chown -R` entirely.
+
+**ICU data reduction (saves ~100 MB):**
+The full ICU dataset (17553 files, 110 MB) includes every locale. A dedicated server likely only needs `en` (or a small subset). Strip unused locales:
+```dockerfile
+RUN find Engine/Content/Internationalization -mindepth 1 -maxdepth 1 \
+    ! -name 'en' ! -name 'icudt*' -type d -exec rm -rf {} +
+```
+Or build a custom ICU data file with only required locales.
+
+**Engine plugin content pruning (saves ~50-100 MB):**
+Not all 775 engine plugins are used. The cooked plugin content (108 MB) includes assets for plugins like Paper2D, HairStrands, AudioWidgets that a headless server doesn't need. A server-specific cook profile or post-cook pruning script could remove unused plugin assets while keeping the `.uplugin` descriptors.
+
+**Multi-stage build:**
+Use a builder stage with full content, then copy only required files to a minimal runtime stage:
+```dockerfile
+FROM ubuntu:22.04 AS builder
+COPY ... # all files
+RUN groupadd ... && useradd ... && chown -R ...
+
+FROM ubuntu:22.04
+COPY --from=builder --chown=nyx:nyx /opt/nyx /opt/nyx
+```
+
+**Shipping build configuration:**
+Switch from Development to Shipping build. Shipping binaries are smaller (no debug logging, no console commands, no stats). Estimated savings: 30-50 MB on binary size.
+
+#### 2. Cleaner Dedicated Server Build (Zero Warnings)
+
+**Third-party library state:**
+All third-party patches (msdfgen, AHEasing, SSEMathFun, mimalloc) use `#pragma` warning suppression rather than proper fixes. For a zero-warning build:
+- msdfgen: Upstream the shadow variable renames to msdfgen maintainers, or use UBT's per-module warning suppression (`bEnableUndefinedIdentifierWarnings = false`)
+- AHEasing: Submit float-typed version upstream; the library uses `double` math internally but UE expects `float`
+- SSEMathFun: Replace with UE5's built-in `FMath` SIMD intrinsics — SSEMathFun is a legacy third-party header
+- mimalloc: The `mi_ext_set_win32_allocators` stub should be conditionally compiled for Linux-only (Windows has the real implementation)
+
+**UBT-level suppression** (alternative to source patches):
+```csharp
+// In NyxServer.Target.cs or a custom .Build.cs
+bWarningsAsErrors = false; // for specific third-party modules only
+```
+
+#### 3. Server-Only Cook Profile
+
+The current cook produces content for ALL enabled plugins, including editor-only and client-only assets. A server-optimized cook would:
+
+- **Disable client-only plugins** in a server-specific `.uproject` variant or via `-CookFilter` command-line
+- **Strip rendering assets:** Textures, materials, and shaders are cooked but unused under `-NullRHI`. A server cook could exclude `FactoryInterface` asset types: Texture2D, Material, MaterialInstance, etc.
+- **Exclude editor plugins:** `ModelingToolsEditorMode` is already excluded via `TargetAllowList: ["Editor"]` in `.uproject`, but other editor-only plugins may still cook content
+- **Use pak files:** `-pak` flag bundles loose files into compressed `.pak` archives, reducing file count and potentially size. Currently using loose cooking because RunUAT staging failed.
+
+To implement, create a `NyxServer.uproject` variant with a minimal plugin list:
+```json
+{
+  "Plugins": [
+    { "Name": "OnlineServices", "Enabled": true },
+    { "Name": "OnlineServicesEOS", "Enabled": true },
+    { "Name": "OnlineServicesEOSGS", "Enabled": true },
+    { "Name": "SpacetimeDbSdk", "Enabled": true }
+  ]
+}
+```
+
+#### 4. RunUAT / Build Automation
+
+`RunUAT.bat` doesn't work with binary/launcher engine installs because `BuildUAT.bat` is missing. Options:
+
+- **Install UE5 from source** (GitHub): Full source build includes AutomationTool, enabling `BuildCookRun -stage -pak -archive` for proper deployment packaging
+- **Manual staging script:** Create a PowerShell script that replicates what RunUAT staging does — copy binary, cooked content, engine runtime files, and config to a clean deployment directory
+- **CI/CD pipeline:** Automate the cross-compile → cook → Docker build pipeline in a CI system (GitHub Actions, etc.)
+
+#### 5. Runtime Improvements
+
+- **Premade asset registry:** The server logs `Failed to load premade asset registry`. Using `-pak` cooking would generate this automatically. Without pak files, run `AssetRegistryGenerator` post-cook.
+- **Locale stripping:** Set `LANG=C` or `LC_ALL=C` in the container to skip locale initialization entirely if internationalization isn't needed.
+- **Signal handling:** UE5's crash handler may not work well in containers (`pid=1`). Consider using `tini` as init process:
+  ```dockerfile
+  RUN apt-get install -y tini
+  ENTRYPOINT ["/usr/bin/tini", "--", "./Nyx/Binaries/Linux/NyxServer"]
+  ```
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
