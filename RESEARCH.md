@@ -4284,6 +4284,71 @@ Next steps: Dedicated server testing in Docker, stress testing with more concurr
 
 ---
 
+## Spike 14 — Docker Multi-Server Deployment (2026-03-04)
+
+### Docker Image Packaging — Required Engine Files
+
+When packaging a UE5 dedicated server for Docker (cross-compiled Linux binary + cooked content), the following engine files are **required** beyond the binary and cooked content. Missing any of these causes fatal crashes:
+
+| File/Directory | Size | Crash Without It | Error Message |
+|---|---|---|---|
+| `Engine/Content/Internationalization/icudt64l/` + `English/` | ~26 MB | `ICUInternationalization.cpp:156` | "ICU data directory was not discovered" |
+| `Engine/Config/` (all .ini files, platform subdirs) | ~0.7 MB | `DataDrivenShaderPlatformInfo.h:226` | "Assertion failed: IsValid(Platform)" |
+| `Engine/Content/Slate/` | ~7.6 MB | `SharedPointer.h:1112` | "Assertion failed: IsValid()" — cascades from missing WhiteBrush/CoreStyle |
+| `Engine/Plugins/**/*.uplugin` (descriptor files only) | ~0.7 MB | `NativeGameplayTags.cpp:122` | "Unable to find information about module 'EnhancedInput' in plugin 'EnhancedInput'" |
+| `Plugins/**/*.uplugin` (project plugin descriptors) | <1 KB | `PluginManager.cpp:2344` | "Unable to load plugin 'SpacetimeDbSdk'. Missing on disk." |
+
+**Key insight**: The cook step (`-run=cook -targetplatform=LinuxServer`) does NOT include:
+- ICU internationalization data (engine startup dependency, not "content")
+- Engine config files (DataDrivenPlatformInfo, BaseEngine.ini, etc.)
+- Slate brush content (CoreStyle initialization happens before NullRHI skips rendering)
+- Plugin descriptor `.uplugin` files (only cooked content assets are output)
+
+All of these must be copied separately from the engine install directory into the Docker build context.
+
+### .dockerignore Whitelist Pattern
+
+The `.dockerignore` uses a deny-all + whitelist approach for minimal context:
+```
+*
+!Binaries/Linux/NyxServer
+!Binaries/Linux/libEOSSDK-Linux-Shipping.so
+!Saved/Cooked/LinuxServer/
+!Engine/Content/Internationalization/icudt64l/
+!Engine/Content/Internationalization/English/
+!Engine/Content/Slate/
+!Engine/Plugins/
+!Engine/Config/
+!Config/
+!Plugins/**/*.uplugin
+!Nyx.uproject
+```
+
+### Dockerfile Layer Order
+
+Optimal layer order for cache efficiency (least-changing → most-changing):
+1. Base image + apt deps + user creation
+2. Binary (changes on recompile)
+3. Cooked content (changes on re-cook)
+4. Engine content (ICU, Slate — rarely changes)
+5. Engine plugins (.uplugin descriptors — rarely changes)
+6. Engine config — rarely changes)
+7. Project config + plugins + .uproject (changes on settings)
+8. chmod + prune (final)
+
+### Multi-Server Startup Verification
+
+Both servers start successfully with:
+- `NyxReplicationGraph` — GridNode + AlwaysRelevant nodes initialized
+- `IpNetDriver` listening on port 7777
+- `NyxGameMode::StartPlay` — `IsNyxServer=true, NetMode=1` (DedicatedServer)
+- SpacetimeDB WebSocket connection initiated
+- MultiServer subsystem parses command-line args correctly
+
+**Known issue**: `CreateNamedNetDriver` fails for `MultiServerNetDriver` — the beacon host needs a NetDriver definition registered in `DefaultEngine.ini`. This is a config-only fix for the next iteration.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal

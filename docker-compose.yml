@@ -4,17 +4,20 @@
 #   SpacetimeDB (persistence/combat compute) + UE5 Dedicated Servers (real-time gameplay)
 #
 # Usage:
-#   docker compose up -d              # Start full stack
-#   docker compose logs -f spacetimedb # Watch SpacetimeDB logs
-#   docker compose logs -f nyx-server  # Watch game server logs
-#   docker compose down               # Stop everything
+#   docker compose up -d                     # Start full stack (SpacetimeDB + 2 servers)
+#   docker compose up -d spacetimedb         # Start SpacetimeDB only
+#   docker compose up -d nyx-server-1        # Start single server
+#   docker compose logs -f spacetimedb       # Watch SpacetimeDB logs
+#   docker compose logs -f nyx-server-1      # Watch server 1 logs
+#   docker compose logs -f nyx-server-2      # Watch server 2 logs
+#   docker compose down                      # Stop everything
 #
 # First-time setup (after SpacetimeDB is up):
 #   cd server/nyx-server/spacetimedb
 #   spacetime publish nyx --clear-database
 #
 # Build the server image:
-#   docker compose build nyx-server
+#   docker compose build nyx-server-1
 
 services:
   # ── SpacetimeDB 2.0 ─────────────────────────────────────────────
@@ -38,20 +41,71 @@ services:
       retries: 3
       start_period: 15s
 
-  # ── UE5 Dedicated Server ────────────────────────────────────────
+  # ── UE5 Dedicated Server 1 (Zone A primary) ────────────────────
   # Real-time gameplay: physics, movement replication, client connections.
   # Cross-compiled from Windows → Linux, cooked for LinuxServer platform.
-  nyx-server:
+  nyx-server-1:
     build:
       context: .
       dockerfile: Dockerfile.server
-    container_name: nyx-server
+    container_name: nyx-server-1
     ports:
-      - "7777:7777/udp"  # Game client connections
+      - "7777:7777/udp"    # Game client connections
+      - "15000:15000/tcp"  # MultiServer beacon (debug visibility)
     depends_on:
       spacetimedb:
         condition: service_healthy
     restart: unless-stopped
+    command:
+      - "Nyx"
+      - "-server"
+      - "-log"
+      - "-unattended"
+      - "-nosplash"
+      - "-nosound"
+      - "-NullRHI"
+      - "-port=7777"
+      - "-SpacetimeHost=spacetimedb:3000"
+      - "-SpacetimeDB=nyx"
+      - "-ServerId=server-1"
+      - "-ZoneId=zone-a"
+      - "-NyxMultiServerLocalId=server-1"
+      - "-NyxMultiServerListenPort=15000"
+      - "-MultiServerNumServers=2"
+      - "-MultiServerPeers=nyx-server-2:15000"
+
+  # ── UE5 Dedicated Server 2 (Zone A secondary / entity shard) ───
+  # Second server sharing the same zone for entity-sharded scaling.
+  # Peers with server-1 via MultiServer beacon mesh.
+  nyx-server-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: nyx-server-2
+    ports:
+      - "7778:7777/udp"    # Game client connections (different host port)
+      - "15001:15000/tcp"  # MultiServer beacon (debug visibility)
+    depends_on:
+      spacetimedb:
+        condition: service_healthy
+    restart: unless-stopped
+    command:
+      - "Nyx"
+      - "-server"
+      - "-log"
+      - "-unattended"
+      - "-nosplash"
+      - "-nosound"
+      - "-NullRHI"
+      - "-port=7777"
+      - "-SpacetimeHost=spacetimedb:3000"
+      - "-SpacetimeDB=nyx"
+      - "-ServerId=server-2"
+      - "-ZoneId=zone-a"
+      - "-NyxMultiServerLocalId=server-2"
+      - "-NyxMultiServerListenPort=15000"
+      - "-MultiServerNumServers=2"
+      - "-MultiServerPeers=nyx-server-1:15000"
 
 volumes:
   stdb-data:

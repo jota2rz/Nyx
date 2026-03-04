@@ -8,8 +8,24 @@
 # Cooked content for LinuxServer
 !Saved/Cooked/LinuxServer/
 
+# ICU internationalization data (required for engine startup)
+!Engine/Content/Internationalization/icudt64l/
+!Engine/Content/Internationalization/English/
+
+# Slate brushes (WhiteBrush, CoreStyle — server modules still init Slate)
+!Engine/Content/Slate/
+
+# Engine plugin descriptors (.uplugin files for module registration)
+!Engine/Plugins/
+
+# Engine config (DataDrivenPlatformInfo, BaseEngine.ini, etc.)
+!Engine/Config/
+
 # Project configuration
 !Config/
+
+# Project plugin descriptors (SpacetimeDbSdk, etc.)
+!Plugins/**/*.uplugin
 
 # Project descriptor
 !Nyx.uproject

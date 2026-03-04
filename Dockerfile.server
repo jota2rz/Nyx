@@ -41,28 +41,44 @@ COPY --chown=nyx:nyx Binaries/Linux/libEOSSDK-Linux-Shipping.so Nyx/Binaries/Lin
 # ── Cooked project content ────────────────────────────────────────
 COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Nyx/Content/  Nyx/Content/
 COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Nyx/Metadata/ Nyx/Metadata/
+COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Nyx/AssetRegistry.bin Nyx/
 
 # ── Cooked engine content + plugins ───────────────────────────────
 COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Engine/       Engine/
 
-# ── Project plugin descriptors ────────────────────────────────────
-COPY --chown=nyx:nyx Saved/Cooked/LinuxServer/Nyx/Plugins/ Nyx/Plugins/
+# ── ICU internationalization data (required for engine startup) ───
+COPY --chown=nyx:nyx Engine/Content/Internationalization/    Engine/Content/Internationalization/
+
+# ── Slate brushes (CoreStyle, WhiteBrush — server modules init Slate) ─
+COPY --chown=nyx:nyx Engine/Content/Slate/                   Engine/Content/Slate/
+
+# ── Engine plugin descriptors (module registration for linked plugins) ─
+COPY --chown=nyx:nyx Engine/Plugins/                         Engine/Plugins/
+
+# ── Engine configuration (DataDrivenPlatformInfo, etc.) ───────────
+COPY --chown=nyx:nyx Engine/Config/                         Engine/Config/
 
 # ── Project configuration ─────────────────────────────────────────
 COPY --chown=nyx:nyx Config/ Nyx/Config/
 
+# ── Project plugin descriptors (SpacetimeDbSdk, etc.) ─────────
+COPY --chown=nyx:nyx Plugins/ Nyx/Plugins/
+
 # ── Project descriptor (required by engine to locate project) ─────
 COPY --chown=nyx:nyx Nyx.uproject Nyx/
 
-# Make the binary executable and prune ICU locales (keep only English)
+# Make the binary executable and prune ICU locales if present (keep only English)
 RUN chmod +x Nyx/Binaries/Linux/NyxServer \
-    && find Engine/Content/Internationalization -mindepth 1 -maxdepth 1 \
-       -type d ! -name 'en' ! -name 'icudt*' -exec rm -rf {} +
+    && if [ -d Engine/Content/Internationalization ]; then \
+       find Engine/Content/Internationalization -mindepth 1 -maxdepth 1 \
+       -type d ! -name 'en' ! -name 'icudt*' -exec rm -rf {} + ; \
+       fi
 
 USER nyx
 
-# Game port (UDP)
+# Game port (UDP) + MultiServer beacon port (TCP)
 EXPOSE 7777/udp
+EXPOSE 15000/tcp
 
 # Environment variables for runtime configuration
 ENV NYX_SPACETIME_HOST=spacetimedb:3000
@@ -71,7 +87,12 @@ ENV NYX_PORT=7777
 
 # tini handles PID 1 duties (signal forwarding, zombie reaping)
 ENTRYPOINT ["/usr/bin/tini", "--", "./Nyx/Binaries/Linux/NyxServer"]
+
+# Default CMD — single server mode. Override via docker-compose `command:` for multi-server.
 CMD ["Nyx", \
      "-server", "-log", "-unattended", "-nosplash", "-nosound", "-NullRHI", \
      "-port=7777", \
-     "-SpacetimeHost=spacetimedb:3000"]
+     "-SpacetimeHost=spacetimedb:3000", \
+     "-SpacetimeDB=nyx", \
+     "-ServerId=server-1", \
+     "-ZoneId=zone-a"]
