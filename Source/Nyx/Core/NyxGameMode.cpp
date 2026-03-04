@@ -6,6 +6,7 @@
 #include "Nyx/Online/NyxAuthSubsystem.h"
 #include "Nyx/Player/NyxCharacter.h"
 #include "Nyx/Server/NyxServerSubsystem.h"
+#include "Nyx/Networking/NyxMultiServerSubsystem.h"
 #include "GameFramework/PlayerController.h"
 
 ANyxGameMode::ANyxGameMode()
@@ -52,6 +53,13 @@ void ANyxGameMode::StartPlay()
 				*SpacetimeDBHost, *DatabaseName, *ZoneId, *DedicatedServerId);
 
 			ServerSub->ConnectAndRegister(SpacetimeDBHost, DatabaseName, ZoneId, DedicatedServerId, 500);
+
+			// ── MultiServer mesh: if cmd-line specifies peers, join the mesh ──
+			UNyxMultiServerSubsystem* MultiSub = GetGameInstance()->GetSubsystem<UNyxMultiServerSubsystem>();
+			if (MultiSub && MultiSub->InitializeFromCommandLine())
+			{
+				UE_LOG(LogNyx, Log, TEXT("MultiServer mesh initialized from command line"));
+			}
 		}
 		else
 		{
@@ -80,6 +88,12 @@ void ANyxGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (IsNyxServer())
 	{
+		UNyxMultiServerSubsystem* MultiSub = GetGameInstance()->GetSubsystem<UNyxMultiServerSubsystem>();
+		if (MultiSub)
+		{
+			MultiSub->ShutdownMesh();
+		}
+
 		UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
 		if (ServerSub)
 		{

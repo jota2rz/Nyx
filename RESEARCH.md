@@ -4043,6 +4043,164 @@ To implement, create a `NyxServer.uproject` variant with a minimal plugin list:
 
 ---
 
+## Spike 12: ReplicationGraph + MultiServer Foundation ✅
+
+**Goal:** Implement UE5 ReplicationGraph for MMO-scale spatial relevancy and lay the groundwork for cross-server communication using the experimental MultiServer Replication Plugin.
+
+**Duration:** 1 day
+
+**Status:** COMPLETE — Build passes, smoke test 7/7, PIE connects to Docker SpacetimeDB
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  UE5 Dedicated Server (per zone)                    │
+│                                                     │
+│  ┌─────────────────────────────────────────────┐    │
+│  │  NyxReplicationGraph                        │    │
+│  │  ├─ GridSpatialization2D (spatial culling)   │    │
+│  │  ├─ AlwaysRelevant (GameState, etc.)         │    │
+│  │  └─ Per-Connection (own pawn, party)         │    │
+│  └─────────────────────────────────────────────┘    │
+│                                                     │
+│  ┌─────────────────────────────────────────────┐    │
+│  │  NyxMultiServerSubsystem                    │    │
+│  │  ├─ Discovers peers from cmd-line args      │    │
+│  │  ├─ Manages beacon connections              │    │
+│  │  └─ Routes cross-server RPCs                │    │
+│  └─────────────────────────────────────────────┘    │
+│         │                                           │
+│         │  NyxMultiServerBeaconClient               │
+│         │  ├─ ServerNotifyCrossServerHit()           │
+│         │  ├─ ServerRequestEntityHandoff()           │
+│         │  └─ ServerBroadcastEntityCount()           │
+│         ▼                                           │
+│  ┌──────────────┐                                   │
+│  │  Peer Server  │  (other zone server)              │
+│  └──────────────┘                                   │
+└─────────────────────────────────────────────────────┘
+```
+
+### Files Created
+
+| File | Lines | Purpose |
+|------|-------|---------|
+| `Source/Nyx/Networking/NyxReplicationGraph.h` | 113 | Custom `UReplicationGraph` subclass — spatial grid, always-relevant, per-connection nodes |
+| `Source/Nyx/Networking/NyxReplicationGraph.cpp` | 344 | Full implementation — class routing, spatial grid, per-connection management, actor drain |
+| `Source/Nyx/Networking/NyxMultiServerBeaconClient.h` | 97 | Custom `AMultiServerBeaconClient` — cross-server RPCs for combat and entity handoff |
+| `Source/Nyx/Networking/NyxMultiServerBeaconClient.cpp` | 83 | RPC implementations — CrossServerHit, EntityHandoff, EntityCount broadcast |
+| `Source/Nyx/Networking/NyxMultiServerSubsystem.h` | 151 | `UGameInstanceSubsystem` managing the multi-server mesh lifecycle |
+| `Source/Nyx/Networking/NyxMultiServerSubsystem.cpp` | 218 | Mesh init/shutdown, peer discovery from command line, RPC routing, zone transfer |
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `Config/DefaultEngine.ini` | Added `ReplicationDriverClassName="/Script/Nyx.NyxReplicationGraph"` under `[/Script/OnlineSubsystemUtils.IpNetDriver]` |
+| `Nyx.uproject` | Enabled `MultiServerReplication` and `ReplicationGraph` plugins |
+| `Source/Nyx/Nyx.Build.cs` | Added `ReplicationGraph`, `MultiServerReplication`, `OnlineSubsystemUtils` deps; `SetupGameplayDebuggerSupport(Target)` |
+| `Source/Nyx/Core/NyxGameMode.cpp` | Added multi-server subsystem init in `StartPlay`, shutdown in `EndPlay` |
+
+### NyxReplicationGraph Design
+
+The replication graph replaces UE5's default per-actor relevancy system with a structured graph:
+
+**Class Routing Table** (`TClassMap<EClassRouting>`):
+| Class | Route | Rationale |
+|-------|-------|-----------|
+| `AGameStateBase` | AlwaysRelevant | All clients need GameState |
+| `APlayerState` | RelevantToOwner | Goes to per-connection node |
+| `AReplicationGraphDebugActor` | NotRouted | Excluded from replication |
+| All other actors | Spatialize | Default — into `GridSpatialization2D` |
+
+**Configuration:**
+- `GridCellSize = 10000` (100 meters) — matches SpacetimeDB chunk size
+- `DestructionInfoMaxDist = 300000` (3 km) — destruction events replicated within this range
+- `CharacterCullDistanceSquared = 400000000` (20 km) — characters beyond this distance culled
+
+**Actor Routing Logic:**
+1. `RouteAddNetworkActorToNodes` classifies each actor by CDO's class routing
+2. `bOnlyRelevantToOwner` actors → per-connection `AlwaysRelevant_ForConnection` node
+3. Actors without a connection at spawn → queued in `ActorsWithoutNetConnection` and drained in `ServerReplicateActors`
+
+### NyxMultiServerSubsystem Design
+
+The subsystem manages cross-server communication for seamless zone transitions:
+
+**Initialization:**
+- `InitializeFromCommandLine()` parses `-PeerServers=addr1:port1,addr2:port2,...`
+- `InitializeMultiServerMesh()` creates `UMultiServerReplicationManager`, sets `BeaconClientClass` to `ANyxMultiServerBeaconClient`
+- On peer connect: `HandlePeerConnected` stores `TMap<FString, TObjectPtr<ANyxMultiServerBeaconClient>>` keyed by address
+
+**Cross-Server RPCs:**
+| RPC | Direction | Purpose |
+|-----|-----------|---------|
+| `SendCrossServerHit` | Server→Peer | Combat hit needs resolution on peer's zone (SpacetimeDB ACID) |
+| `RequestEntityHandoff` | Server→Peer | Player crossing zone boundary, request handoff |
+| `BroadcastEntityCount` | Server→All | Periodic load data for orchestration decisions |
+
+**Zone Transfer Flow:**
+```
+Player crosses zone boundary
+  → NyxMultiServerSubsystem::RequestEntityHandoff(PeerAddr, EntityIdentity, TargetZone)
+    → Find peer beacon → ServerRequestEntityHandoff RPC
+      → Peer receives → FOnEntityHandoffRequest delegate fires
+        → Peer loads character from SpacetimeDB → ClientEntityHandoffAccepted back to origin
+          → Origin server: client travel to peer IP
+```
+
+### Key Technical Findings
+
+1. **UE5.7 `TClassMap` API has no `Find()` method.** The API uses `Get()` which returns the value (not a pointer). `Set()` stores values. There is no `Num()` or `Contains()` — check if the returned value equals the default instead. This is different from `TMap`'s API.
+
+2. **`TMap::Find()` with `TObjectPtr` values returns `TObjectPtr<T>*`, not `T**`.** Direct dereference gives `TObjectPtr<T>&`, which implicitly converts to `T*`. Missing this causes compile errors.
+
+3. **UHT rejects `uint32` in UFUNCTION parameters.** The Unreal Header Tool requires Blueprint-compatible types. `uint32` must be changed to `int32` for any UFUNCTION/UPROPERTY/delegate parameters. This affected all SkillId parameters across 4 files.
+
+4. **`FOnMultiServerConnected` delegate signature uses `AMultiServerBeaconClient*`**, not a subclass pointer. Custom beacon client handlers must accept the base class and cast internally.
+
+5. **`SetupGameplayDebuggerSupport(Target)` is required** when depending on `ReplicationGraph`. Without it, linker errors occur for `GameplayDebugger` symbols that ReplicationGraph references.
+
+6. **ReplicationGraph only activates when UE5 NetDriver is active** (dedicated/listen server with clients). It does NOT run in Standalone PIE mode. The `ReplicationDriverClassName` in `DefaultEngine.ini` is loaded by `IpNetDriver`, which only exists in networked modes.
+
+7. **`InstalledBuild.txt` is critical for build times.** Without it, UBT treats a binary engine install as a source build, triggering 1594 actions (full engine recompile). With it, only project modules are recompiled (~3-21 actions). If it gets accidentally deleted during a cancelled build, restore from the `.bak` file.
+
+### Test Results
+
+**Smoke Test (Commandlet — headless):**
+```
+7 passed, 0 failed (231ms total)
+  Connect:        PASS (80.9ms)
+  Subscribe:      PASS (35.8ms)
+  RegisterZone:   PASS (0.0ms)
+  LoadCharacter:  PASS (42.9ms)
+  ResolveHit:     PASS (70.4ms) — HP: 1000→995
+  SaveCharacter:  PASS (0.0ms)
+  DeregisterZone: PASS (0.0ms)
+```
+
+**PIE Test (Standalone Game → `Nyx.Connect 127.0.0.1:3000 nyx`):**
+```
+WebSocket:     Connected to ws://127.0.0.1:3000/v1/database/nyx/subscribe
+Token:         Received (386 chars)
+Subscriptions: Global (player_account) ✓, Spatial (chunks [-2..2]) ✓
+Cache:         0 players, 0 entities (clean database)
+```
+
+Both tests ran against Docker SpacetimeDB on port 3000.
+
+### Conclusion
+
+The ReplicationGraph and MultiServer foundation are in place:
+- **ReplicationGraph** provides MMO-scale spatial relevancy with configurable grid, per-connection nodes, and proper class routing. Ready to activate when dedicated server receives client connections.
+- **MultiServer subsystem** provides the cross-server RPC framework for seamless zone transitions. Ready for integration testing once multiple server instances are running.
+- **Both compile cleanly** and don't interfere with existing SpacetimeDB connection flow.
+
+Next steps: Integration test with 2+ server instances in Docker Compose, implement zone boundary detection, and wire cross-server combat resolution through SpacetimeDB.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal

@@ -33,5 +33,15 @@ public class Nyx : ModuleRules
 
 		// SpacetimeDB Unreal Plugin (Spike 1: confirmed working)
 		PrivateDependencyModuleNames.Add("SpacetimeDbSdk");
+
+		// MMO-scale spatial relevancy (Spike 14: ReplicationGraph)
+		PrivateDependencyModuleNames.Add("ReplicationGraph");
+
+		// MultiServer mesh for entity-sharded zones (Spike 14: Pattern A)
+		PrivateDependencyModuleNames.Add("MultiServerReplication");
+		PrivateDependencyModuleNames.Add("OnlineSubsystemUtils"); // AOnlineBeaconClient base class
+
+		// GameplayDebugger (conditional — editor/debug builds only)
+		SetupGameplayDebuggerSupport(Target);
 	}
 }

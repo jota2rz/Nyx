@@ -33,6 +33,14 @@
 		{
 			"Name": "SpacetimeDbSdk",
 			"Enabled": true
+		},
+		{
+			"Name": "MultiServerReplication",
+			"Enabled": true
+		},
+		{
+			"Name": "ReplicationGraph",
+			"Enabled": true
 		}
 	]
 }
