@@ -169,21 +169,58 @@ void UNyxReplicationGraph::InitConnectionGraphNodes(UNetReplicationGraphConnecti
 	ConnectionKeys.Add(RepGraphConnection->NetConnection);
 	ConnectionNodes.Add(AlwaysRelevantForConnection);
 
-	UE_LOG(LogNyxRepGraph, Verbose, TEXT("InitConnectionGraphNodes: Created AlwaysRelevant_ForConnection for %s"),
+	UE_LOG(LogNyxRepGraph, Log, TEXT("InitConnectionGraphNodes: Created AlwaysRelevant_ForConnection for %s"),
 		*GetNameSafe(RepGraphConnection->NetConnection));
 }
 
 // ─── Actor Routing ─────────────────────────────────────────────────
 
+UNyxReplicationGraph::EClassRouting UNyxReplicationGraph::GetClassRouting(const AActor* Actor) const
+{
+	// Direct class checks as primary routing — TClassMap lookup was unreliable
+	// for engine classes that may not be iterated during InitGlobalActorClassSettings
+	if (!Actor) return EClassRouting::NotRouted;
+
+	const UClass* Class = Actor->GetClass();
+
+	if (Class->IsChildOf(APlayerController::StaticClass()))
+		return EClassRouting::RelevantToOwner;
+
+	if (Class->IsChildOf(AHUD::StaticClass()))
+		return EClassRouting::RelevantToOwner;
+
+	if (Class->IsChildOf(AGameStateBase::StaticClass()))
+		return EClassRouting::AlwaysRelevant;
+
+	if (Class->IsChildOf(ALevelScriptActor::StaticClass()))
+		return EClassRouting::AlwaysRelevant;
+
+#if WITH_GAMEPLAY_DEBUGGER
+	if (Class->IsChildOf(AGameplayDebuggerCategoryReplicator::StaticClass()))
+		return EClassRouting::NotRouted;
+#endif
+
+	// CDO-based fallback
+	if (Actor->bOnlyRelevantToOwner)
+		return EClassRouting::RelevantToOwner;
+
+	if (Actor->bAlwaysRelevant)
+		return EClassRouting::AlwaysRelevant;
+
+	// Everything else: spatial
+	return EClassRouting::Spatialize;
+}
+
 void UNyxReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo,
 	FGlobalActorReplicationInfo& GlobalInfo)
 {
-	// Look up class routing
-	EClassRouting Routing = EClassRouting::Spatialize;
-	if (const EClassRouting* Found = ClassRoutingMap.Get(ActorInfo.Class))
-	{
-		Routing = *Found;
-	}
+	const EClassRouting Routing = GetClassRouting(ActorInfo.Actor);
+
+	UE_LOG(LogNyxRepGraph, Log, TEXT("RouteAddNetworkActor: %s → %s"),
+		*GetNameSafe(ActorInfo.Actor),
+		Routing == EClassRouting::AlwaysRelevant ? TEXT("AlwaysRelevant") :
+		Routing == EClassRouting::RelevantToOwner ? TEXT("RelevantToOwner") :
+		Routing == EClassRouting::NotRouted ? TEXT("NotRouted") : TEXT("Spatialize"));
 
 	switch (Routing)
 	{
@@ -220,11 +257,7 @@ void UNyxReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedActor
 
 void UNyxReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo)
 {
-	EClassRouting Routing = EClassRouting::Spatialize;
-	if (const EClassRouting* Found = ClassRoutingMap.Get(ActorInfo.Class))
-	{
-		Routing = *Found;
-	}
+	const EClassRouting Routing = GetClassRouting(ActorInfo.Actor);
 
 	switch (Routing)
 	{
@@ -256,11 +289,7 @@ void UNyxReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicatedAc
 
 void UNyxReplicationGraph::RouteRenameNetworkActorToNodes(const FRenamedReplicatedActorInfo& ActorInfo)
 {
-	EClassRouting Routing = EClassRouting::Spatialize;
-	if (const EClassRouting* Found = ClassRoutingMap.Get(ActorInfo.NewActorInfo.Class))
-	{
-		Routing = *Found;
-	}
+	const EClassRouting Routing = GetClassRouting(ActorInfo.NewActorInfo.Actor);
 
 	switch (Routing)
 	{

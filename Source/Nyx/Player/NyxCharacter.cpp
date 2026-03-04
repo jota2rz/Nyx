@@ -147,31 +147,58 @@ void ANyxCharacter::BeginPlay()
 		*UEnum::GetValueAsString(GetLocalRole()),
 		HasAuthority() ? TEXT("true") : TEXT("false"));
 
-	// Add input mapping context for the local player
-	if (APlayerController* PC = Cast<APlayerController>(GetController()))
+	// Try input setup here — will succeed for listen server host, may fail for client
+	// (controller not replicated yet). Client gets a second chance in OnRep_PlayerState.
+	SetupInputMappingContexts();
+}
+
+void ANyxCharacter::PossessedBy(AController* NewController)
+{
+	Super::PossessedBy(NewController);
+
+	// Server-side: mapping contexts needed if this is the listen server's local pawn
+	SetupInputMappingContexts();
+}
+
+void ANyxCharacter::OnRep_PlayerState()
+{
+	Super::OnRep_PlayerState();
+
+	// Client-side: this fires when the pawn's PlayerState replicates,
+	// which means the controller/possession is now valid on the client.
+	UE_LOG(LogNyx, Log, TEXT("NyxCharacter::OnRep_PlayerState  Name=%s  Role=%s  Controller=%s"),
+		*GetName(),
+		*UEnum::GetValueAsString(GetLocalRole()),
+		*GetNameSafe(GetController()));
+
+	SetupInputMappingContexts();
+}
+
+void ANyxCharacter::SetupInputMappingContexts()
+{
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !PC->IsLocalController()) return;
+
+	UEnhancedInputLocalPlayerSubsystem* InputSub =
+		ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer());
+	if (!InputSub) return;
+
+	if (DefaultMappingContext)
 	{
-		if (UEnhancedInputLocalPlayerSubsystem* InputSub =
-			ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer()))
+		// Inject left-click → AttackAction into the shared IMC (idempotent)
+		if (AttackAction)
 		{
-			if (DefaultMappingContext)
-			{
-				// Inject left-click → AttackAction into the shared IMC
-				if (AttackAction)
-				{
-					FEnhancedActionKeyMapping& Mapping =
-						DefaultMappingContext->MapKey(AttackAction, EKeys::LeftMouseButton);
-					(void)Mapping; // suppress unused warning
-				}
-
-				InputSub->AddMappingContext(DefaultMappingContext, 0);
-			}
-
-			if (MouseLookMappingContext)
-			{
-				InputSub->AddMappingContext(MouseLookMappingContext, 1);
-			}
+			DefaultMappingContext->MapKey(AttackAction, EKeys::LeftMouseButton);
 		}
+		InputSub->AddMappingContext(DefaultMappingContext, 0);
 	}
+
+	if (MouseLookMappingContext)
+	{
+		InputSub->AddMappingContext(MouseLookMappingContext, 1);
+	}
+
+	UE_LOG(LogNyx, Log, TEXT("Input mapping contexts applied for %s"), *GetName());
 }
 
 void ANyxCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
@@ -206,6 +233,11 @@ void ANyxCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 	{
 		EnhancedInput->BindAction(AttackAction, ETriggerEvent::Started, this, &ANyxCharacter::HandleAttack);
 	}
+
+	// This is the most reliable place to set up mapping contexts on clients.
+	// SetupPlayerInputComponent is called by APlayerController::SetPawn when
+	// possession completes — GetController() is guaranteed valid here.
+	SetupInputMappingContexts();
 }
 
 void ANyxCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const

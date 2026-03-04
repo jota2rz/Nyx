@@ -4201,6 +4201,89 @@ Next steps: Integration test with 2+ server instances in Docker Compose, impleme
 
 ---
 
+## Spike 13: Live Replication Test — PIE Listen Server ✅
+
+**Date:** 2026-03-04
+**Commit:** (this commit)
+**Goal:** Verify ReplicationGraph activates with real clients (PIE Listen Server, 2 players) and combat stats replicate end-to-end through SpacetimeDB.
+
+### Problem: TClassMap Routing Failure
+
+During the first PIE Listen Server test, Player 1 (client) had no camera, no input — the classic "half floor half sky" view. Logs revealed two critical issues:
+
+1. **PlayerController routed to Spatialize** instead of RelevantToOwner — `ClassRoutingMap.Get()` returned nullptr for engine classes
+2. **PlayerController CullDistance=0** in spatial grid — caused `GetGridNodesForActor` spam and dropped replication entirely
+
+Root cause: `TClassMap::Get()` was unreliable for engine classes (PlayerController, PlayerState, HUD, etc.) that might not get iterated during `InitGlobalActorClassSettings`. The map-based lookup silently failed, defaulting actors to the spatial grid where they don't belong.
+
+### Fix: Direct IsChildOf Routing
+
+Replaced `TClassMap` lookup in all three routing functions (`RouteAddNetworkActorToNodes`, `RouteRemoveNetworkActorToNodes`, `RouteRenameNetworkActorToNodes`) with a new `GetClassRouting()` helper that uses direct `IsChildOf()` checks:
+
+| Class | Route | Method |
+|-------|-------|--------|
+| `APlayerController` | RelevantToOwner | `IsChildOf` |
+| `AHUD` | RelevantToOwner | `IsChildOf` |
+| `AGameStateBase` | AlwaysRelevant | `IsChildOf` |
+| `ALevelScriptActor` | AlwaysRelevant | `IsChildOf` |
+| `AGameplayDebuggerCategoryReplicator` | NotRouted | `IsChildOf` |
+| actors with `bOnlyRelevantToOwner` | RelevantToOwner | CDO fallback |
+| actors with `bAlwaysRelevant` | AlwaysRelevant | CDO fallback |
+| everything else | Spatialize | default |
+
+### Fix: Client Pawn Input Setup
+
+Client pawns had `GetController() == nullptr` during `BeginPlay` because possession hadn't replicated yet. Added multiple entry points for `SetupInputMappingContexts()`:
+
+- `BeginPlay` — works for listen server host
+- `PossessedBy` — server-side possession
+- `OnRep_PlayerState` — client-side, fires when PlayerState replicates (possession valid)
+- `SetupPlayerInputComponent` — guaranteed controller valid (called by `APlayerController::SetPawn`)
+
+### Test Results (PIE Listen Server, 2 Players)
+
+**Routing (all correct):**
+```
+RouteAddNetworkActor: PlayerState_1 → AlwaysRelevant
+RouteAddNetworkActor: PlayerController_1 → RelevantToOwner
+RouteAddNetworkActor: NyxCharacter_1 → Spatialize
+RouteAddNetworkActor: GameplayDebuggerCategoryReplicator_1 → NotRouted
+```
+
+**Stats replication:**
+```
+[Client] OnRep_CurrentHP for PlayerController_1: HP=1000/1000
+```
+
+**Combat replication (Player 1 attacks Player 0):**
+```
+PlayerController_1 attacks PlayerController_0! (range=150)
+[Client] OnRep_CurrentHP for PlayerController_0: HP=995/1000
+PlayerController_1 attacks PlayerController_0! (range=150)
+[Client] OnRep_CurrentHP for PlayerController_0: HP=990/1000
+```
+
+**Auto-save:** `Auto-saved 2 characters`
+
+Full pipeline verified: Player joins → PostLogin → SpacetimeDB loads character → stats applied → replicated to client → attack → ServerRPC → SpacetimeDB ResolveHit → HP update → OnRep_CurrentHP on all clients.
+
+### Files Modified
+
+| File | Change |
+|------|--------|
+| `Source/Nyx/Networking/NyxReplicationGraph.h` | Added `GetClassRouting()` declaration |
+| `Source/Nyx/Networking/NyxReplicationGraph.cpp` | Added `GetClassRouting()` with direct `IsChildOf` checks; updated all three routing functions; enhanced logging |
+| `Source/Nyx/Player/NyxCharacter.h` | Added `PossessedBy()`, `OnRep_PlayerState()` overrides, `SetupInputMappingContexts()` helper |
+| `Source/Nyx/Player/NyxCharacter.cpp` | Implemented multi-entry-point input setup; extracted `SetupInputMappingContexts()` |
+
+### Conclusion
+
+The ReplicationGraph is now fully functional with real clients. The `TClassMap` approach is kept for reference but bypassed by `GetClassRouting()` which is more reliable for engine base classes. Combat replication through SpacetimeDB works end-to-end with proper `OnRep` callbacks on all clients.
+
+Next steps: Dedicated server testing in Docker, stress testing with more concurrent clients, zone boundary detection for multi-server handoff.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal

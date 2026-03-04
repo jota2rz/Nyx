@@ -110,4 +110,7 @@ private:
 
 	/** Cached class → routing map, populated in InitGlobalActorClassSettings. */
 	TClassMap<EClassRouting> ClassRoutingMap;
+
+	/** Direct IsChildOf-based routing that bypasses TClassMap (which can miss classes). */
+	EClassRouting GetClassRouting(const AActor* Actor) const;
 };

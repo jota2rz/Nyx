@@ -46,6 +46,8 @@ public:
 
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 	virtual void BeginPlay() override;
+	virtual void PossessedBy(AController* NewController) override;
+	virtual void OnRep_PlayerState() override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	// ──── Stats (replicated from dedicated server) ────
@@ -178,4 +180,7 @@ private:
 
 	UFUNCTION()
 	void OnRep_CurrentHP();
+
+	/** Sets up input mapping contexts for the local player. Safe to call multiple times. */
+	void SetupInputMappingContexts();
 };
