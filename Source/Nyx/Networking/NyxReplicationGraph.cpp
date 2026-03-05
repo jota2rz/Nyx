@@ -360,6 +360,14 @@ UReplicationGraphNode_AlwaysRelevant_ForConnection* UNyxReplicationGraph::GetAlw
 		return nullptr;
 	}
 
+	// Child connections (split-screen / multi-server proxy children) don't have their own
+	// connection managers — they share their parent's per-connection nodes.
+	// This matches UReplicationGraph::FindConnectionManager which redirects children to parents.
+	if (UChildConnection* ChildConn = Cast<UChildConnection>(Connection))
+	{
+		Connection = ChildConn->Parent;
+	}
+
 	for (int32 Idx = 0; Idx < ConnectionKeys.Num(); ++Idx)
 	{
 		if (ConnectionKeys[Idx] == Connection)
