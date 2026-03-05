@@ -16,8 +16,12 @@
 ANyxZoneBoundary::ANyxZoneBoundary()
 {
 	PrimaryActorTick.bCanEverTick = false;
-	bReplicates = true;
-	bAlwaysRelevant = true;
+
+	// Spike 21: Disable replication — the MultiServer proxy cannot forward
+	// non-player world actors (ActorChannelFailure kills the client connection).
+	// The pillar visuals still render on the server for debugging.
+	bReplicates = false;
+	bAlwaysRelevant = false;
 
 	RootScene = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 	SetRootComponent(RootScene);

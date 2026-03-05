@@ -11,10 +11,73 @@
 #include "Nyx/Sidecar/NyxSidecarSubsystem.h"
 #include "Nyx/Test/NyxSmokeTest.h"
 #include "ModuleBindings/SpacetimeDBClient.g.h"
+#include "Engine/Engine.h"
+#include "Engine/NetDriver.h"
 
 void UNyxGameInstance::Init()
 {
 	Super::Init();
+
+	// ── Proxy NetDriver Override ──
+	// If -ProxyGameServers= is on the command line, this process should run as
+	// a MultiServer proxy. Swap the GameNetDriver definition from IpNetDriver
+	// to ProxyNetDriver BEFORE UWorld::Listen() creates the NetDriver.
+	// We must modify GEngine->NetDriverDefinitions directly because it's a
+	// UPROPERTY(Config) array cached at engine startup — modifying GConfig is too late.
+	if (FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers=")))
+	{
+		UE_LOG(LogNyx, Log, TEXT("Detected -ProxyGameServers — configuring as PROXY server"));
+
+		if (GEngine)
+		{
+			// Remove existing GameNetDriver entry (default IpNetDriver)
+			GEngine->NetDriverDefinitions.RemoveAll([](const FNetDriverDefinition& Def) {
+				return Def.DefName == FName(TEXT("GameNetDriver"));
+			});
+
+			// Add ProxyNetDriver as the GameNetDriver
+			FNetDriverDefinition ProxyDef;
+			ProxyDef.DefName = FName(TEXT("GameNetDriver"));
+			ProxyDef.DriverClassName = FName(TEXT("/Script/MultiServerReplication.ProxyNetDriver"));
+			ProxyDef.DriverClassNameFallback = FName(TEXT("/Script/MultiServerReplication.ProxyNetDriver"));
+			GEngine->NetDriverDefinitions.Add(ProxyDef);
+
+			// Add ProxyBackendNetDriver (created dynamically by the proxy)
+			FNetDriverDefinition BackendDef;
+			BackendDef.DefName = FName(TEXT("ProxyBackendNetDriver"));
+			BackendDef.DriverClassName = FName(TEXT("/Script/MultiServerReplication.ProxyBackendNetDriver"));
+			BackendDef.DriverClassNameFallback = FName(TEXT("/Script/MultiServerReplication.ProxyBackendNetDriver"));
+			GEngine->NetDriverDefinitions.Add(BackendDef);
+
+			UE_LOG(LogNyx, Log, TEXT("NetDriverDefinitions reconfigured: GameNetDriver → ProxyNetDriver (%d total entries)"),
+				GEngine->NetDriverDefinitions.Num());
+			for (const FNetDriverDefinition& Def : GEngine->NetDriverDefinitions)
+			{
+				UE_LOG(LogNyx, Log, TEXT("  DefName=%s  ClassName=%s"), *Def.DefName.ToString(), *Def.DriverClassName.ToString());
+			}
+
+			// Clear NyxReplicationGraph from the proxy's NetDriver.
+			// The proxy just forwards packets — it must NOT use a custom RepGraph.
+			// ReplicationDriverClassName is a UPROPERTY(Config) loaded on CDO construction
+			// (before Init()), so modifying GConfig alone is too late.
+			// We must clear it on the CDOs of every NetDriver class the proxy might use.
+			for (const TCHAR* DriverPath : {
+				TEXT("/Script/MultiServerReplication.ProxyNetDriver"),
+				TEXT("/Script/OnlineSubsystemUtils.IpNetDriver") })
+			{
+				UClass* DriverClass = FindObject<UClass>(nullptr, DriverPath);
+				if (DriverClass)
+				{
+					UNetDriver* CDO = Cast<UNetDriver>(DriverClass->GetDefaultObject());
+					if (CDO)
+					{
+						CDO->ReplicationDriverClassName.Empty();
+						UE_LOG(LogNyx, Log, TEXT("Cleared ReplicationDriverClassName on CDO of %s"), DriverPath);
+					}
+				}
+			}
+		}
+	}
 
 	// Allow command-line overrides for containerized / headless deployment
 	FString CmdHost;
@@ -656,3 +719,5 @@ void UNyxGameInstance::UnregisterConsoleCommands()
 	}
 	ConsoleCommands.Empty();
 }
+ 
+ 

@@ -12,6 +12,7 @@
 #include "GameFramework/PlayerState.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Misc/CommandLine.h"
 
 ANyxGameMode::ANyxGameMode()
 {
@@ -26,6 +27,13 @@ void ANyxGameMode::StartPlay()
 	const bool bServer = IsNyxServer();
 	UE_LOG(LogNyx, Log, TEXT("NyxGameMode::StartPlay (IsNyxServer=%s  NetMode=%d)"),
 		bServer ? TEXT("true") : TEXT("false"), static_cast<int32>(GetNetMode()));
+
+	// ── Proxy Server: skip all game logic (proxy only forwards replication) ──
+	if (bServer && IsProxyServer())
+	{
+		UE_LOG(LogNyx, Log, TEXT("Running as PROXY server — skipping SpacetimeDB, zone transfer, and game logic"));
+		return;
+	}
 
 	if (bServer)
 	{
@@ -157,6 +165,16 @@ void ANyxGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 {
+	// Proxy server must NOT call Super::PostLogin — that triggers RestartPlayer() /
+	// SpawnDefaultPawnFor(), which creates a local pawn that conflicts with the
+	// game server's pawn forwarded through the MultiServer proxy.
+	if (IsProxyServer())
+	{
+		UE_LOG(LogNyx, Log, TEXT("PostLogin (PROXY): %s — skipping pawn spawn"),
+			NewPlayer ? *NewPlayer->GetName() : TEXT("NULL"));
+		return;
+	}
+
 	Super::PostLogin(NewPlayer);
 
 	if (!NewPlayer) return;
@@ -191,6 +209,17 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 			UE_LOG(LogNyx, Warning, TEXT("PostLogin: Player pawn is not ANyxCharacter"));
 		}
 	}
+}
+
+APawn* ANyxGameMode::SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot)
+{
+	// Proxy server must NOT spawn pawns — the game server spawns them and
+	// the MultiServer proxy forwards replication data to clients.
+	if (IsProxyServer())
+	{
+		return nullptr;
+	}
+	return Super::SpawnDefaultPawnFor_Implementation(NewPlayer, StartSpot);
 }
 
 void ANyxGameMode::Logout(AController* Exiting)
@@ -307,4 +336,13 @@ void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)
 	{
 		EnterWorld();
 	}
+}
+
+bool ANyxGameMode::IsProxyServer() const
+{
+	// The proxy process is launched with -ProxyGameServers= which tells
+	// UProxyNetDriver which backend game servers to connect to.
+	// If this flag is present, we're a proxy — not a real game server.
+	return FParse::Param(FCommandLine::Get(), TEXT("ProxyGameServers"))
+		|| FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers="));
 }

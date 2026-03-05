@@ -4860,6 +4860,110 @@ No code changes in Spike 20 — this was a pure integration test and research sp
 
 ---
 
+## Spike 21 — MultiServer Proxy Stress Test (2026-03-05)
+
+**Goal:** Test Epic's experimental MultiServer Replication Plugin proxy server for cross-border player visibility. If it works for seamless transitions and player movement/position only, everything else (combat, persistence, stats) can be handled by SpacetimeDB.
+
+### Architecture
+
+```
+Client → Proxy (port 7780) → Game Server 1 (port 7777, primary)
+                            → Game Server 2 (port 7778, non-primary)
+```
+
+The proxy acts as a transparent forwarding layer between clients and multiple game servers. Each client connects to the proxy, which multiplexes the connection to all game servers using split-screen (child connection) internally. The client's "primary" game server owns the player's pawn; non-primary servers use `NoPawnPlayerController` for cross-server visibility.
+
+### Plugin Source Analysis (MultiServerProxy.cpp — 1655 lines)
+
+Key components read and analyzed from `Engine/Plugins/Runtime/MultiServerReplication/`:
+
+| Component | Purpose |
+|-----------|---------|
+| `UProxyNetDriver` | Frontend driver accepting client connections, replaces `IpNetDriver` via `GameNetDriver` definition |
+| `UProxyBackendNetDriver` | Backend driver connecting proxy to each game server |
+| `UProxyBackendChildNetConnection` | Child connections representing individual clients on each backend |
+| `FProxyNetGUIDCache` | Proxy-side GUID cache, looks up objects from the shared backend cache |
+| `FProxyBackendNetGUIDCache` | Shared GUID cache across all backend connections (key design decision) |
+| `FMultiServerProxyInternalConnectionRoute` | Routes mapping client connections → backend server connections |
+| `UProxyListenerNotify` | Handles incoming client joins, creates split-join connections to backends |
+
+Key proxy behaviors:
+- `DisableActorLogicAndGameCode()` — stops actor ticking and RPCs on proxy process
+- `SetRoleSwapOnReplicate()` — ensures client receives correct ROLE_AutonomousProxy
+- `AddNetworkActor()` — disables replication for ROLE_Authority actors (local proxy world actors)
+- `ForwardRemoteFunction()` — only forwards RPCs from/to primary game server connections
+- `PrepareStateForRelevancy()` — manually updates pawn locations from ReplicatedMovement for relevancy
+- `CanDowngradeActorRole()` — downgrades non-primary actors from AutonomousProxy to SimulatedProxy
+
+### Issues Fixed During Spike
+
+| # | Issue | Fix | File |
+|---|-------|-----|------|
+| 1 | **NetDriver swap** — Proxy requires `UProxyNetDriver` as `GameNetDriver` | Code-based `GEngine->NetDriverDefinitions` swap in `NyxGameInstance::Init()` detecting `-ProxyGameServers=` | NyxGameInstance.cpp |
+| 2 | **NMT_JoinNoPawn not supported** — Game servers reject NoPawn connections | Added `net.EnableSupportForNoPawnConnection=True` to DefaultEngine.ini `[SystemSettings]` | DefaultEngine.ini |
+| 3 | **NyxReplicationGraph crash on proxy** — Proxy doesn't need custom replication | Clear `ReplicationDriverClassName` on CDOs of `ProxyNetDriver` and `IpNetDriver` before Init() | NyxGameInstance.cpp |
+| 4 | **NyxZoneBoundary ActorChannelFailure** — Non-player world actors can't be forwarded by proxy | Set `bReplicates=false`, `bAlwaysRelevant=false` on NyxZoneBoundary | NyxZoneBoundary.cpp |
+| 5 | **Proxy spawning local pawns** — PostLogin creates unwanted pawns on proxy | Moved `IsProxyServer()` check before `Super::PostLogin()`; added `SpawnDefaultPawnFor_Implementation` returning nullptr | NyxGameMode.cpp/h |
+| 6 | **PowerShell corrupting IP args** — `&` operator injected space into `127.0.0.1` | Switched to `Start-Process -ArgumentList` for reliable argument passing | Launch scripts |
+
+### Remaining Blockers (Unfixable from Game Code)
+
+#### 1. SharedBackendNetGuidCache GUID Collision (CRITICAL)
+
+**Root Cause:** All backend `ProxyBackendNetDriver` instances share a single `FProxyBackendNetGUIDCache`. Each game server assigns NetGUIDs independently (sequential integers). When server A assigns GUID 5 to `PlayerController_0` and server B assigns GUID 5 to `NoPawnPlayerController_0`, the first to register in the shared cache wins. The second server's object gets the wrong reference.
+
+**Effect:** The proxy bound `NoPawnPlayerController_1` (from the non-primary server) as the primary route's PlayerController. This was confirmed by the ensure:
+```
+Ensure: !PrimaryPlayerController->IsA(ANoPawnPlayerController::StaticClass())
+[MultiServerProxy.cpp:1544]
+```
+
+**Client Crash:** The client received `NoPawnPlayerController_0` with `RemoteRole: ROLE_AutonomousProxy`, treated it as its own controller, and crashed with `EXCEPTION_ACCESS_VIOLATION reading address 0x0000000000000510` (null `PlayerCameraManager` offset) during the engine tick ~1.6s after map load.
+
+#### 2. SetAutonomousProxy Spam (MINOR)
+
+The proxy calls `SetAutonomousProxy` on the non-primary route's `PlayerController_0` every tick. Since this controller exists only on the proxy (not replicated), the engine warns `SetAutonomousProxy called on an unreplicated actor`. Internal to `UProxyNetDriver::FinalizeGameServerConnection()` line 1210.
+
+#### 3. NyxReplicationGraph Child Connection Gap (MODERATE)
+
+Game server 2 logged: `Warning: No AlwaysRelevant_ForConnection node for ChildConnection_0`. Our `NyxReplicationGraph::InitConnectionGraphNodes()` creates per-connection nodes only for parent connections. The proxy uses split-screen child connections, which don't get per-connection nodes. This causes `RelevantToOwner` actors (PlayerController, HUD) to fail routing on non-primary servers.
+
+### Test Results Summary
+
+| Milestone | Status |
+|-----------|--------|
+| Proxy boots and listens | ✅ |
+| Both game servers registered on proxy | ✅ |
+| Client connects to proxy | ✅ |
+| Proxy creates backend connections to both servers | ✅ |
+| Game servers create correct controllers (verified in server logs) | ✅ |
+| NyxCharacter spawns on primary server (ROLE_Authority) | ✅ |
+| NyxCharacter replicated to proxy (ROLE_AutonomousProxy) | ✅ |
+| Client receives correct PlayerController | ❌ (GUID collision) |
+| Client sees mannequin/controls/camera | ❌ (crash before render) |
+| Multi-client operation | ❌ (not reached) |
+
+### Conclusion
+
+The MultiServer Replication Plugin (UE 5.7 experimental) has a **fundamental architectural flaw** in its `SharedBackendNetGuidCache` when game servers assign NetGUIDs independently. The shared GUID cache causes cross-server object reference collisions that corrupt the PlayerController routing, which in turn crashes the client.
+
+This is **not fixable from game code** — it requires either:
+1. Epic to implement disjoint GUID ranges per backend server in the shared cache
+2. Game servers to coordinate GUID assignment (not supported in standard UE)
+3. The proxy to maintain per-server GUID caches and translate GUIDs at the forwarding boundary
+
+**Verdict:** The MultiServer Replication Plugin is **not ready for production use** as of UE 5.7. For cross-border player visibility, we will proceed with **SpacetimeDB Shared Table approach** (Spike 20 Option B), using ghost pawn spawning on each server with positions synchronized through SpacetimeDB subscriptions.
+
+### Files Changed
+
+- **NyxGameInstance.cpp** — Proxy NetDriver override + CDO RepGraph clearing
+- **NyxGameMode.cpp** — `PostLogin()` proxy check, `SpawnDefaultPawnFor_Implementation` override, `StartPlay()` proxy skip, `IsProxyServer()` helper
+- **NyxGameMode.h** — Added `IsProxyServer()`, `SpawnDefaultPawnFor_Implementation` declarations
+- **NyxZoneBoundary.cpp** — Disabled replication (`bReplicates=false`, `bAlwaysRelevant=false`)
+- **DefaultEngine.ini** — Added `net.EnableSupportForNoPawnConnection=True`
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal

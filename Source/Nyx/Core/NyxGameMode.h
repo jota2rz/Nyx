@@ -40,6 +40,9 @@ public:
 	/** Called when a player logs in. On dedicated server: load character from SpacetimeDB. */
 	virtual void PostLogin(APlayerController* NewPlayer) override;
 
+	/** Proxy: return nullptr to prevent pawn spawning (game server handles it). */
+	virtual APawn* SpawnDefaultPawnFor_Implementation(AController* NewPlayer, AActor* StartSpot) override;
+
 	/** Called when a player logs out. On dedicated server: save character to SpacetimeDB. */
 	virtual void Logout(AController* Exiting) override;
 
@@ -101,6 +104,9 @@ public:
 	 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Server")
 	bool bOwnsNegativeSide = true;
+
+	/** Returns true when this process is running as a MultiServer proxy (not a real game server). */
+	bool IsProxyServer() const;
 
 private:
 	void OnAuthStateChanged(ENyxAuthState NewState);
