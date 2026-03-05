@@ -4945,14 +4945,9 @@ Game server 2 logged: `Warning: No AlwaysRelevant_ForConnection node for ChildCo
 
 ### Conclusion
 
-The MultiServer Replication Plugin (UE 5.7 experimental) has a **fundamental architectural flaw** in its `SharedBackendNetGuidCache` when game servers assign NetGUIDs independently. The shared GUID cache causes cross-server object reference collisions that corrupt the PlayerController routing, which in turn crashes the client.
+~~The MultiServer Replication Plugin (UE 5.7 experimental) has a fundamental architectural flaw in its `SharedBackendNetGuidCache` when game servers assign NetGUIDs independently.~~
 
-This is **not fixable from game code** — it requires either:
-1. Epic to implement disjoint GUID ranges per backend server in the shared cache
-2. Game servers to coordinate GUID assignment (not supported in standard UE)
-3. The proxy to maintain per-server GUID caches and translate GUIDs at the forwarding boundary
-
-**Verdict:** The MultiServer Replication Plugin is **not ready for production use** as of UE 5.7. For cross-border player visibility, we will proceed with **SpacetimeDB Shared Table approach** (Spike 20 Option B), using ghost pawn spawning on each server with positions synchronized through SpacetimeDB subscriptions.
+**UPDATE (Spike 22):** The GUID collision diagnosis was incorrect. The root cause was a bug in `NyxReplicationGraph::GetAlwaysRelevantNodeForConnection()` — it did not redirect `UChildConnection` to its parent, so the child connection's `PlayerController` never replicated to the proxy. The proxy only received the parent's `NoPawnPlayerController`, which was then misidentified as the primary controller. **This was fixed in Spike 22 and the proxy now works correctly.** See Spike 22 for full details.
 
 ### Files Changed
 
@@ -4961,6 +4956,202 @@ This is **not fixable from game code** — it requires either:
 - **NyxGameMode.h** — Added `IsProxyServer()`, `SpawnDefaultPawnFor_Implementation` declarations
 - **NyxZoneBoundary.cpp** — Disabled replication (`bReplicates=false`, `bAlwaysRelevant=false`)
 - **DefaultEngine.ini** — Added `net.EnableSupportForNoPawnConnection=True`
+
+---
+
+## Spike 22 — MultiServer Proxy Fix: RepGraph Child Connection Redirect (2026-03-05) ✅
+
+**Goal:** Re-examine the Spike 21 MultiServer proxy crash with updated understanding of the engine code and fix it.
+
+**Status:** COMPLETE — Committed as `2bf5c77`, pushed to origin.
+
+### Background: Epic's Two Key Commits
+
+During investigation, the user identified two Epic commits that implement the MultiServer proxy's core architecture:
+
+| Commit | Key Feature |
+|--------|-------------|
+| `b430b6d` | **ClientHandshakeId system** — replaces fragile PlayerIndex-based mapping with unique IDs passed through the join flow |
+| `2fce89f` | **ProxyNetGUIDCache + SharedBackendNetGuidCache** — proper GUID cache management, proxy-spawned actor removal, route-based forwarding |
+
+Both commits were **confirmed present in the local UE 5.7 build** via grep_search. Furthermore, the local engine code has evolved **beyond** both commits:
+
+| Feature | Commits | Local UE 5.7 |
+|---------|---------|-------|
+| Connection states | 3 (Disconnected, Connecting, Connected) | **7** (+ ConnectingPrimary, ConnectedPrimary, PendingReassign, PendingClose) |
+| Route struct | Basic (Connection, Player, PC) | **Extended** (+ State field, LastUpdateViewTargetSec, LastViewTargetPos, ParentGameServerConnection) |
+| Player controller migration | Not present | **FPlayerControllerReassignment** with 2-phase deferred reassignment |
+| State machine | Simple if/else | **Dedicated ProcessConnectionState_* methods** for each state |
+| Proxy-spawned PCs | ProxySpawnedActors list | **Removed** — uses game server's PC directly on proxy connection |
+
+### Investigation: UE_WITH_REMOTE_OBJECT_HANDLE (Dead End)
+
+Before finding the real fix, we investigated `UE_WITH_REMOTE_OBJECT_HANDLE` in `CoreMiscDefines.h`:
+- Defined as `0` (disabled) — requires full engine recompile to enable
+- Adds a `TObjectHandle<>` wrapper around replicated object references
+- **Not connected to the legacy `FNetworkGUID` cache** that the proxy uses
+- Would not solve the GUID collision problem even if enabled
+- **Verdict:** Dead end, abandoned
+
+### Root Cause Analysis
+
+The Spike 21 diagnosis of "SharedBackendNetGuidCache GUID collision" was a **misdiagnosis**. The real root cause was in our own game code.
+
+#### The Proxy's Connection Architecture
+
+When a client connects to the proxy, `UProxyListenerNotify::ConnectToGameServer()` creates:
+
+```
+Proxy → Game Server 1 (primary):
+  Parent connection: NoPawn (NMT_JoinNoPawn) — control channel only
+  Child connection:  NMT_JoinSplit (flags=0) — spawns real PlayerController + Pawn
+
+Proxy → Game Server 2 (non-primary):
+  Parent connection: NoPawn (NMT_JoinNoPawn) — control channel only
+  Child connection:  NMT_JoinNoPawnSplit (flags=1) — spawns NoPawnPlayerController
+```
+
+The **primary game server's child connection** creates the real `PlayerController_0` and `NyxCharacter_0`. This is confirmed in the server log:
+```
+JOINSPLIT: Join request: URL=...?HandshakeId=123?SplitscreenCount=2
+RouteAddNetworkActor: PlayerController_0 → RelevantToOwner
+PostLogin: PlayerController_0 (PlayerName=Player)
+JOINSPLIT: Succeeded: Player PlayerId: ...
+```
+
+#### The Bug: Child Connection Lookup Failure
+
+`PlayerController_0` has `bOnlyRelevantToOwner=true`, so `NyxReplicationGraph::RouteAddNetworkActorToNodes()` routes it to a per-connection node via `GetAlwaysRelevantNodeForConnection(Connection)`.
+
+The connection passed is `ChildConnection_0` (the split-join child). But `GetAlwaysRelevantNodeForConnection()` did a **direct pointer comparison** against `ConnectionKeys[]`, which only contains **parent connections**:
+
+```cpp
+// BUG: ChildConnection_0 is never in ConnectionKeys[]
+for (int32 Idx = 0; Idx < ConnectionKeys.Num(); ++Idx)
+{
+    if (ConnectionKeys[Idx] == Connection)  // Always false for children!
+        return ConnectionNodes[Idx];
+}
+// Falls through → returns nullptr → PlayerController never added to any node
+```
+
+The base engine `UReplicationGraph::FindConnectionManager()` (ReplicationGraph.cpp line 515) handles this correctly:
+```cpp
+if (NetConnection->GetUChildConnection() != nullptr)
+{
+    NetConnection = ((UChildConnection*)NetConnection)->Parent;  // Redirect!
+}
+```
+
+Our custom helper was missing this redirect.
+
+#### The Crash Chain
+
+1. `NyxReplicationGraph::GetAlwaysRelevantNodeForConnection(ChildConnection_0)` → returns `nullptr`
+2. `PlayerController_0` is never added to any replication node → **never replicates to the proxy**
+3. Proxy only receives the parent connection's `NoPawnPlayerController` from Server 1
+4. `ProcessConnectionState_ConnectingPrimary()` assigns this NoPawnPC as the **primary** controller
+5. NoPawnPC is added to `ProxyConnectionToPrimaryGameServerPlayerController` map
+6. `PrepareStateForRelevancy()` iterates the map and fires:
+   ```
+   ensure(!PrimaryPlayerController->IsA(ANoPawnPlayerController::StaticClass()))
+   ```
+7. The NoPawnPC is replicated to the client as `NoPawnPlayerController_0` with `RemoteRole: ROLE_AutonomousProxy`
+8. Client treats it as its own controller, but NoPawnPC has no `PlayerCameraManager`
+9. Engine tick dereferences null `PlayerCameraManager` → `EXCEPTION_ACCESS_VIOLATION reading address 0x0000000000000510`
+
+### Fix
+
+Added `UChildConnection` → Parent redirect to `NyxReplicationGraph::GetAlwaysRelevantNodeForConnection()`:
+
+```cpp
+UReplicationGraphNode_AlwaysRelevant_ForConnection* UNyxReplicationGraph::GetAlwaysRelevantNodeForConnection(
+    UNetConnection* Connection)
+{
+    if (!Connection) return nullptr;
+
+    // Child connections (split-screen / multi-server proxy children) don't have their own
+    // connection managers — they share their parent's per-connection nodes.
+    if (UChildConnection* ChildConn = Cast<UChildConnection>(Connection))
+    {
+        Connection = ChildConn->Parent;
+    }
+
+    for (int32 Idx = 0; Idx < ConnectionKeys.Num(); ++Idx)
+    {
+        if (ConnectionKeys[Idx] == Connection)
+            return ConnectionNodes[Idx];
+    }
+
+    UE_LOG(LogNyxRepGraph, Warning, TEXT("No AlwaysRelevant_ForConnection node for %s"), *GetNameSafe(Connection));
+    return nullptr;
+}
+```
+
+**File changed:** `Source/Nyx/Networking/NyxReplicationGraph.cpp` — 8 lines added
+
+### Test Results
+
+Full multi-server proxy test (Server1:7777, Server2:7778, Proxy:7780, Client→Proxy):
+
+| Milestone | Before (Spike 21) | After (Spike 22) |
+|-----------|-------------------|-------------------|
+| Proxy boots and listens | ✅ | ✅ |
+| Both game servers registered | ✅ | ✅ |
+| Client connects to proxy | ✅ | ✅ |
+| Backend connections to both servers | ✅ | ✅ |
+| Game servers create correct controllers | ✅ | ✅ |
+| NyxCharacter spawns on primary server | ✅ | ✅ |
+| **Client receives correct PlayerController** | ❌ NoPawnPC | ✅ **PlayerController_1** |
+| **NyxCharacter replicated to client** | ❌ crash | ✅ **ROLE_AutonomousProxy** |
+| **Character stats replicate** | ❌ crash | ✅ **HP=1000/1000** |
+| **No ensure failures on proxy** | ❌ ensure fired | ✅ **clean** |
+| **Client stable (no crash)** | ❌ EXCEPTION_ACCESS_VIOLATION | ✅ **stable** |
+
+#### Proxy Log (Key Lines)
+
+```
+[123] Received a new player controller PlayerController_0:PlayerController
+[123] Successfully connected proxy connection to primary game server connection
+      using player controller PlayerController_0:PlayerController
+
+[124] Received a new player controller PlayerController_0:PlayerController
+[124] Successfully connected proxy connection to non-primary game server connection
+      using player controller PlayerController_0:PlayerController
+```
+
+No ensure failures. No GUID collisions. The `SharedBackendNetGuidCache` works correctly when the objects actually replicate properly.
+
+#### Remaining Warnings (Non-Critical)
+
+| Warning | Cause | Severity |
+|---------|-------|----------|
+| `SetAutonomousProxy called on unreplicated actor 'PlayerController_0'` | Proxy calls `SetRole(ROLE_AutonomousProxy)` on non-primary server's PC which has `bReplicates=false` | Low — cosmetic, non-primary PC is internal only |
+| `SetReplicates called on actor 'NyxCharacter_0' that is not valid for having its role modified` | Proxy's `AddNetworkActor()` disables replication on ROLE_Authority actors | Low — expected proxy behavior |
+
+### Key Learnings
+
+1. **Custom ReplicationGraph helpers must mirror engine patterns.** The base `UReplicationGraph` redirects `UChildConnection` → Parent in every lookup. Custom helpers that bypass this will silently break any feature using child connections (split-screen, MultiServer proxy).
+
+2. **The MultiServer proxy uses child connections, not parent connections, for player replication.** The parent connection is NoPawn (control channel only). The real PlayerController travels through the split-join child connection.
+
+3. **The GUID collision was a red herring.** It appeared to be a GUID collision because both servers' `NoPawnPlayerController` objects had similar NetGUIDs. But the real problem was that the correct `PlayerController` never replicated at all — the NoPawnPC was the only controller the proxy ever saw.
+
+4. **The MultiServer Replication Plugin works correctly** with UE 5.7 when the game code properly handles child connections. The plugin's `FProxyNetGUIDCache`, `SharedBackendNetGuidCache`, route-based state machine, and `ClientHandshakeId` system all function as designed.
+
+5. **`UE_WITH_REMOTE_OBJECT_HANDLE` is unrelated** to the NetGUID cache system. It's a separate feature for typed object handles in replication, compiled out by default, and would not solve GUID-related issues.
+
+### Updated Verdict
+
+~~The MultiServer Replication Plugin is not ready for production use.~~
+
+**The MultiServer Replication Plugin WORKS** for cross-server player visibility in UE 5.7. With the RepGraph child connection fix:
+- Client connects through proxy and receives the correct PlayerController
+- NyxCharacter spawns and replicates with `ROLE_AutonomousProxy`
+- Character stats replicate correctly (HP, level, etc.)
+- No crashes, no ensure failures
+
+This is a **viable alternative** to the SpacetimeDB ghost pawn approach (Spike 20 Option B) for cross-border player visibility. The proxy handles all replication forwarding transparently — no game-level ghost pawn management needed.
 
 ---
 
