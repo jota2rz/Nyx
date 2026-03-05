@@ -3368,6 +3368,86 @@ pub fn assign_player_to_server(
 
 ---
 
+## Spike 17 — Client → Docker Server Connection (2026-03-05)
+
+**Goal:** Connect a Windows standalone game client to a Docker-hosted UE5 dedicated server and verify the full player join pipeline: handshake → PostLogin → SpacetimeDB character load → stat replication to client.
+
+### Implementation
+
+#### 1. `Nyx.JoinServer` Console Command
+
+Added a new console command to `NyxGameInstance.cpp` that triggers `ClientTravel` to a dedicated server:
+
+```cpp
+// Usage: Nyx.JoinServer [ip:port]   (default: 127.0.0.1:7777)
+PC->ClientTravel(Address, TRAVEL_Absolute);
+```
+
+This allows connecting from the standalone game client to any UE5 dedicated server by pressing `~` and typing `Nyx.JoinServer`.
+
+### Issues Fixed
+
+#### 1. MissingLevelPackage Disconnect (World Partition Cell Mismatch)
+
+**Symptom:** Client connects, server's `PostLogin` fires, character loads from SpacetimeDB successfully, but the server immediately kicks the client with `MissingLevelPackage` close reason.
+
+**Root Cause:** The OpenWorld map uses **World Partition (WP)**, which generates streaming cells with hash-based package names (e.g., `/Engine/Maps/Templates/OpenWorld/90YKWZXGBC5Q8M7RFK49P371F`). The Windows editor client and Linux cooked server generate **different cell IDs** for the same map. When the client tells the server which WP cells it has loaded (`ServerUpdateLevelVisibility`), the server can't find those packages and disconnects the client.
+
+**Code path** (engine source):
+```
+NetConnection.cpp:1912 — CVarSkipMissingLevelDisconnect check
+  → if false: Close({ENetCloseResult::MissingLevelPackage, ...})
+```
+
+**Fix:** Set `net.SkipMissingLevelDisconnect=True` in `Config/DefaultEngine.ini` under `[SystemSettings]`. This tells the server to log a warning instead of disconnecting the client when WP cell IDs don't match.
+
+```ini
+[SystemSettings]
+net.SkipMissingLevelDisconnect=True
+```
+
+**Note:** This is a known UE5 issue with cross-platform World Partition. The engine even has a comment: *"Added CVAR to address #sh-06-13-desert-biome-server-kicks-ext. Should be removed once a proper solution is found."* A permanent fix would be to use a custom map with matching cooked assets on both platforms, or cook client and server from the same platform.
+
+### Verified Pipeline
+
+The full end-to-end flow was verified:
+
+| Step | Component | Result |
+|------|-----------|--------|
+| 1. Client connects | `Nyx.JoinServer` → `ClientTravel` | ✅ UDP handshake completes |
+| 2. Server login | `NyxGameMode::PostLogin` | ✅ `PlayerController_2147482181` |
+| 3. Player identity | `NyxServerSubsystem::OnPlayerJoined` | ✅ `identity=0xf4c24e3cb9978e...` |
+| 4. SpacetimeDB load | `LoadCharacter` reducer | ✅ Character loaded from DB |
+| 5. Stats applied | `ApplyCharacterStats` | ✅ `Level=1 HP=1000/1000 MP=500/500 ATK=15 DEF=10` |
+| 6. Replication | Rep to client | ✅ `NyxCharacter_0` as `ROLE_AutonomousProxy` |
+| 7. Client input | Attack presses | ✅ Flowing through server PlayerController |
+| 8. Persistence | SpacetimeDB auto-save | ✅ Position saved to `zone-a` every 60s |
+
+### SpacetimeDB Verification
+
+```sql
+SELECT display_name, level, current_hp, max_hp, saved_zone_id FROM character_stats
+  WHERE display_name = 'PlayerController_2147482181';
+-- Result: level=1, current_hp=1000, max_hp=1000, saved_zone_id="zone-a"
+```
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `Source/Nyx/Core/NyxGameInstance.cpp` | Added `Nyx.JoinServer` console command |
+| `Config/DefaultEngine.ini` | Added `net.SkipMissingLevelDisconnect=True` |
+| `docker-compose.yml` | (No change needed — CVar set in engine config) |
+
+### Architecture Validated
+
+This spike confirms the full **Option 4 — Hybrid A+C+D** architecture works end-to-end:
+- **UE5 dedicated server** (Docker/Linux): Authoritative for gameplay, movement, replication
+- **SpacetimeDB**: Persistence layer — character stats load on join, auto-save on timer
+- **Client** (Windows standalone): Connects via UDP, receives replicated state, sends input
+
+---
+
 ## Spike 15 — MultiServer Beacon Mesh Fix
 
 **Goal:** Fix the MultiServer beacon mesh between Docker containers so two UE5 dedicated servers form a peer-to-peer mesh.

@@ -598,6 +598,35 @@ void UNyxGameInstance::RegisterConsoleCommands()
 
 	// ─── Option 4: Smoke Test ─────────────────────────────────────────
 
+	// Nyx.JoinServer <ip:port> — connect to a UE5 dedicated server via ClientTravel
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.JoinServer"),
+		TEXT("Connect to a UE5 dedicated server. Usage: Nyx.JoinServer [ip:port] (default: 127.0.0.1:7777)"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			FString Address = Args.Num() > 0 ? Args[0] : TEXT("127.0.0.1:7777");
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.JoinServer %s"), *Address);
+
+			UWorld* World = GetWorld();
+			if (!World)
+			{
+				UE_LOG(LogNyx, Error, TEXT("No world available!"));
+				return;
+			}
+
+			APlayerController* PC = World->GetFirstPlayerController();
+			if (!PC)
+			{
+				UE_LOG(LogNyx, Error, TEXT("No player controller!"));
+				return;
+			}
+
+			// ClientTravel to the dedicated server
+			UE_LOG(LogNyx, Log, TEXT("ClientTravel to %s..."), *Address);
+			PC->ClientTravel(Address, TRAVEL_Absolute);
+		}),
+		ECVF_Default));
+
 	// Nyx.SmokeTest [host] [database] — run end-to-end Option 4 pipeline test
 	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
 		TEXT("Nyx.SmokeTest"),
@@ -616,7 +645,7 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset, Nyx.SmokeTest"));
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset, Nyx.JoinServer, Nyx.SmokeTest"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()
