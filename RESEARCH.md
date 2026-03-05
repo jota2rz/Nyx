@@ -4718,6 +4718,148 @@ spacetime publish nyx --clear-database -s http://127.0.0.1:3000
 
 ---
 
+## Spike 20 — Multi-Client Cross-Server Transfer Test & MultiServer Plugin Research (2026-03-05) ✅
+
+### Goal
+
+1. **Integration test**: Verify that multiple clients can simultaneously connect to one dedicated server, transfer across the zone boundary to another server, and return — exercising the Spike 19 transfer pipeline with 3 concurrent players.
+2. **Cross-border visibility research**: Investigate why players on one server can't see players on the other server, and evaluate Epic's experimental MultiServer Replication Plugin as a potential solution.
+
+### Part 1: Multi-Client Transfer Test
+
+#### Test Setup
+
+| Item | Detail |
+|---|---|
+| Docker containers | `nyx-spacetimedb` (port 3000), `nyx-server-1` (port 7777, west zone), `nyx-server-2` (port 7778→7777, east zone) |
+| Clients | 3 × Win64 game client (UnrealEditor `-game -windowed -ResX=800 -ResY=600`) |
+| Connection | Each client opens tilde console → `Nyx.JoinServer 127.0.0.1:7777` |
+| Transfer boundary | X=0, cyan pillars (west), orange pillars (east) |
+| SpacetimeDB | Published with `--clear-database`, schema has `saved_rot_yaw` |
+
+#### Test Scenarios & Results
+
+| Scenario | Result | Notes |
+|---|---|---|
+| Sequential transfer (1 player crosses, waits, next crosses) | ✅ | All 3 transferred individually; position, rotation, HP/MP preserved |
+| Simultaneous transfer (2-3 players cross at same tick) | ✅ | No crashes or race conditions; each player saves and transfers independently |
+| Return trip (all walk back west) | ✅ | Grace period prevents bounce-back; players return to server-1 cleanly |
+| Mixed state (some on server-1, some on server-2) | ✅ | Each server manages only its own connected players correctly |
+| Cross-border visibility | ❌ Not implemented | Players on server-1 cannot see players on server-2 and vice versa |
+
+#### Key Findings
+
+1. **Transfer pipeline is stable** — no crashes, no data loss, no identity collisions with 3 concurrent players
+2. **Grace period (5s) works** — no ping-pong bouncing even with simultaneous crossings
+3. **SpacetimeDB handles concurrent saves** — 3 `save_character` reducers firing near-simultaneously produce correct results
+4. **Missing: Cross-border visibility** — each UE5 server only knows about its own connected players; players across the boundary are invisible
+
+### Part 2: Cross-Border Visibility Research — Epic MultiServer Replication Plugin
+
+#### Plugin Location & Status
+
+| Property | Value |
+|---|---|
+| Path | `Engine/Plugins/Runtime/MultiServerReplication/` |
+| Enabled by default | **No** (must opt-in) |
+| Stability | **Experimental** (`IsExperimentalVersion: true`) |
+| UE version | Present in UE 5.7 |
+| Iris support | Server-to-server beacons: ✅; Proxy: ❌ (work ongoing, not available yet) |
+| Dependencies | `OnlineSubsystemUtils` |
+
+#### Architecture Overview
+
+The plugin has two independent parts:
+
+**1. Server-to-Server Beacons** (`UMultiServerNode` + `AMultiServerBeaconClient`)
+- Connects N dedicated servers to each other via Online Beacons (TCP)
+- Servers communicate using custom RPCs by subclassing `AMultiServerBeaconClient`
+- **No automatic state sharing** — projects must implement their own cross-server RPCs
+- `UMultiServerNode::Create()` in `AGameSession::RegisterServer` is the intended setup point
+- Supports Iris replication ✅
+- This part is relatively stable and usable
+
+**2. Proxy Servers** (`UProxyNetDriver` + `UProxyBackendNetDriver`)
+- A proxy process sits between clients and game servers
+- Clients connect to the proxy as if it were a normal game server
+- Proxy opens connections to ALL backend game servers
+- One backend is "primary" per player (owns their PlayerController + pawn)
+- Non-primary backends get `ANoPawnPlayerController` (no pawn, view-target only)
+- Proxy aggregates replicated state from all backends into a single world and re-replicates to clients
+- Handles player migration via `FPlayerControllerReassignment`
+
+```
+ [Client 1] ──TCP──▷ [Proxy Server] ──▷ [Game Server 1 (primary for Client 1)]
+ [Client 2] ──TCP──▷ [Proxy Server] ──▷ [Game Server 2 (primary for Client 2)]
+                          │
+                          └──▷ (also connected to all other game servers)
+```
+
+#### Critical Issues (per Epic Dev / OWS Discord, Dec 2025)
+
+1. **Proxy lacks "full information"** — Server replicates a minimal set to Proxy; Proxy cannot reconstruct all values the Server used (e.g., `FPredictionKeys` in GAS, `GameplayDebugger`). Many systems break silently.
+2. **Iris proxy support not ready** — Proxy replication is being moved from Generic Replication to Iris. Generic Replication path is deprecated. Iris path requires a special `#define` (not yet checked in as of Dec 2025; may be available in a later 5.7 update).
+3. **`UE::RemoteExecutor` not extensible** — Epic's internal remote executor doesn't have the right delegates for third-party implementations.
+4. **`RemoteObjectIds` depend on internal tech** — `UE_WITH_REMOTE_OBJECT_HANDLE` requires internal systems not available in the engine. Without it, object migration between servers requires destroy/recreate.
+
+#### Key Classes Reference
+
+| Class | Purpose |
+|---|---|
+| `UMultiServerNode` | Control object for server-to-server cluster; manages beacon connections with retry |
+| `AMultiServerBeaconClient` | Subclass to add custom Server↔Server RPCs |
+| `UProxyNetDriver` | Main proxy — listens for clients, manages backends, routes packets |
+| `UProxyBackendNetDriver` | Per-backend-server connection from the proxy |
+| `UProxyNetConnection` | Client-facing connection on the proxy |
+| `FGameServerConnectionState` | State per backend: URL, world, net driver, players |
+| `FMultiServerProxyInternalConnectionRoute` | Route: client → backend, tracks state + view target |
+| `FPlayerControllerReassignment` | Migration state machine for PlayerController handoff |
+| `ANoPawnPlayerController` | Lightweight controller for non-primary server connections |
+| `UMultiServerNetDriver` | Server-to-server net driver with custom tick ordering |
+| `UMultiServerSettings` | Config: `TotalNumServers` (INI / `-MultiServerNumServers` CLI) |
+
+#### Configuration Required
+
+```ini
+# DefaultEngine.ini — enable plugin
+[/Script/Engine.Engine]
++NetDriverDefinitions=(DefName="MultiServerNetDriver",DriverClassName="/Script/MultiServerReplication.MultiServerNetDriver",DriverClassNameFallback="/Script/MultiServerReplication.MultiServerNetDriver")
+
+# Nyx.uproject — enable plugin
+{ "Name": "MultiServerReplication", "Enabled": true }
+
+# MultiServer settings
+[/Script/MultiServerConfiguration.MultiServerSettings]
+TotalNumServers=2
+```
+
+#### Evaluation for Nyx
+
+| Criterion | Assessment |
+|---|---|
+| Server-to-server beacons | **Usable now** — we could use beacons to share near-boundary player positions between server-1 and server-2, then spawn "ghost" proxy pawns |
+| Proxy server | **Not usable** — Iris support missing, proxy incomplete, many broken edge cases |
+| Maturity | **High risk** — Epic dev explicitly warns "keep holding off unless ready for heavy Engine-level lifting" |
+| Alternative: SpacetimeDB-based visibility | **Viable** — servers already share SpacetimeDB; we could write positions to a `boundary_player` table and subscribe on adjacent servers to spawn local proxy pawns |
+
+### Recommended Approach for Cross-Border Visibility
+
+Given the MultiServer Replication Plugin's experimental state, we have three options:
+
+| Option | Description | Effort | Risk |
+|---|---|---|---|
+| **A. MultiServer Beacons** | Use `UMultiServerNode` + custom `AMultiServerBeaconClient` RPCs to share near-boundary positions. Spawn local ghost pawns. | Medium | Medium — beacon part is relatively stable but still experimental |
+| **B. SpacetimeDB Shared Table** | Write boundary-player positions to SpacetimeDB table (`boundary_presence`). Adjacent servers subscribe and spawn ghost pawns from table data. | Medium | Low — uses our existing, proven SpacetimeDB pipeline |
+| **C. Full Proxy Server** | Deploy `UProxyNetDriver` between clients and game servers. | High | **Very High** — Iris not working, many known bugs, Epic advises against |
+
+**Recommendation: Option B (SpacetimeDB Shared Table)** — aligns with our Option 4 architecture where SpacetimeDB is the single source of truth. Both servers already maintain WebSocket connections to SpacetimeDB with subscriptions. We just need a new table for boundary presence and ghost pawn spawning logic.
+
+### Files Changed
+
+No code changes in Spike 20 — this was a pure integration test and research spike.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
