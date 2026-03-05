@@ -72,7 +72,7 @@ services:
       - "-NyxMultiServerLocalId=server-1"
       - "-NyxMultiServerListenPort=15000"
       - "-MultiServerNumServers=2"
-      - "-MultiServerPeers=nyx-server-2:15000"
+      - "-MultiServerPeers=unreal://nyx-server-2:15000"
 
   # ── UE5 Dedicated Server 2 (Zone A secondary / entity shard) ───
   # Second server sharing the same zone for entity-sharded scaling.
@@ -105,7 +105,7 @@ services:
       - "-NyxMultiServerLocalId=server-2"
       - "-NyxMultiServerListenPort=15000"
       - "-MultiServerNumServers=2"
-      - "-MultiServerPeers=nyx-server-1:15000"
+      - "-MultiServerPeers=unreal://nyx-server-1:15000"
 
 volumes:
   stdb-data:

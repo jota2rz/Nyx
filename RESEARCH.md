@@ -3365,6 +3365,64 @@ pub fn assign_player_to_server(
 | 20-40s bootstrap is too slow for sudden sieges | Keep 1-2 warm standby containers per region (pre-loaded, idle) |
 | Entity migration causes player hitch | UE5 MultiServer authority transfer is designed for seamless handoff — test thoroughly |
 | Client needs to reconnect to new server | Use UE5's travel/reconnect mechanism — transparent to player if done during entity transfer |
+
+---
+
+## Spike 15 — MultiServer Beacon Mesh Fix
+
+**Goal:** Fix the MultiServer beacon mesh between Docker containers so two UE5 dedicated servers form a peer-to-peer mesh.
+
+### Issues Fixed
+
+#### 1. Missing NetDriverDefinition (from Spike 14 known issue)
+
+`AMultiServerBeaconHost` constructor sets `NetDriverDefinitionName = "MultiServerNetDriver"`, but no matching definition existed in engine config. Added to `Config/DefaultEngine.ini`:
+
+```ini
+[/Script/Engine.Engine]
++NetDriverDefinitions=(DefName="MultiServerNetDriver",DriverClassName="/Script/MultiServerReplication.MultiServerNetDriver",DriverClassNameFallback="/Script/MultiServerReplication.MultiServerNetDriver")
+```
+
+**Result:** Beacon host now creates `MultiServerNetDriver`, binds UDP socket on port 15000.
+
+#### 2. FURL Peer Address Parsing Bug
+
+UE5's `FURL` parser interprets `hostname:port` (without dots or protocol prefix) as `Protocol=hostname, Map=port`. For Docker container names like `nyx-server-2:15000`:
+- Parser sees single colon with no dot → treats `nyx-server-2` as protocol
+- Remaining `15000` fails map-name lookup → `Valid = 0`
+- Peer silently skipped at `Verbose` log level
+
+**Root Cause:** In `URL.cpp`, the protocol detection condition `(DotIdx == INDEX_NONE || FirstColonIdx < DotIdx)` is true when hostname has no dots (e.g., Docker container names with hyphens).
+
+**Fix:** Prefix peer addresses with `unreal://` protocol in `docker-compose.yml`:
+```yaml
+- "-MultiServerPeers=unreal://nyx-server-2:15000"
+```
+This forces FURL's pre-parser (`FindProtocolDelim`) to consume `unreal://` as protocol, leaving `nyx-server-2:15000` for correct host:port parsing.
+
+### Verified Results
+
+Both servers now fully mesh:
+```
+LogBeacon: Handshake complete.
+LogMultiServerBeacon: MultiServer beacon connection established.
+LogNyxMultiServerSub: Peer connected: server-1 -> server-2
+LogNyxMultiServerSub: Peer connected: server-2 -> server-1
+```
+
+SpacetimeDB integration also confirmed working:
+```
+LogNyxServer: SpacetimeDB connected. Subscribing to server tables...
+LogNyxServer: SpacetimeDB subscription applied. Registering zone server...
+LogNyxServer: Zone server registered: server-1 (zone=zone-a, maxEntities=500)
+LogNyxServer: Heartbeat started (30s interval)
+```
+
+### Files Modified
+| File | Change |
+|------|--------|
+| `Config/DefaultEngine.ini` | Added `[/Script/Engine.Engine]` section with `MultiServerNetDriver` definition |
+| `docker-compose.yml` | Added `unreal://` prefix to `-MultiServerPeers` addresses |
 | Container image size (UE5 server is large) | Pre-pull images on all nodes; use layered Docker images with shared engine base |
 | Cost of idle standby containers | Standby containers use minimal CPU (no players = no ticking); memory cost ~500MB-1GB each |
 | Race conditions in entity assignment | SpacetimeDB ACID guarantees atomic assignment — no double-assignment possible |
