@@ -3368,6 +3368,61 @@ pub fn assign_player_to_server(
 
 ---
 
+## Spike 18 — Multi-Client Multiplayer Test (2026-03-05)
+
+**Goal:** Connect multiple Windows standalone clients to the same Docker-hosted dedicated server simultaneously and verify: mutual player visibility via ReplicationGraph, independent SpacetimeDB character persistence, and cross-client combat.
+
+### Test Setup
+
+- 3 standalone game clients launched from the same Windows machine (`UnrealEditor.exe -game -windowed`)
+- All 3 connected to `nyx-server-1` via `Nyx.JoinServer` console command
+- Each client gets a unique PlayerController name (e.g., `PlayerController_2147482181`) which becomes its SpacetimeDB identity
+
+### Results
+
+| Verification | Status | Detail |
+|---|---|---|
+| Multi-client connection | ✅ | 3 clients connected simultaneously to same server |
+| PostLogin + stats loaded | ✅ | All 3 got `Level=1 HP=1000/1000 MP=500/500 ATK=15 DEF=10` |
+| ReplicationGraph visibility | ✅ | Players see each other moving on screen |
+| Cross-client combat | ✅ | HP reduced from hits (990, 995) — damage registered |
+| SpacetimeDB persistence | ✅ | 3 character records in `zone-a` with updated HP |
+| Client input through server | ✅ | Attack presses flow through server PlayerController |
+
+### SpacetimeDB Verification
+
+```sql
+SELECT display_name, level, current_hp, max_hp, saved_zone_id FROM character_stats;
+-- Results (zone-a entries from this test):
+-- PlayerController_2147482181  level=1  hp=990/1000  zone-a
+-- PlayerController_2147482134  level=1  hp=1000/1000 zone-a
+-- PlayerController_2147482100  level=1  hp=995/1000  zone-a
+```
+
+### Known Issues
+
+#### Remote Character Animation
+
+Remote characters (other players) replicate position correctly but display no walk/run animation — they slide across the ground. The `ABP_Unarmed` AnimBP loads successfully but doesn't have a full locomotion blend space driven by replicated velocity. This is a **cosmetic issue**, not a networking bug — the CMC replication is working correctly. Fix: wire velocity → locomotion blend space or switch to a full locomotion AnimBP.
+
+#### Stale Connection Timeout
+
+When a client is force-closed (Alt+F4 / process kill), the server does not immediately detect the disconnection — the ghost character persists until UE5's built-in connection timeout fires. This is standard UE5 behavior with configurable timeout values (`net.KeepAliveTime`, `InitialConnectTimeout`, `ConnectionTimeout`).
+
+### Architecture Validation
+
+This spike confirms the **multi-player** capability of the Option 4 architecture:
+- **ReplicationGraph** correctly manages spatial relevancy across multiple connections
+- **SpacetimeDB** maintains independent character records per player, with auto-save
+- **CMC replication** synchronizes movement across clients via the authoritative server
+- **Combat system** resolves hits server-side and replicates damage to all affected clients
+
+### Files Changed
+
+No code changes — this was a pure integration test of Spike 17's foundation with multiple clients.
+
+---
+
 ## Spike 17 — Client → Docker Server Connection (2026-03-05)
 
 **Goal:** Connect a Windows standalone game client to a Docker-hosted UE5 dedicated server and verify the full player join pipeline: handshake → PostLogin → SpacetimeDB character load → stat replication to client.
