@@ -7,7 +7,11 @@
 #include "Nyx/Player/NyxCharacter.h"
 #include "Nyx/Server/NyxServerSubsystem.h"
 #include "Nyx/Networking/NyxMultiServerSubsystem.h"
+#include "Nyx/World/NyxZoneBoundary.h"
 #include "GameFramework/PlayerController.h"
+#include "GameFramework/PlayerState.h"
+#include "TimerManager.h"
+#include "Engine/World.h"
 
 ANyxGameMode::ANyxGameMode()
 {
@@ -60,6 +64,51 @@ void ANyxGameMode::StartPlay()
 			{
 				UE_LOG(LogNyx, Log, TEXT("MultiServer mesh initialized from command line"));
 			}
+
+			// ── Zone Transfer config (Spike 19) ──
+			FString CmdTransferAddr;
+			if (FParse::Value(FCommandLine::Get(), TEXT("-TransferAddress="), CmdTransferAddr, false))
+			{
+				TransferAddress = CmdTransferAddr;
+			}
+			FString CmdOwnsSide;
+			if (FParse::Value(FCommandLine::Get(), TEXT("-ZoneSide="), CmdOwnsSide, false))
+			{
+				bOwnsNegativeSide = CmdOwnsSide.Equals(TEXT("west"), ESearchCase::IgnoreCase);
+			}
+
+			UE_LOG(LogNyx, Log, TEXT("Zone config: BoundaryX=%.0f, OwnsSide=%s, TransferAddr=%s"),
+				ZoneBoundaryX,
+				bOwnsNegativeSide ? TEXT("west (X<0)") : TEXT("east (X>=0)"),
+				TransferAddress.IsEmpty() ? TEXT("(none)") : *TransferAddress);
+
+			// Spawn zone boundary visual markers
+			FActorSpawnParameters SpawnParams;
+			SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+			ANyxZoneBoundary* Boundary = GetWorld()->SpawnActor<ANyxZoneBoundary>(
+				ANyxZoneBoundary::StaticClass(), FVector::ZeroVector, FRotator::ZeroRotator, SpawnParams);
+			if (Boundary)
+			{
+				Boundary->BoundaryX = ZoneBoundaryX;
+				// Color pillars by zone side so players can tell which server they're on
+				Boundary->PillarColor = bOwnsNegativeSide
+					? FLinearColor(0.f, 0.5f, 1.f, 1.f)   // West/server-1: Cyan
+					: FLinearColor(1.f, 0.4f, 0.f, 1.f);  // East/server-2: Orange
+				Boundary->ZoneLabel = bOwnsNegativeSide
+					? FString::Printf(TEXT("\u2190 WEST ZONE (Server-1)"))
+					: FString::Printf(TEXT("EAST ZONE (Server-2) \u2192"));
+				UE_LOG(LogNyx, Log, TEXT("Zone boundary markers spawned at X=%.0f (%s pillars)"),
+					ZoneBoundaryX, bOwnsNegativeSide ? TEXT("cyan") : TEXT("orange"));
+			}
+
+			// Start zone boundary checking timer (every 0.5s)
+			if (!TransferAddress.IsEmpty())
+			{
+				GetWorld()->GetTimerManager().SetTimer(ZoneCheckTimerHandle,
+					FTimerDelegate::CreateUObject(this, &ANyxGameMode::CheckZoneBoundaries),
+					0.5f, true);
+				UE_LOG(LogNyx, Log, TEXT("Zone boundary checking started (0.5s interval) → transfer to %s"), *TransferAddress);
+			}
 		}
 		else
 		{
@@ -88,6 +137,8 @@ void ANyxGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	if (IsNyxServer())
 	{
+		GetWorld()->GetTimerManager().ClearTimer(ZoneCheckTimerHandle);
+
 		UNyxMultiServerSubsystem* MultiSub = GetGameInstance()->GetSubsystem<UNyxMultiServerSubsystem>();
 		if (MultiSub)
 		{
@@ -110,10 +161,15 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 
 	if (!NewPlayer) return;
 
-	UE_LOG(LogNyx, Log, TEXT("PostLogin: %s"), *NewPlayer->GetName());
+	UE_LOG(LogNyx, Log, TEXT("PostLogin: %s (PlayerName=%s)"),
+		*NewPlayer->GetName(),
+		NewPlayer->PlayerState ? *NewPlayer->PlayerState->GetPlayerName() : TEXT("(no PlayerState)"));
 
 	if (IsNyxServer())
 	{
+		// Record arrival time for transfer grace period
+		TransferArrivalTimes.Add(NewPlayer, GetWorld()->GetTimeSeconds());
+
 		// Get the spawned NyxCharacter pawn
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(NewPlayer->GetPawn());
 		if (NyxChar)
@@ -121,8 +177,12 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
 			if (ServerSub)
 			{
-				// Use a display name — in production this would come from auth/EOS
-				FString PlayerName = NewPlayer->GetName();
+				// Use the stable login name from the connection (e.g. "DESKTOP-K4TB77K-AB796F4A...")
+				// NOT GetName() which returns the UObject name ("PlayerController_XXXXXXXX")
+				// and changes on every server connection, creating duplicate SpacetimeDB rows.
+				FString PlayerName = NewPlayer->PlayerState
+					? NewPlayer->PlayerState->GetPlayerName()
+					: NewPlayer->GetName();
 				ServerSub->OnPlayerJoined(NyxChar, PlayerName);
 			}
 		}
@@ -137,6 +197,13 @@ void ANyxGameMode::Logout(AController* Exiting)
 {
 	if (IsNyxServer() && Exiting)
 	{
+		APlayerController* PC = Cast<APlayerController>(Exiting);
+		if (PC)
+		{
+			PlayersBeingTransferred.Remove(PC);
+			TransferArrivalTimes.Remove(PC);
+		}
+
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(Exiting->GetPawn());
 		if (NyxChar)
 		{
@@ -173,6 +240,65 @@ bool ANyxGameMode::IsNyxServer() const
 	return IsRunningDedicatedServer()
 		|| GetNetMode() == NM_ListenServer
 		|| GetNetMode() == NM_DedicatedServer;
+}
+
+void ANyxGameMode::CheckZoneBoundaries()
+{
+	if (TransferAddress.IsEmpty()) return;
+
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	const double CurrentTime = World->GetTimeSeconds();
+
+	for (FConstPlayerControllerIterator It = World->GetPlayerControllerIterator(); It; ++It)
+	{
+		APlayerController* PC = It->Get();
+		if (!PC || PlayersBeingTransferred.Contains(PC)) continue;
+
+		// Skip players still in transfer grace period (prevents ping-pong)
+		if (const double* ArrivalTime = TransferArrivalTimes.Find(PC))
+		{
+			if (CurrentTime - *ArrivalTime < TransferGracePeriodSeconds)
+			{
+				continue;
+			}
+		}
+
+		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
+		if (!NyxChar) continue;
+
+		const float PlayerX = NyxChar->GetActorLocation().X;
+
+		// Check if player has crossed into the other server's territory
+		bool bShouldTransfer = false;
+		if (bOwnsNegativeSide && PlayerX >= ZoneBoundaryX)
+		{
+			bShouldTransfer = true; // Player crossed east into server-2's zone
+		}
+		else if (!bOwnsNegativeSide && PlayerX < ZoneBoundaryX)
+		{
+			bShouldTransfer = true; // Player crossed west into server-1's zone
+		}
+
+		if (bShouldTransfer)
+		{
+			PlayersBeingTransferred.Add(PC);
+
+			UE_LOG(LogNyx, Log, TEXT("Zone transfer: %s crossed boundary at X=%.0f → transferring to %s"),
+				*PC->GetName(), PlayerX, *TransferAddress);
+
+			// Save character state to SpacetimeDB before transfer
+			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+			if (ServerSub)
+			{
+				ServerSub->SaveCharacterState(NyxChar);
+			}
+
+			// Tell the client to travel to the other server
+			NyxChar->ClientRPC_TransferToServer(TransferAddress);
+		}
+	}
 }
 
 void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)

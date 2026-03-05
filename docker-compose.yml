@@ -73,9 +73,11 @@ services:
       - "-NyxMultiServerListenPort=15000"
       - "-MultiServerNumServers=2"
       - "-MultiServerPeers=unreal://nyx-server-2:15000"
+      - "-ZoneSide=west"
+      - "-TransferAddress=127.0.0.1:7778"
 
   # ── UE5 Dedicated Server 2 (Zone A secondary / entity shard) ───
-  # Second server sharing the same zone for entity-sharded scaling.
+  # Second server managing the east zone (X >= 0).
   # Peers with server-1 via MultiServer beacon mesh.
   nyx-server-2:
     build:
@@ -106,6 +108,8 @@ services:
       - "-NyxMultiServerListenPort=15000"
       - "-MultiServerNumServers=2"
       - "-MultiServerPeers=unreal://nyx-server-1:15000"
+      - "-ZoneSide=east"
+      - "-TransferAddress=127.0.0.1:7777"
 
 volumes:
   stdb-data:

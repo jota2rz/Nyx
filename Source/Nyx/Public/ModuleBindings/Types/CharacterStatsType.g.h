@@ -70,6 +70,9 @@ struct NYX_API FCharacterStatsType
     double SavedPosZ = 0.0;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SpacetimeDB")
+    float SavedRotYaw = 0.0f;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SpacetimeDB")
     FString SavedZoneId;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "SpacetimeDB")
@@ -77,7 +80,7 @@ struct NYX_API FCharacterStatsType
 
     FORCEINLINE bool operator==(const FCharacterStatsType& Other) const
     {
-        return Identity == Other.Identity && DisplayName == Other.DisplayName && Level == Other.Level && Experience == Other.Experience && MaxHp == Other.MaxHp && CurrentHp == Other.CurrentHp && MaxMp == Other.MaxMp && CurrentMp == Other.CurrentMp && Strength == Other.Strength && Dexterity == Other.Dexterity && Intelligence == Other.Intelligence && Constitution == Other.Constitution && AttackPower == Other.AttackPower && Defense == Other.Defense && MagicPower == Other.MagicPower && MagicDefense == Other.MagicDefense && SavedPosX == Other.SavedPosX && SavedPosY == Other.SavedPosY && SavedPosZ == Other.SavedPosZ && SavedZoneId == Other.SavedZoneId && LastSaved == Other.LastSaved;
+        return Identity == Other.Identity && DisplayName == Other.DisplayName && Level == Other.Level && Experience == Other.Experience && MaxHp == Other.MaxHp && CurrentHp == Other.CurrentHp && MaxMp == Other.MaxMp && CurrentMp == Other.CurrentMp && Strength == Other.Strength && Dexterity == Other.Dexterity && Intelligence == Other.Intelligence && Constitution == Other.Constitution && AttackPower == Other.AttackPower && Defense == Other.Defense && MagicPower == Other.MagicPower && MagicDefense == Other.MagicDefense && SavedPosX == Other.SavedPosX && SavedPosY == Other.SavedPosY && SavedPosZ == Other.SavedPosZ && SavedRotYaw == Other.SavedRotYaw && SavedZoneId == Other.SavedZoneId && LastSaved == Other.LastSaved;
     }
 
     FORCEINLINE bool operator!=(const FCharacterStatsType& Other) const
@@ -113,6 +116,7 @@ FORCEINLINE uint32 GetTypeHash(const FCharacterStatsType& CharacterStatsType)
     Hash = HashCombine(Hash, GetTypeHash(CharacterStatsType.SavedPosX));
     Hash = HashCombine(Hash, GetTypeHash(CharacterStatsType.SavedPosY));
     Hash = HashCombine(Hash, GetTypeHash(CharacterStatsType.SavedPosZ));
+    Hash = HashCombine(Hash, GetTypeHash(CharacterStatsType.SavedRotYaw));
     Hash = HashCombine(Hash, GetTypeHash(CharacterStatsType.SavedZoneId));
     Hash = HashCombine(Hash, GetTypeHash(CharacterStatsType.LastSaved));
     return Hash;
@@ -122,5 +126,5 @@ namespace UE::SpacetimeDB
 {
     UE_SPACETIMEDB_ENABLE_TARRAY(FCharacterStatsType);
 
-    UE_SPACETIMEDB_STRUCT(FCharacterStatsType, Identity, DisplayName, Level, Experience, MaxHp, CurrentHp, MaxMp, CurrentMp, Strength, Dexterity, Intelligence, Constitution, AttackPower, Defense, MagicPower, MagicDefense, SavedPosX, SavedPosY, SavedPosZ, SavedZoneId, LastSaved);
+    UE_SPACETIMEDB_STRUCT(FCharacterStatsType, Identity, DisplayName, Level, Experience, MaxHp, CurrentHp, MaxMp, CurrentMp, Strength, Dexterity, Intelligence, Constitution, AttackPower, Defense, MagicPower, MagicDefense, SavedPosX, SavedPosY, SavedPosZ, SavedRotYaw, SavedZoneId, LastSaved);
 }

@@ -4542,6 +4542,182 @@ Both servers start successfully with:
 
 ---
 
+## Spike 19 — Cross-Server Player Transfer (2026-03-05) ✅
+
+**Goal:** When a player crosses a zone boundary, seamlessly transfer them to the other UE5 dedicated server, preserving position, rotation, HP/MP, and all persistent stats via SpacetimeDB.
+
+**Status:** COMPLETE — Player transfers working with position, rotation, and stat preservation. One known issue (camera reset) deferred.
+
+### Architecture
+
+Each Docker server owns one side of a zone boundary at `X=0`:
+- **server-1 (zone-a):** Owns `X < 0` (west). Transfer address → `127.0.0.1:7778`
+- **server-2 (zone-b):** Owns `X >= 0` (east). Transfer address → `127.0.0.1:7777`
+
+When a player crosses the boundary, the authoritative server:
+1. Saves character state to SpacetimeDB (position, rotation, HP/MP, zone)
+2. Sends `ClientTravel` RPC to the client
+3. Client disconnects and reconnects to the new server via UDP
+4. New server fires `PostLogin` → loads character from SpacetimeDB → applies saved state
+
+### Implementation
+
+#### 1. Zone Boundary Checking (`NyxGameMode.cpp`)
+
+A 0.5-second timer calls `CheckZoneBoundaries()` which iterates all connected players:
+
+```cpp
+bool bShouldTransfer = false;
+if (bOwnsNegativeSide && PlayerX >= ZoneBoundaryX)
+    bShouldTransfer = true;  // Player crossed east
+else if (!bOwnsNegativeSide && PlayerX < ZoneBoundaryX)
+    bShouldTransfer = true;  // Player crossed west
+```
+
+Before transfer: calls `SaveCharacterState` on `NyxServerSubsystem`, then `NyxCharacter::ServerTransferToServer()`.
+
+#### 2. Character State Save (`NyxServerSubsystem.cpp`)
+
+Saves position + rotation + HP/MP + zone to SpacetimeDB:
+
+```cpp
+const float Yaw = Character->GetActorRotation().Yaw;
+Reducers->SaveCharacter(Identity, CurrentHP, CurrentMP,
+    Pos.X, Pos.Y, Pos.Z, Yaw, ZoneId);
+```
+
+#### 3. Rotation Persistence (`lib.rs` + bindings)
+
+Added `saved_rot_yaw: f32` field to the `CharacterStats` table and `save_character` reducer. Regenerated UE C++ bindings via:
+
+```bash
+spacetime generate --lang unrealcpp --out-dir C:\UE\Nyx \
+    --module-path . --unreal-module-name Nyx --uproject-dir C:\UE\Nyx
+```
+
+Generated files updated: `CharacterStatsType.g.h`, `SaveCharacter.g.h`, `SpacetimeDBClient.g.h/.g.cpp`
+
+#### 4. Rotation Restoration (`NyxCharacter.cpp`)
+
+On `ApplyCharacterStats`, restores both actor rotation and controller rotation:
+
+```cpp
+SetActorRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
+if (Controller)
+    Controller->SetControlRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
+```
+
+#### 5. Visual Zone Boundary (`NyxZoneBoundary.cpp`)
+
+21 cyan (server-1) or orange (server-2) pillars along the boundary with floating text label. Uses a runtime-created unlit `UMaterial` with a "Color" `VectorParameter` wired to `EmissiveColor`:
+
+```cpp
+#if WITH_EDITOR
+// Create UMaterial with VectorParameter → EmissiveColor
+UMaterialExpressionVectorParameter* ColorParam = ...;
+Mat->GetEditorOnlyData()->EmissiveColor.Connect(0, ColorParam);
+#else
+// Server: no material editor data, use default
+return UMaterial::GetDefaultMaterial(MD_Surface);
+#endif
+```
+
+**Key discovery:** `BasicShapeMaterial` (the default cylinder material) has NO exposed vector parameters. `SetVectorParameterValue` silently fails on it. Must create a custom material with a proper named parameter.
+
+#### 6. Ping-Pong Prevention
+
+Without protection, a transferred player would immediately trigger the boundary check on the new server and bounce back. Fixed with a 5-second grace period:
+
+```cpp
+// NyxGameMode::PostLogin — record arrival time
+TransferArrivalTimes.Add(PC, CurrentTime);
+
+// NyxGameMode::CheckZoneBoundaries — skip grace period
+if (CurrentTime - *ArrivalTime < TransferGracePeriodSeconds) continue;
+```
+
+#### 7. Stable Player Identity
+
+`PlayerController->GetName()` returns different names on each server (e.g., `PlayerController_0` vs `PlayerController_1`). Used `PlayerState->GetPlayerName()` instead, which persists the client's chosen name across `ClientTravel`.
+
+### Issues Fixed
+
+| Issue | Root Cause | Fix |
+|-------|-----------|-----|
+| Ping-pong bouncing | No grace period after transfer | 5-second `TransferGracePeriodSeconds` |
+| Different identity per server | `PC->GetName()` is server-local | `PlayerState->GetPlayerName()` |
+| Pillars invisible (no color) | `BasicShapeMaterial` has no vector params | Runtime `UMaterial` with "Color" `VectorParameter` |
+| Rotation not synced | No rotation field in SpacetimeDB schema | Added `saved_rot_yaw` to `CharacterStats` table + reducer |
+| Server crash-loop after redeploy | Stale SpacetimeDB schema state | `spacetime publish --clear-database` |
+| `NyxSmokeTest` compile error | `SaveCharacter` gained `RotYaw` param | Added `0.0f` for RotYaw in test call |
+
+### Known Issue: Camera Reset on Transfer
+
+**Symptom:** After cross-server transfer, the character's body faces the correct direction (rotation yaw is restored), but the camera resets to a default orientation instead of matching the pre-transfer view.
+
+**Analysis:** `Controller->SetControlRotation()` is called in `ApplyCharacterStats`, which runs during `PostLogin` on the server. However, the client's camera controller (SpringArm + Camera component, or PlayerCameraManager) may re-initialize its rotation independently during the `ClientTravel` reconnect flow. The control rotation set server-side may be overwritten by the client's camera initialization before the first frame renders.
+
+**Potential fixes (deferred):**
+1. Send control rotation as a client RPC after the pawn is fully possessed and replicated
+2. Save/restore camera pitch separately (currently only yaw is persisted)
+3. Delay camera init on the client until after the first replication update
+4. Use `ClientSetRotation` RPC instead of setting it during PostLogin
+
+### Verified Results
+
+| Verification | Status | Detail |
+|---|---|---|
+| Position preserved across transfer | ✅ | Saved to SpacetimeDB, restored on new server |
+| Rotation (yaw) preserved | ✅ | Character body faces correct direction |
+| HP/MP preserved | ✅ | Stats loaded from SpacetimeDB on reconnect |
+| Zone boundary visual markers | ✅ | Cyan (west) / orange (east) pillars with labels |
+| No ping-pong bouncing | ✅ | 5-second grace period prevents re-transfer |
+| Stable identity across servers | ✅ | `PlayerState->GetPlayerName()` consistent |
+| Camera rotation | ⚠️ | Camera resets — body rotation OK, camera view not restored |
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `Source/Nyx/Core/NyxGameMode.cpp` | Zone boundary checking, transfer logic, grace period, boundary pillar spawn |
+| `Source/Nyx/Core/NyxGameMode.h` | Zone config properties, timer handle, transfer tracking maps |
+| `Source/Nyx/Player/NyxCharacter.cpp` | `ApplyCharacterStats` — rotation restoration, `ServerTransferToServer` RPC |
+| `Source/Nyx/Player/NyxCharacter.h` | Transfer RPC declaration |
+| `Source/Nyx/Server/NyxServerSubsystem.cpp` | `SaveCharacterState` — saves rotation yaw |
+| `Source/Nyx/World/NyxZoneBoundary.cpp` | Runtime material creation, pillar spawning, zone labels |
+| `Source/Nyx/World/NyxZoneBoundary.h` | Replicated properties: BoundaryX, PillarColor, ZoneLabel |
+| `Source/Nyx/Test/NyxSmokeTest.cpp` | Updated `SaveCharacter` call with RotYaw param |
+| `server/nyx-server/spacetimedb/src/lib.rs` | Added `saved_rot_yaw: f32` to CharacterStats + save_character |
+| `Source/Nyx/Public/ModuleBindings/*.g.h` | Regenerated bindings (SavedRotYaw field + RotYaw param) |
+| `Source/Nyx/Private/ModuleBindings/*.g.cpp` | Regenerated bindings |
+| `docker-compose.yml` | `-ZoneSide=west/east`, `-TransferAddress=`, zone config args |
+
+### Build & Deploy Pipeline
+
+Full cross-compile + cook + Docker pipeline:
+
+```powershell
+# 1. Win64 build (editor)
+.\Engine\Build\BatchFiles\Build.bat NyxEditor Win64 Development C:\UE\Nyx\Nyx.uproject -waitmutex
+
+# 2. Linux cross-compile (rename InstalledBuild.txt to bypass check)
+Rename-Item "...\InstalledBuild.txt" "InstalledBuild.txt.bak"
+.\Engine\Build\BatchFiles\Build.bat NyxServer Linux Development C:\UE\Nyx\Nyx.uproject -waitmutex -NoUBA
+Rename-Item "...\InstalledBuild.txt.bak" "InstalledBuild.txt"
+
+# 3. Cook for LinuxServer
+& "...\UnrealEditor-Cmd.exe" "C:\UE\Nyx\Nyx.uproject" -run=cook -targetplatform=LinuxServer -unattended
+
+# 4. Docker build + deploy
+docker compose build nyx-server-1 nyx-server-2
+docker compose up -d --force-recreate nyx-server-1 nyx-server-2
+
+# 5. Publish SpacetimeDB module
+spacetime publish nyx --clear-database -s http://127.0.0.1:3000
+```
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal

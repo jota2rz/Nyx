@@ -33,18 +33,21 @@ struct NYX_API FSaveCharacterArgs
     double PosZ = 0.0;
 
     UPROPERTY(BlueprintReadWrite, Category="SpacetimeDB")
+    float RotYaw = 0.0f;
+
+    UPROPERTY(BlueprintReadWrite, Category="SpacetimeDB")
     FString ZoneId;
 
     FSaveCharacterArgs() = default;
 
-    FSaveCharacterArgs(const FSpacetimeDBIdentity& InIdentity, const int32& InCurrentHp, const int32& InCurrentMp, const double& InPosX, const double& InPosY, const double& InPosZ, const FString& InZoneId)
-        : Identity(InIdentity), CurrentHp(InCurrentHp), CurrentMp(InCurrentMp), PosX(InPosX), PosY(InPosY), PosZ(InPosZ), ZoneId(InZoneId)
+    FSaveCharacterArgs(const FSpacetimeDBIdentity& InIdentity, const int32& InCurrentHp, const int32& InCurrentMp, const double& InPosX, const double& InPosY, const double& InPosZ, const float& InRotYaw, const FString& InZoneId)
+        : Identity(InIdentity), CurrentHp(InCurrentHp), CurrentMp(InCurrentMp), PosX(InPosX), PosY(InPosY), PosZ(InPosZ), RotYaw(InRotYaw), ZoneId(InZoneId)
     {}
 
 
     FORCEINLINE bool operator==(const FSaveCharacterArgs& Other) const
     {
-        return Identity == Other.Identity && CurrentHp == Other.CurrentHp && CurrentMp == Other.CurrentMp && PosX == Other.PosX && PosY == Other.PosY && PosZ == Other.PosZ && ZoneId == Other.ZoneId;
+        return Identity == Other.Identity && CurrentHp == Other.CurrentHp && CurrentMp == Other.CurrentMp && PosX == Other.PosX && PosY == Other.PosY && PosZ == Other.PosZ && RotYaw == Other.RotYaw && ZoneId == Other.ZoneId;
     }
     FORCEINLINE bool operator!=(const FSaveCharacterArgs& Other) const
     {
@@ -54,7 +57,7 @@ struct NYX_API FSaveCharacterArgs
 
 namespace UE::SpacetimeDB
 {
-    UE_SPACETIMEDB_STRUCT(FSaveCharacterArgs, Identity, CurrentHp, CurrentMp, PosX, PosY, PosZ, ZoneId);
+    UE_SPACETIMEDB_STRUCT(FSaveCharacterArgs, Identity, CurrentHp, CurrentMp, PosX, PosY, PosZ, RotYaw, ZoneId);
 }
 
 // Reducer class for internal dispatching
@@ -76,6 +79,8 @@ public:
     double PosY = 0.0;
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     double PosZ = 0.0;
+    UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
+    float RotYaw = 0.0f;
     UPROPERTY(BlueprintReadOnly, Category="SpacetimeDB")
     FString ZoneId;
 

@@ -84,6 +84,38 @@ public:
 	 */
 	bool IsNyxServer() const;
 
+	// ──── Zone Transfer (Spike 19) ────
+
+	/** Address of the server to transfer players to when they cross the zone boundary. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Server")
+	FString TransferAddress;
+
+	/** X coordinate of the zone boundary. */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Server")
+	float ZoneBoundaryX = 0.f;
+
+	/**
+	 * Which side of the boundary this server owns.
+	 * true = this server owns X < BoundaryX ("west")
+	 * false = this server owns X >= BoundaryX ("east")
+	 */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Nyx|Server")
+	bool bOwnsNegativeSide = true;
+
 private:
 	void OnAuthStateChanged(ENyxAuthState NewState);
+
+	/** Timer-based zone boundary check for all connected players. */
+	void CheckZoneBoundaries();
+
+	/** Tracks players currently being transferred (prevent double-transfer). */
+	TSet<APlayerController*> PlayersBeingTransferred;
+
+	/** Grace period after arriving from a transfer — prevents immediate bounce-back. */
+	TMap<APlayerController*, double> TransferArrivalTimes;
+
+	/** How many seconds to wait after transfer before the zone check can trigger again. */
+	static constexpr float TransferGracePeriodSeconds = 5.0f;
+
+	FTimerHandle ZoneCheckTimerHandle;
 };

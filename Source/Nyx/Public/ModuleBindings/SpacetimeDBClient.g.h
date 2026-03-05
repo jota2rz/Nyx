@@ -2480,7 +2480,7 @@ public:
     bool InvokeResolveHitBatch(const FReducerEventContext& Context, const UResolveHitBatchReducer* Args);
     bool InvokeResolveHitBatchWithArgs(const FReducerEventContext& Context, const FResolveHitBatchArgs& Args);
 
-    DECLARE_DYNAMIC_MULTICAST_DELEGATE_EightParams(
+    DECLARE_DYNAMIC_MULTICAST_DELEGATE_NineParams(
         FSaveCharacterHandler,
         const FReducerEventContext&, Context,
         const FSpacetimeDBIdentity&, Identity,
@@ -2489,13 +2489,14 @@ public:
         double, PosX,
         double, PosY,
         double, PosZ,
+        float, RotYaw,
         const FString&, ZoneId
     );
     UPROPERTY(BlueprintAssignable, Category="SpacetimeDB")
     FSaveCharacterHandler OnSaveCharacter;
 
     UFUNCTION(BlueprintCallable, Category="SpacetimeDB")
-    void SaveCharacter(const FSpacetimeDBIdentity& Identity, const int32 CurrentHp, const int32 CurrentMp, const double PosX, const double PosY, const double PosZ, const FString& ZoneId);
+    void SaveCharacter(const FSpacetimeDBIdentity& Identity, const int32 CurrentHp, const int32 CurrentMp, const double PosX, const double PosY, const double PosZ, const float RotYaw, const FString& ZoneId);
 
     bool InvokeSaveCharacter(const FReducerEventContext& Context, const USaveCharacterReducer* Args);
     bool InvokeSaveCharacterWithArgs(const FReducerEventContext& Context, const FSaveCharacterArgs& Args);

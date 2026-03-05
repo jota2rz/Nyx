@@ -176,6 +176,7 @@ pub struct CharacterStats {
     pub saved_pos_x: f64,
     pub saved_pos_y: f64,
     pub saved_pos_z: f64,
+    pub saved_rot_yaw: f32,
     pub saved_zone_id: String,
     pub last_saved: Timestamp,
 }
@@ -375,6 +376,7 @@ pub fn load_character(ctx: &ReducerContext, identity: Identity, display_name: St
         saved_pos_x: 0.0,
         saved_pos_y: 0.0,
         saved_pos_z: 100.0,
+        saved_rot_yaw: 0.0,
         saved_zone_id: "default".to_string(),
         last_saved: ctx.timestamp,
     });
@@ -391,6 +393,7 @@ pub fn save_character(
     pos_x: f64,
     pos_y: f64,
     pos_z: f64,
+    rot_yaw: f32,
     zone_id: String,
 ) {
     if let Some(mut stats) = ctx.db.character_stats().identity().find(identity) {
@@ -399,6 +402,7 @@ pub fn save_character(
         stats.saved_pos_x = pos_x;
         stats.saved_pos_y = pos_y;
         stats.saved_pos_z = pos_z;
+        stats.saved_rot_yaw = rot_yaw;
         stats.saved_zone_id = zone_id;
         stats.last_saved = ctx.timestamp;
         ctx.db.character_stats().identity().update(stats);
@@ -1632,6 +1636,7 @@ pub fn test_combat_pipeline(ctx: &ReducerContext) {
         saved_pos_x: 0.0,
         saved_pos_y: 0.0,
         saved_pos_z: 100.0,
+        saved_rot_yaw: 0.0,
         saved_zone_id: "test".to_string(),
         last_saved: ctx.timestamp,
     });
@@ -1657,6 +1662,7 @@ pub fn test_combat_pipeline(ctx: &ReducerContext) {
         saved_pos_x: 0.0,
         saved_pos_y: 0.0,
         saved_pos_z: 100.0,
+        saved_rot_yaw: 0.0,
         saved_zone_id: "test".to_string(),
         last_saved: ctx.timestamp,
     });

@@ -272,6 +272,27 @@ void ANyxCharacter::ApplyCharacterStats(const FCharacterStatsType& Stats)
 	MagicDefense = static_cast<int32>(Stats.MagicDefense);
 	SpacetimeIdentity = Stats.Identity;
 
+	// Restore saved position and rotation from SpacetimeDB (critical for cross-server transfer)
+	const FVector SavedPos(Stats.SavedPosX, Stats.SavedPosY, Stats.SavedPosZ);
+	if (!SavedPos.IsNearlyZero())
+	{
+		SetActorLocation(SavedPos);
+		UE_LOG(LogNyx, Log, TEXT("Restored %s position to (%.0f, %.0f, %.0f)"),
+			*DisplayName, SavedPos.X, SavedPos.Y, SavedPos.Z);
+	}
+
+	// Restore rotation yaw
+	if (!FMath::IsNearlyZero(Stats.SavedRotYaw, 0.1f) || !SavedPos.IsNearlyZero())
+	{
+		SetActorRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
+		if (Controller)
+		{
+			Controller->SetControlRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
+		}
+		UE_LOG(LogNyx, Log, TEXT("Restored %s rotation yaw to %.1f"),
+			*DisplayName, Stats.SavedRotYaw);
+	}
+
 	UE_LOG(LogNyx, Log, TEXT("Applied stats for %s: Level=%d HP=%d/%d MP=%d/%d ATK=%d DEF=%d"),
 		*DisplayName, Level, CurrentHP, MaxHP, CurrentMP, MaxMP, AttackPower, Defense);
 }
@@ -394,5 +415,16 @@ void ANyxCharacter::ServerRPC_RequestAttack_Implementation()
 	if (ServerSub)
 	{
 		ServerSub->RequestResolveHit(SpacetimeIdentity, Target->SpacetimeIdentity, 0); // skill 0 = basic attack
+	}
+}
+
+void ANyxCharacter::ClientRPC_TransferToServer_Implementation(const FString& Address)
+{
+	UE_LOG(LogNyx, Log, TEXT("Zone transfer: travelling to %s"), *Address);
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (PC)
+	{
+		PC->ClientTravel(Address, TRAVEL_Absolute);
 	}
 }

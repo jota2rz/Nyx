@@ -330,16 +330,18 @@ void UNyxServerSubsystem::SaveCharacterState(ANyxCharacter* Character)
 	if (!SpacetimeDBConnection || !SpacetimeDBConnection->Reducers || !Character) return;
 
 	const FVector Pos = Character->GetActorLocation();
+	const float Yaw = Character->GetActorRotation().Yaw;
 
 	SpacetimeDBConnection->Reducers->SaveCharacter(
 		Character->SpacetimeIdentity,
 		Character->GetCurrentHP(),
 		Character->GetCurrentMP(),
 		Pos.X, Pos.Y, Pos.Z,
+		Yaw,
 		ZoneId);
 
-	UE_LOG(LogNyxServer, Verbose, TEXT("Saved %s pos=(%.0f,%.0f,%.0f) HP=%d"),
-		*Character->GetDisplayName(), Pos.X, Pos.Y, Pos.Z, Character->GetCurrentHP());
+	UE_LOG(LogNyxServer, Verbose, TEXT("Saved %s pos=(%.0f,%.0f,%.0f) yaw=%.1f HP=%d"),
+		*Character->GetDisplayName(), Pos.X, Pos.Y, Pos.Z, Yaw, Character->GetCurrentHP());
 }
 
 // ─── Heartbeat ─────────────────────────────────────────────────────

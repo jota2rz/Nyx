@@ -377,7 +377,7 @@ void UNyxSmokeTest::HandleCharacterStatsUpdate(const FEventContext& Context,
 		{
 			Connection->Reducers->SaveCharacter(
 				ServerIdentity, NewRow.CurrentHp, NewRow.CurrentMp,
-				100.0f, 200.0f, 300.0f, TestZoneId);
+				100.0f, 200.0f, 300.0f, 0.0f, TestZoneId);
 
 			Pass(TEXT("SaveCharacter"), FString::Printf(TEXT("HP=%d pos=(100,200,300) zone=%s"),
 				NewRow.CurrentHp, *TestZoneId));

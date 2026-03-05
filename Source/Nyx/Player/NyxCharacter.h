@@ -173,6 +173,13 @@ private:
 	UFUNCTION(Server, Reliable)
 	void ServerRPC_RequestAttack();
 
+public:
+	/** Client RPC: server tells client to travel to another server for zone transfer. */
+	UFUNCTION(Client, Reliable)
+	void ClientRPC_TransferToServer(const FString& Address);
+
+private:
+
 	/** Attack cooldown */
 	float LastAttackTime = 0.f;
 	static constexpr float AttackCooldown = 0.5f;

@@ -1898,7 +1898,7 @@ bool URemoteReducers::InvokeResolveHitBatchWithArgs(const FReducerEventContext& 
     return true;
 }
 
-void URemoteReducers::SaveCharacter(const FSpacetimeDBIdentity& Identity, const int32 CurrentHp, const int32 CurrentMp, const double PosX, const double PosY, const double PosZ, const FString& ZoneId)
+void URemoteReducers::SaveCharacter(const FSpacetimeDBIdentity& Identity, const int32 CurrentHp, const int32 CurrentMp, const double PosX, const double PosY, const double PosZ, const float RotYaw, const FString& ZoneId)
 {
     if (!Conn)
     {
@@ -1906,7 +1906,7 @@ void URemoteReducers::SaveCharacter(const FSpacetimeDBIdentity& Identity, const 
         return;
     }
 
-	Conn->CallReducerTyped(TEXT("save_character"), FSaveCharacterArgs(Identity, CurrentHp, CurrentMp, PosX, PosY, PosZ, ZoneId), SetCallReducerFlags);
+	Conn->CallReducerTyped(TEXT("save_character"), FSaveCharacterArgs(Identity, CurrentHp, CurrentMp, PosX, PosY, PosZ, RotYaw, ZoneId), SetCallReducerFlags);
 }
 
 bool URemoteReducers::InvokeSaveCharacter(const FReducerEventContext& Context, const USaveCharacterReducer* Args)
@@ -1923,7 +1923,7 @@ bool URemoteReducers::InvokeSaveCharacter(const FReducerEventContext& Context, c
         return false;
     }
 
-    OnSaveCharacter.Broadcast(Context, Args->Identity, Args->CurrentHp, Args->CurrentMp, Args->PosX, Args->PosY, Args->PosZ, Args->ZoneId);
+    OnSaveCharacter.Broadcast(Context, Args->Identity, Args->CurrentHp, Args->CurrentMp, Args->PosX, Args->PosY, Args->PosZ, Args->RotYaw, Args->ZoneId);
     return true;
 }
 
@@ -1938,7 +1938,7 @@ bool URemoteReducers::InvokeSaveCharacterWithArgs(const FReducerEventContext& Co
         return false;
     }
 
-    OnSaveCharacter.Broadcast(Context, Args.Identity, Args.CurrentHp, Args.CurrentMp, Args.PosX, Args.PosY, Args.PosZ, Args.ZoneId);
+    OnSaveCharacter.Broadcast(Context, Args.Identity, Args.CurrentHp, Args.CurrentMp, Args.PosX, Args.PosY, Args.PosZ, Args.RotYaw, Args.ZoneId);
     return true;
 }
 
