@@ -146,10 +146,24 @@ void ANyxCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	UE_LOG(LogNyx, Log, TEXT("NyxCharacter::BeginPlay  Name=%s  Role=%s  HasAuthority=%s"),
+	UE_LOG(LogNyx, Log, TEXT("NyxCharacter::BeginPlay  Name=%s  Role=%s  HasAuthority=%s  Location=%s"),
 		*GetName(),
 		*UEnum::GetValueAsString(GetLocalRole()),
-		HasAuthority() ? TEXT("true") : TEXT("false"));
+		HasAuthority() ? TEXT("true") : TEXT("false"),
+		*GetActorLocation().ToString());
+
+	// Log camera state for debugging black-screen issues
+	if (GetNetMode() == NM_Client)
+	{
+		APlayerController* PC = Cast<APlayerController>(GetController());
+		if (!PC) PC = GetWorld()->GetFirstPlayerController();
+		UE_LOG(LogNyx, Log, TEXT("  Camera debug: PC=%s  IsLocal=%s  HasCameraMgr=%s  SpringArm=%s  Camera=%s"),
+			*GetNameSafe(PC),
+			(PC && PC->IsLocalController()) ? TEXT("true") : TEXT("false"),
+			(PC && PC->PlayerCameraManager) ? TEXT("true") : TEXT("false"),
+			SpringArm ? TEXT("valid") : TEXT("null"),
+			Camera ? TEXT("valid") : TEXT("null"));
+	}
 
 	// ── Let pawns pass through each other (server AND client) ──
 	// In the multi-server proxy architecture, multiple characters may spawn at the
@@ -176,9 +190,33 @@ void ANyxCharacter::BeginPlay()
 	if (GetNetMode() == NM_Client && GetLocalRole() == ROLE_AutonomousProxy
 		&& !bInputSetupComplete)
 	{
-		GetWorld()->GetTimerManager().SetTimer(InputRetryTimerHandle,
-			this, &ANyxCharacter::RetryInputSetup,
-			0.2f, true, 0.5f);
+		// Don't start retry timer if the local PC already has a fully-setup character.
+		// This prevents a pre-migration pawn from server-2 stealing possession from
+		// the active pawn on server-1 (race condition when claim fires before release).
+		bool bShouldRetry = true;
+		if (APlayerController* LocalPC = GetWorld()->GetFirstPlayerController())
+		{
+			if (APawn* CurrentPawn = LocalPC->GetPawn())
+			{
+				if (CurrentPawn != this)
+				{
+					ANyxCharacter* CurrentNyx = Cast<ANyxCharacter>(CurrentPawn);
+					if (CurrentNyx && CurrentNyx->bInputSetupComplete)
+					{
+						UE_LOG(LogNyx, Log, TEXT("NyxCharacter::BeginPlay SKIP RetryInputSetup for %s — %s already controlled by %s"),
+							*GetName(), *CurrentPawn->GetName(), *LocalPC->GetName());
+						bShouldRetry = false;
+					}
+				}
+			}
+		}
+
+		if (bShouldRetry)
+		{
+			GetWorld()->GetTimerManager().SetTimer(InputRetryTimerHandle,
+				this, &ANyxCharacter::RetryInputSetup,
+				0.2f, true, 0.5f);
+		}
 	}
 }
 
@@ -210,22 +248,60 @@ void ANyxCharacter::OnRep_Controller()
 
 	Super::OnRep_Controller();
 
-	UE_LOG(LogNyx, Log, TEXT("NyxCharacter::OnRep_Controller  Name=%s  Controller=%s"),
-		*GetName(), *GetNameSafe(GetController()));
+	APlayerController* PC = Cast<APlayerController>(GetController());
 
-	// Don't call PawnClientRestart() directly here — it crashes if the character
-	// isn't fully initialized yet (EXCEPTION_ACCESS_VIOLATION). Instead, ensure
-	// the retry timer is running. RetryInputSetup() has its own safety checks.
-	// Only on actual game clients, and only if this is our locally-controlled pawn.
-	// NOTE: Do NOT check IsLocallyControlled() — see BeginPlay comment.
-	if (GetNetMode() == NM_Client && !bInputSetupComplete
-		&& GetLocalRole() == ROLE_AutonomousProxy)
+	UE_LOG(LogNyx, Log, TEXT("NyxCharacter::OnRep_Controller  Name=%s  Controller=%s  IsLocal=%s  InputComplete=%s"),
+		*GetName(), *GetNameSafe(GetController()),
+		(PC && PC->IsLocalController()) ? TEXT("true") : TEXT("false"),
+		bInputSetupComplete ? TEXT("true") : TEXT("false"));
+
+	if (GetNetMode() != NM_Client || GetLocalRole() != ROLE_AutonomousProxy)
 	{
-		if (!GetWorld()->GetTimerManager().IsTimerActive(InputRetryTimerHandle))
+		return;
+	}
+
+	// ── Post-Migration Controller Re-bind ──
+	// After proxy migration finalization, the client receives a NEW PlayerController
+	// (e.g. PC_2 replacing PC_1). At this point bInputSetupComplete is already true
+	// from the initial setup, but the NEW PC has no view target, no input bindings,
+	// and no HUD. We must detect this "controller changed to a new local PC" case
+	// and re-establish everything.
+	if (!PC || !PC->IsLocalController())
+	{
+		// Try the world's first PC — proxy may not have set controller ownership yet
+		PC = GetWorld()->GetFirstPlayerController();
+	}
+
+	if (PC && PC->IsLocalController())
+	{
+		if (bInputSetupComplete)
 		{
-			GetWorld()->GetTimerManager().SetTimer(InputRetryTimerHandle,
-				this, &ANyxCharacter::RetryInputSetup,
-				0.1f, true, 0.0f); // immediate first tick, then 100ms retries
+			// Controller changed AFTER initial input setup — this is a migration swap.
+			// Force full re-initialization on the new PC.
+			UE_LOG(LogNyx, Log, TEXT("OnRep_Controller: Post-migration re-bind for %s → new PC=%s"),
+				*GetName(), *GetNameSafe(PC));
+
+			// Re-bind this pawn to the new PC
+			PC->SetPawn(this);
+			PC->ClientRestart(this);
+			PC->SetViewTarget(this);
+
+			// Re-apply input mapping contexts on the new PC
+			SetupInputMappingContexts();
+
+			UE_LOG(LogNyx, Log, TEXT("OnRep_Controller: Post-migration re-bind complete. ViewTarget=%s  HasCameraMgr=%s"),
+				*GetName(),
+				PC->PlayerCameraManager ? TEXT("true") : TEXT("false"));
+		}
+		else
+		{
+			// Initial setup — start the retry timer
+			if (!GetWorld()->GetTimerManager().IsTimerActive(InputRetryTimerHandle))
+			{
+				GetWorld()->GetTimerManager().SetTimer(InputRetryTimerHandle,
+					this, &ANyxCharacter::RetryInputSetup,
+					0.1f, true, 0.0f); // immediate first tick, then 100ms retries
+			}
 		}
 	}
 }
@@ -312,6 +388,27 @@ void ANyxCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 	bInputSetupComplete = true;
 	GetWorld()->GetTimerManager().ClearTimer(InputRetryTimerHandle);
 	UE_LOG(LogNyx, Log, TEXT("SetupPlayerInputComponent complete for %s"), *GetName());
+
+	// ── Proxy camera fix ──
+	// In the multi-server proxy architecture, the PlayerCameraManager may not
+	// automatically follow the possessed pawn because the PlayerController
+	// arrives via a proxy connection rather than the normal login path.
+	// Explicitly set the view target so the camera attaches to this character.
+	if (GetNetMode() == NM_Client)
+	{
+		APlayerController* PC = Cast<APlayerController>(GetController());
+		if (!PC || !PC->IsLocalController())
+		{
+			PC = GetWorld()->GetFirstPlayerController();
+		}
+		if (PC && PC->IsLocalController())
+		{
+			PC->SetViewTarget(this);
+			UE_LOG(LogNyx, Log, TEXT("SetViewTarget → %s  (PC=%s  HasCameraManager=%s)"),
+				*GetName(), *GetNameSafe(PC),
+				PC->PlayerCameraManager ? TEXT("true") : TEXT("false"));
+		}
+	}
 }
 
 void ANyxCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -435,6 +532,21 @@ void ANyxCharacter::RetryInputSetup()
 
 	if (PC && PC->IsLocalController())
 	{
+		// Don't steal possession from an already-active, input-bound pawn.
+		// This prevents a pre-migration pawn (from non-primary server) from
+		// hijacking the local PC while the original pawn is still alive.
+		APawn* CurrentPawn = PC->GetPawn();
+		if (CurrentPawn && CurrentPawn != this)
+		{
+			ANyxCharacter* CurrentNyx = Cast<ANyxCharacter>(CurrentPawn);
+			if (CurrentNyx && CurrentNyx->bInputSetupComplete)
+			{
+				// Active pawn exists — wait for migration to complete.
+				// OnRep_Controller will set us up when the new PC arrives.
+				return;
+			}
+		}
+
 		UE_LOG(LogNyx, Log, TEXT("RetryInputSetup: Forcing PawnClientRestart for %s (Controller=%s)"),
 			*GetName(), *GetNameSafe(PC));
 

@@ -155,8 +155,42 @@ private:
 	/** Grace period after arriving from a transfer — prevents immediate bounce-back. */
 	TMap<APlayerController*, double> TransferArrivalTimes;
 
+	/** PCs currently being claimed via migration — PostLogin skips SpacetimeDB for these. */
+	TSet<APlayerController*> MigrationClaimPCs;
+
+	/**
+	 * Per-NoPawnPC migration tracking.
+	 * Tracks position transitions to detect when a migration claim should happen.
+	 */
+	struct FNoPawnMigrationTracking
+	{
+		/** Whether the NoPawnPC position was ever observed outside our zone. */
+		bool bWasEverOutsideOurZone = false;
+
+		/** When the NoPawnPC most recently entered our zone (0 = not currently in zone). */
+		double EnteredOurZoneTime = 0.0;
+
+		/** When we first detected this NoPawnPC. */
+		double FirstSeenTime = 0.0;
+	};
+
+	/** Migration tracking for each NoPawnPC we monitor. */
+	TMap<APlayerController*, FNoPawnMigrationTracking> NoPawnTracking;
+
 	/** How many seconds to wait after transfer before the zone check can trigger again. */
 	static constexpr float TransferGracePeriodSeconds = 5.0f;
+
+	/** Grace period for migration claims after a position transition (outside→inside our zone).
+	 *  Must be long enough for the primary server to detect boundary crossing (0.5s timer)
+	 *  and complete release (destroy pawn, swap PC, proxy detection) BEFORE we claim.
+	 *  Too short → race condition: Server-2 claims while Server-1 still has active pawn,
+	 *  causing a ghost pawn on the client that steals possession. */
+	static constexpr float NoPawnClaimGracePeriodSeconds = 2.0f;
+
+	/** Grace period for NoPawnPCs that were ALWAYS in our zone (spawn-in-wrong-zone case).
+	 *  Must be >= TransferGracePeriodSeconds so the primary server releases first.
+	 *  0.5s buffer to handle network timing. */
+	static constexpr float InitialNoPawnGracePeriodSeconds = 5.5f;
 
 	FTimerHandle ZoneCheckTimerHandle;
 };

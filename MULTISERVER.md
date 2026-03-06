@@ -198,3 +198,84 @@ Triggered when `CheckZoneBoundaries()` finds a `ANoPawnPlayerController` on a `U
 | `NyxGameMode.cpp` | 311+ | `CheckZoneBoundaries()` — three-case detection |
 | `NyxGameMode.cpp` | 430+ | `ReleasePawnAuthority()` — Server A side |
 | `NyxGameMode.cpp` | 480+ | `ClaimPawnAuthority()` — Server B side |
+
+---
+
+# Client-Side Migration Problems & Fixes
+
+## Problem 1: Ghost Pawn Steals Possession (Race Condition)
+
+**Root cause:** Server-2's `ClaimPawnAuthority` fired before Server-1's `ReleasePawnAuthority`. The `NoPawnClaimGracePeriodSeconds` was only 0.5s, but Server-1's zone check runs every 0.5s — with network latency, Server-2 often claimed first.
+
+**What the player sees:** A second character appears nearby, then the camera teleports to it, the original character disappears, and controls feel wrong or break entirely.
+
+**Timeline of the bug:**
+1. Player crosses boundary at X=0 heading east
+2. Server-2 detects NoPawnPC in east zone, waits 0.5s grace, claims → spawns NyxCharacter_1 at X=828
+3. Client receives NyxCharacter_1 via replication — sees "ghost" character
+4. `RetryInputSetup` timer on NyxCharacter_1 grabs the local PC, calls `ClientRestart` → steals camera/input from NyxCharacter_0
+5. Server-1 finally detects crossing (1.5s later), releases → destroys NyxCharacter_0
+6. Proxy finalizes, sends new PC (PlayerController_2), but camera state is already corrupted
+
+**Fix:** Three changes:
+
+1. **Increased `NoPawnClaimGracePeriodSeconds` from 0.5s → 2.0s** (`NyxGameMode.h`). Server-1 always releases before Server-2 claims.
+
+2. **`RetryInputSetup` guard** (`NyxCharacter.cpp`): Before stealing the local PC, check if it already has an active, `bInputSetupComplete` pawn. If so, bail out — this is a pre-migration ghost pawn and should wait for `OnRep_Controller` to set it up after migration finalizes.
+
+3. **`BeginPlay` timer guard** (`NyxCharacter.cpp`): Don't even start the retry timer if the local PC already has a fully-setup character. Logs `"SKIP RetryInputSetup for NyxCharacter_1 — NyxCharacter_0 already controlled by PlayerController_1"`.
+
+## Problem 2: Black Screen After Migration (Missing SetViewTarget)
+
+**Root cause:** `SetupPlayerInputComponent` was called in the normal possession chain but never called `PC->SetViewTarget(this)`. Only the `RetryInputSetup` fallback path did. Since the normal path succeeded first, `bInputSetupComplete` was set to `true`, the retry timer was cleared, and `SetViewTarget` was never called.
+
+**What the player sees:** Black screen after spawning. Character exists, input works (WASD moves), but camera shows nothing.
+
+**Fix:** Added `PC->SetViewTarget(this)` at the end of `SetupPlayerInputComponent`, right after setting `bInputSetupComplete = true`.
+
+## Problem 3: No Camera/Input/HUD After Migration (New PC Not Re-bound)
+
+**Root cause:** After proxy migration finalization, the client receives a NEW `PlayerController` (e.g. `PlayerController_2` replacing `PlayerController_1`). `OnRep_Controller` fires on the pawn, but `bInputSetupComplete` is already `true` from the initial setup. The old code just returned early — no view target, no input bindings, no HUD on the new PC.
+
+**What the player sees:** "Half terrain and half sky, no character, no camera movement, no HUD."
+
+**Fix:** `OnRep_Controller` now detects the migration case: if `bInputSetupComplete == true` AND a new local PC is being assigned, force full re-bind:
+```cpp
+PC->SetPawn(this);
+PC->ClientRestart(this);
+PC->SetViewTarget(this);
+SetupInputMappingContexts();
+```
+
+## Problem 4: Proxy NyxGameInstance Activates ProxyNetDriver (Context Mismatch)
+
+**Root cause:** `NyxGameInstance::Init()` detects `-ProxyGameServers=` on the command line and swaps `GEngine->NetDriverDefinitions` from `IpNetDriver` to `ProxyNetDriver`. This is the ONLY way proxy mode activates — the engine's `-MultiServerProxy` / `-MultiServerBackendAddresses` flags are separate and don't integrate with Nyx's custom setup.
+
+**What happens if wrong flags are used:** The proxy opens as a full Editor window instead of running headless, or the ProxyNetDriver isn't activated and clients can't connect.
+
+**Correct proxy launch:** Must use `-server -ProxyGameServers=addr1,addr2` together. The `-server` flag makes it headless, and `-ProxyGameServers=` triggers the NetDriver swap in `NyxGameInstance::Init()`.
+
+## Current Status
+
+| Feature | Status |
+|---------|--------|
+| Server-side migration protocol (Release/Claim) | ✅ Working |
+| Proxy finalization (route flip) | ✅ Working |
+| GUID collision prevention (`-NyxGuidSeed=`) | ✅ Working |
+| Client SetViewTarget after spawn | ✅ Fixed |
+| RetryInputSetup ghost pawn guard | ✅ Fixed |
+| Post-migration PC re-bind (OnRep_Controller) | ✅ Fixed |
+| Claim timing (2s grace period) | ✅ Fixed |
+| HUD after migration | ⚠️ Partial — N/A shown (new PC may need HUD re-creation) |
+| Camera stability after migration | ⚠️ Under investigation — still occasional issues |
+| Pre-migration ghost pawn visibility | ⚠️ Ghost pawn from server-2 is visible to client before migration completes |
+
+## Key Files
+
+| File | What it does for migration |
+|------|---------------------------|
+| `NyxGameMode.cpp` | `CheckZoneBoundaries()`, `ReleasePawnAuthority()`, `ClaimPawnAuthority()` |
+| `NyxGameMode.h` | Grace period constants (`NoPawnClaimGracePeriodSeconds`, `TransferGracePeriodSeconds`) |
+| `NyxCharacter.cpp` | `OnRep_Controller()` post-migration re-bind, `RetryInputSetup()` with guard, `SetupPlayerInputComponent()` with SetViewTarget |
+| `NyxGameInstance.cpp` | `-ProxyGameServers=` detection, NetDriver swap to ProxyNetDriver |
+| `NyxHUD.cpp` | Canvas HUD — needs work for post-migration PC |

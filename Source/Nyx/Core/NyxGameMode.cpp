@@ -229,16 +229,22 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 				? TEXT("Zone-1 (West)")
 				: TEXT("Zone-2 (East)");
 
-			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
-			if (ServerSub)
+			// Skip SpacetimeDB registration for migration claims — ClaimPawnAuthority
+			// handles it separately. OnPlayerJoined restores position from the DB cache,
+			// which would override the NoPawnPC's authoritative position.
+			if (!MigrationClaimPCs.Contains(NewPlayer))
 			{
-				// Use the stable login name from the connection (e.g. "DESKTOP-K4TB77K-AB796F4A...")
-				// NOT GetName() which returns the UObject name ("PlayerController_XXXXXXXX")
-				// and changes on every server connection, creating duplicate SpacetimeDB rows.
-				FString PlayerName = NewPlayer->PlayerState
-					? NewPlayer->PlayerState->GetPlayerName()
-					: NewPlayer->GetName();
-				ServerSub->OnPlayerJoined(NyxChar, PlayerName);
+				UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+				if (ServerSub)
+				{
+					// Use the stable login name from the connection (e.g. "DESKTOP-K4TB77K-AB796F4A...")
+					// NOT GetName() which returns the UObject name ("PlayerController_XXXXXXXX")
+					// and changes on every server connection, creating duplicate SpacetimeDB rows.
+					FString PlayerName = NewPlayer->PlayerState
+						? NewPlayer->PlayerState->GetPlayerName()
+						: NewPlayer->GetName();
+					ServerSub->OnPlayerJoined(NyxChar, PlayerName);
+				}
 			}
 		}
 		else
@@ -268,6 +274,7 @@ void ANyxGameMode::Logout(AController* Exiting)
 		{
 			PlayersBeingTransferred.Remove(PC);
 			TransferArrivalTimes.Remove(PC);
+			NoPawnTracking.Remove(PC);
 		}
 
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(Exiting->GetPawn());
@@ -333,9 +340,20 @@ void ANyxGameMode::CheckZoneBoundaries()
 
 		// ── NoPawnPlayerController: this server is non-primary for this client. ──
 		// The proxy places NoPawnPCs at the player's world position via
-		// ServerSetViewTargetPosition(). If that position is inside OUR zone,
+		// ServerSetViewTargetPosition(). If that position transitions INTO our zone,
 		// we should claim authority: spawn a pawn and swap to a real PC.
 		// This is Server B's side of the migration handshake.
+		//
+		// We use position-transition detection to distinguish legitimate migration
+		// from initial NoPawnPCs that happen to start in our zone:
+		//
+		//   Normal migration: NoPawnPC position was outside our zone, then moves
+		//   inside as the player crosses the boundary → claim after 3s grace.
+		//
+		//   Spawn-in-wrong-zone: NoPawnPC starts inside our zone because the player
+		//   spawned in our territory (but primary is the other server). The primary
+		//   server will release after its 5s grace → we claim after 8s grace
+		//   (long enough for the other server to release first).
 		if (PC->IsA(ANoPawnPlayerController::StaticClass()) && bIsChildConnection)
 		{
 			// NoPawnPC stores the player's world position via SetActorLocation()
@@ -350,13 +368,55 @@ void ANyxGameMode::CheckZoneBoundaries()
 				? (NoPawnPos.X < ZoneBoundaryX)
 				: (NoPawnPos.X >= ZoneBoundaryX);
 
+			// Update tracking state
+			FNoPawnMigrationTracking& Track = NoPawnTracking.FindOrAdd(PC);
+			if (Track.FirstSeenTime == 0.0)
+			{
+				Track.FirstSeenTime = CurrentTime;
+				UE_LOG(LogNyx, Log, TEXT("NoPawnPC %s first seen at X=%.1f (%s our zone %s)"),
+					*PC->GetName(), NoPawnPos.X,
+					bInOurZone ? TEXT("IN") : TEXT("outside"),
+					bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
+			}
+
 			if (bInOurZone)
 			{
-				UE_LOG(LogNyx, Log, TEXT("Migration CLAIM: NoPawnPC %s is at X=%.0f (in our zone %s) — promoting to full player"),
-					*PC->GetName(), NoPawnPos.X,
-					bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
+				// Record when the NoPawnPC entered our zone (if not already in)
+				if (Track.EnteredOurZoneTime == 0.0)
+				{
+					Track.EnteredOurZoneTime = CurrentTime;
+				}
 
-				ClaimPawnAuthority(PC, NoPawnPos, FRotator::ZeroRotator);
+				const double TimeInZone = CurrentTime - Track.EnteredOurZoneTime;
+				bool bShouldClaim = false;
+
+				if (Track.bWasEverOutsideOurZone && TimeInZone >= NoPawnClaimGracePeriodSeconds)
+				{
+					// Normal migration: position transitioned from outside → inside our zone
+					UE_LOG(LogNyx, Log, TEXT("Migration CLAIM (transition): NoPawnPC %s at X=%.0f — was outside, now in %s zone for %.1fs"),
+						*PC->GetName(), NoPawnPos.X,
+						bOwnsNegativeSide ? TEXT("west") : TEXT("east"), TimeInZone);
+					bShouldClaim = true;
+				}
+				else if (!Track.bWasEverOutsideOurZone && TimeInZone >= InitialNoPawnGracePeriodSeconds)
+				{
+					// Spawn-in-wrong-zone: position was always in our zone (long grace)
+					UE_LOG(LogNyx, Log, TEXT("Migration CLAIM (initial): NoPawnPC %s at X=%.0f — always in %s zone for %.1fs (primary server should have released)"),
+						*PC->GetName(), NoPawnPos.X,
+						bOwnsNegativeSide ? TEXT("west") : TEXT("east"), TimeInZone);
+					bShouldClaim = true;
+				}
+
+				if (bShouldClaim)
+				{
+					ClaimPawnAuthority(PC, NoPawnPos, FRotator::ZeroRotator);
+				}
+			}
+			else
+			{
+				// NoPawnPC is outside our zone — mark and reset entry timer
+				Track.bWasEverOutsideOurZone = true;
+				Track.EnteredOurZoneTime = 0.0;
 			}
 			continue;
 		}
@@ -474,13 +534,21 @@ void ANyxGameMode::ReleasePawnAuthority(APlayerController* PC, ANyxCharacter* Ny
 		return;
 	}
 
-	// Swap the connection from the old real PC to the new NoPawnPC.
 	// SwapPlayerControllers transfers the Player/NetConnection and triggers
 	// replication updates that the proxy detects as a PC reassignment.
+	// However, it does NOT transfer ClientHandshakeId — the proxy uses this
+	// ID to find the internal route for this client, so we must transfer it.
+	const uint32 HandshakeId = PC->GetClientHandshakeId();
+
 	SwapPlayerControllers(PC, NoPawnPC);
 
-	UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Swapped %s → %s. Proxy will detect NoPawnPC on this route."),
-		*PC->GetName(), *NoPawnPC->GetName());
+	// Critical: Transfer the handshake ID so the proxy can match this
+	// NoPawnPC to the correct client route. Without this, the NoPawnPC
+	// arrives with handshake ID 0 and the proxy route lookup fails.
+	NoPawnPC->SetClientHandshakeId(HandshakeId);
+
+	UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Swapped %s → %s (HandshakeId=%u). Proxy will detect NoPawnPC on this route."),
+		*PC->GetName(), *NoPawnPC->GetName(), HandshakeId);
 
 	// Remove tracking for the old PC (the NoPawnPC will be cleaned up when
 	// the other server claims authority, or when the player disconnects)
@@ -495,9 +563,20 @@ void ANyxGameMode::ClaimPawnAuthority(APlayerController* NoPawnPC, const FVector
 	// inside our zone. We claim authority:
 	//   1. Spawn a pawn at the NoPawnPC's position
 	//   2. Spawn a new real PlayerController
-	//   3. Swap NoPawnPC → real PC (proxy detects the reassignment)
+	//   3. Use SwapPlayerControllers (NoPawnPC → NewPC) so the proxy can
+	//      properly remap NetGUIDs and the client keeps its existing PC
 	//   4. Possess the pawn
 	// The proxy detects the PC change and finalizes the migration.
+
+	// Find the NoPawnPC's net connection. ANoPawnPlayerController overrides
+	// GetNetConnection() to return NetConnection directly (bypassing the
+	// Player!=nullptr check in APlayerController::GetNetConnection).
+	UNetConnection* NetConn = NoPawnPC->GetNetConnection();
+	if (!NetConn)
+	{
+		UE_LOG(LogNyx, Error, TEXT("Migration CLAIM: NoPawnPC %s has no NetConnection — cannot transfer"), *NoPawnPC->GetName());
+		return;
+	}
 
 	UE_LOG(LogNyx, Log, TEXT("Migration CLAIM: Spawning pawn at (%.0f, %.0f, %.0f) and promoting NoPawnPC to real PC"),
 		SpawnLocation.X, SpawnLocation.Y, SpawnLocation.Z);
@@ -528,13 +607,54 @@ void ANyxGameMode::ClaimPawnAuthority(APlayerController* NoPawnPC, const FVector
 		return;
 	}
 
-	// Swap the connection: NoPawnPC → real PC
-	// This transfers the Player/NetConnection and triggers the proxy to detect
-	// that this route now has a real game PlayerController (migration event #2).
+	// ── SwapPlayerControllers (NoPawnPC → NewPC) ──
+	// ANoPawnPlayerController has Player==nullptr (engine doesn't set it for
+	// NoPawn connections). SwapPlayerControllers requires OldPC->Player != nullptr.
+	// We temporarily set NoPawnPC->Player = NetConn so the swap succeeds.
+	//
+	// Using SwapPlayerControllers (instead of manual transfer) is critical:
+	// it sets OldPC->PendingSwapConnection, which the proxy uses to remap
+	// NetGUIDs. Without this, the new PC arrives on the client as a separate
+	// actor instead of being mapped to the client's existing PC.
+
+	// Critical: set ClientHandshakeId BEFORE the swap — the proxy uses this
+	// during GameServerAssignPlayerController to find the internal route.
+	NewPC->SetClientHandshakeId(NetConn->GetClientHandshakeId());
+
+	// Temporarily give the NoPawnPC a Player so SwapPlayerControllers works.
+	// This is safe because ANoPawnPlayerController::GetNetConnection() already
+	// returns this connection — we're just making the base class field match.
+	NoPawnPC->Player = NetConn;
+
+	// Standard engine swap: transfers Player, NetConnection, NetPlayerIndex,
+	// calls SetPlayer → HandleClientPlayer → proxy route update.
+	// Also sets NoPawnPC->PendingSwapConnection for proxy NetGUID remapping.
 	SwapPlayerControllers(NoPawnPC, NewPC);
 
-	// Possess the pawn
+	UE_LOG(LogNyx, Log, TEXT("Migration CLAIM: Swapped %s → %s (HandshakeId=%u)"),
+		*NoPawnPC->GetName(), *NewPC->GetName(), NewPC->GetClientHandshakeId());
+
+	// Initialize the PlayerState (SpawnActor doesn't call this automatically)
+	NewPC->InitPlayerState();
+
+	// Possess the pawn — sets up input component & bindings
 	NewPC->Possess(NewChar);
+
+	// Mark this PC as a migration claim so PostLogin skips SpacetimeDB registration.
+	// OnPlayerJoined restores position from the DB cache, which would override the
+	// NoPawnPC's authoritative position (the whole point of migration).
+	MigrationClaimPCs.Add(NewPC);
+
+	// PostLogin finishes engine initialization (enhanced input, HUD, etc.)
+	PostLogin(NewPC);
+
+	// Clear migration flag now that PostLogin is done
+	MigrationClaimPCs.Remove(NewPC);
+
+	// Override any position changes from PostLogin — the NoPawnPC position
+	// is authoritative for migration claims, not the SpacetimeDB cache.
+	NewChar->SetActorLocation(SpawnLocation);
+	NewChar->SetActorRotation(SpawnRotation);
 
 	// Set replicated HUD info
 	NewChar->ServerName = DedicatedServerId;
@@ -542,18 +662,16 @@ void ANyxGameMode::ClaimPawnAuthority(APlayerController* NoPawnPC, const FVector
 		? TEXT("Zone-1 (West)")
 		: TEXT("Zone-2 (East)");
 
-	// Register with SpacetimeDB
-	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
-	if (ServerSub)
-	{
-		FString PlayerName = NewPC->PlayerState
-			? NewPC->PlayerState->GetPlayerName()
-			: NewPC->GetName();
-		ServerSub->OnPlayerJoined(NewChar, PlayerName);
-	}
-
 	// Grace period: prevent immediate bounce-back
 	TransferArrivalTimes.Add(NewPC, GetWorld()->GetTimeSeconds());
+
+	// Clean up tracking for the old NoPawnPC
+	NoPawnTracking.Remove(NoPawnPC);
+	PlayersBeingTransferred.Remove(NoPawnPC);
+
+	// Destroy the old NoPawnPC — PendingSwapConnection was set by
+	// SwapPlayerControllers, so the proxy has already recorded the swap.
+	NoPawnPC->Destroy();
 
 	UE_LOG(LogNyx, Log, TEXT("Migration CLAIM: %s now primary on %s at %s. Pawn=%s"),
 		*NewPC->GetName(), *DedicatedServerId, *NewChar->ZoneName, *NewChar->GetName());
