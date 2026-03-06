@@ -5155,6 +5155,179 @@ This is a **viable alternative** to the SpacetimeDB ghost pawn approach (Spike 2
 
 ---
 
+## Multi-Server Proxy — Production Fix Report
+
+> **Status:** VERIFIED WORKING — Two dedicated servers + proxy + two clients, smooth movement, camera, and zone crossing all confirmed.
+
+### Bug 1: ObjectReplicatorReceivedBunchFail — NetGUID Collision Between Servers
+
+**Symptom:** Server2's proxy backend connection died within seconds of clients connecting (~60-70% of runs). Proxy log showed `ObjectReplicatorReceivedBunchFail` as the disconnect reason. One client would get `ANoPawnPlayerController` as its primary controller → no character, no camera, no input.
+
+**Root Cause:** Both Server1 and Server2 start their dynamic NetGUID counter at seed 0. Each server independently assigns GUID 1, 2, 3... to completely different actors. The proxy uses a **shared backend NetGUID cache** (`FProxyBackendNetGUIDCache`) across all backend connections. When Server2's GUID 5 (e.g., `NoPawnPlayerController`) arrives after Server1 has already registered its own GUID 5 (`PlayerController`) in the shared cache, the ObjectReplicator tries to apply the wrong class's properties → `ObjectReplicatorReceivedBunchFail` → backend connection killed.
+
+**Discovery path:**
+1. Proxy log: `Ensure condition failed: !PrimaryPlayerController->IsA(ANoPawnPlayerController::StaticClass())` — proxy used NoPawnPC as primary
+2. Server1 log: `JOINSPLIT: Succeeded` — Server1 correctly spawned `PlayerController_0`
+3. Proxy log: `Binding player controller NoPawnPlayerController_1 to child connection ProxyBackendChildNetConnection_1` — proxy received wrong PC for Server1's child
+4. Engine source `PackageMapClient.cpp:3277`: `AssignNewNetGUID_Server()` uses `++NetworkGuidIndex[IsStatic]` — simple incrementing counter
+5. Engine source `PackageMapClient.cpp:3009`: `NetworkGuidIndex[0] = NetworkGuidIndex[1] = NetworkGuidSeed` — defaults to 0
+6. Engine source `PackageMapClient.cpp:3005`: `FParse::Value(FCommandLine::Get(), TEXT("NetworkGuidSeed="), NetworkGuidSeed)` — command-line override
+
+**Fix:** Launch each server with a distinct `-NetworkGuidSeed=` value:
+```
+Server1: -NetworkGuidSeed=100000
+Server2: -NetworkGuidSeed=200000
+```
+
+**Result:** 0 replication errors, 0 proxy ensure failures, both clients get real `PlayerController`, both have working character + camera + input.
+
+> **Limitation:** `-NetworkGuidSeed=` only works in non-shipping builds (`#if !UE_BUILD_SHIPPING` in `PackageMapClient.cpp:3004`). For shipping, would need engine modification or plugin-level GUID coordination.
+
+---
+
+### Bug 2: CMC Timestamp Desync — Proxy-Delivered Moves Rejected
+
+**Symptom:** Characters rubber-banded continuously back to spawn position.
+
+**Root Cause:** When the proxy delivers `ForcePositionUpdate` corrections, the server's `CurrentClientTimeStamp` gets inflated to an artificially high value. Real client moves forwarded through the proxy have timestamps that appear "in the past" relative to the inflated clock → `IsClientTimeStampValid()` returns false → server rejects all movement input.
+
+**Fix:** Override `VerifyClientTimeStamp()` in `UNyxCharacterMovementComponent`. Track last accepted client timestamp (`ProxyLastAcceptedTimeStamp`). When Super rejects a timestamp but it's ahead of our last known good timestamp and within 60 seconds of the server's inflated clock, accept it and restore the real client timeline.
+
+**Code:** `Source/Nyx/Player/NyxCharacterMovementComponent.h/.cpp`
+
+---
+
+### Bug 3: Pawn Collision Blocking Movement at Spawn
+
+**Symptom:** Characters spawned but could not walk. Server received non-zero acceleration but velocity stayed 0. Jumping freed the character.
+
+**Root Cause:** Both characters spawned at the exact same `PlayerStart` position (restored from SpacetimeDB). Overlapping capsules caused `MoveAlongFloor()` sweep to block against other character's capsule. `Falling` mode bypasses `MoveAlongFloor` which is why jumping worked.
+
+**Fix:** Set pawn-to-pawn collision to Overlap:
+```cpp
+// ANyxCharacter::BeginPlay()
+GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+```
+
+**Critical:** MUST apply on **both server AND client** (no `HasAuthority()` guard). Server-only causes prediction mismatch → constant corrections when crossing through other players.
+
+---
+
+### Bug 4: Input Setup — IsLocallyControlled() vs ROLE_AutonomousProxy
+
+**Symptom:** Client2 had no input (couldn't move). Only Client1 worked.
+
+**Root Cause:** Input setup retry used `IsLocallyControlled()`. On proxy-connected clients, the `ANoPawnPlayerController` from non-primary servers returns false for `IsLocallyControlled()`. By the time the real `PlayerController` arrives, the check has already failed.
+
+**Fix:** Check `GetLocalRole() == ROLE_AutonomousProxy` instead of `IsLocallyControlled()`.
+
+**Code:** `Source/Nyx/Player/NyxCharacter.cpp` `BeginPlay()` retry timer.
+
+---
+
+### Bug 5: OnRep_Controller Crash on Early Replication
+
+**Symptom:** Crash when PlayerController is replicated before BeginPlay completes.
+
+**Fix:** Guard with `if (!HasActorBegunPlay()) return;` in `OnRep_Controller()`.
+
+---
+
+### Bug 6: RepGraph Ensure on Disconnect — Null Connection
+
+**Symptom:** `ensure()` failure when removing PC from RepGraph after disconnect. Actor's owning connection was already null.
+
+**Fix:** In `RouteRemoveNetworkActorToNodes()`, when actor has no connection, fall back to searching ALL connection nodes + AlwaysRelevantNode.
+
+**Code:** `Source/Nyx/Networking/NyxReplicationGraph.cpp`
+
+---
+
+### Architectural Decisions — DO NOT RETRY
+
+| Approach | Result | Reason |
+|----------|--------|--------|
+| RepGraph AlwaysRelevant for PlayerControllers | **REVERTED** | Broke PC ownership — PCs replicated to wrong clients |
+| INI override for ProxyNetDriver | **REVERTED** | Broke proxy initialization entirely |
+| `IsLocallyControlled()` for input gating | **REPLACED** | `NoPawnPlayerController` returns false — use `ROLE_AutonomousProxy` instead |
+| Server-only pawn collision overlap | **REPLACED** | Client still predicts block → mismatch → corrections. Must be both sides. |
+
+---
+
+### Verified Launch Commands
+
+```powershell
+$proj = "C:\UE\Nyx\Nyx.uproject"
+$ue = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe"
+
+# Server1 (primary, west zone, GUID seed 100000)
+Start-Process $ue -ArgumentList "$proj /Engine/Maps/Templates/OpenWorld -server -port=7777 -ZoneId=1 -NOSTEAM -MultiServerPrimary -MultiServerBeaconPort=9000 -MultiServerExpectedNumberOfServers=2 -NetworkGuidSeed=100000 -abslog=C:\UE\Nyx\server1_log.txt"
+
+# Server2 (east zone, GUID seed 200000)
+Start-Process $ue -ArgumentList "$proj /Engine/Maps/Templates/OpenWorld -server -port=7778 -ZoneId=2 -NOSTEAM -MultiServerBeaconPort=9000 -MultiServerExpectedNumberOfServers=2 -NetworkGuidSeed=200000 -abslog=C:\UE\Nyx\server2_log.txt"
+
+# Wait ~20s for servers to mesh
+
+# Proxy
+Start-Process $ue -ArgumentList "$proj /Engine/Maps/Templates/OpenWorld?game=/Script/Nyx.NyxGameMode -server -port=7780 -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778 -abslog=C:\UE\Nyx\proxy_log.txt -NOSTEAM"
+
+# Wait ~30s for proxy to connect to both servers
+
+# Client1
+Start-Process $ue -ArgumentList "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -WinX=50 -WinY=50 -abslog=C:\UE\Nyx\client1_log.txt -NOSTEAM"
+
+# Client2 (5s after Client1)
+Start-Process $ue -ArgumentList "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -WinX=900 -WinY=50 -abslog=C:\UE\Nyx\client2_log.txt -NOSTEAM"
+```
+
+---
+
+### Zone Configuration
+
+| Property | Value | Location |
+|----------|-------|----------|
+| `ZoneBoundaryX` | `0.f` | `NyxGameMode.h:98` |
+| `bOwnsNegativeSide` | `true` | `NyxGameMode.h:106` |
+| Server1 (ZoneId=1) | West (X < 0) | `-ZoneId=1` flag |
+| Server2 (ZoneId=2) | East (X >= 0) | `-ZoneId=2` flag |
+
+Zone transfer uses `ClientRPC_TransferToServer()` for direct connections only. Proxy-connected clients are excluded from zone transfer checks via `UChildConnection` guard in `CheckZoneBoundaries()` — the proxy handles cross-server replication natively.
+
+---
+
+### Plugin Internals (MultiServerReplication)
+
+**Key Classes:**
+
+| Class | File | Purpose |
+|-------|------|---------|
+| `UProxyNetDriver` | MultiServerProxy.cpp | Frontend — listens for clients |
+| `UProxyBackendNetDriver` | MultiServerProxy.cpp | Backend — one per game server |
+| `UProxyNetConnection` | MultiServerProxy.cpp | Client → Proxy connection |
+| `UProxyBackendNetConnection` | MultiServerProxy.cpp | Proxy → Server parent connection |
+| `UProxyBackendChildNetConnection` | MultiServerProxy.cpp | Proxy → Server child connection (per client per server) |
+| `FProxyNetGUIDCache` | MultiServerProxy.cpp | Frontend GUID cache — lookups from shared backend |
+| `FProxyBackendNetGUIDCache` | MultiServerProxy.cpp | Shared backend GUID cache — populated by all servers |
+| `ANoPawnPlayerController` | PlayerController.h:2353 | Non-primary server PC — no pawn |
+
+**Connection Flow:**
+1. Client connects to proxy → `NotifyControlMessage(NMT_Join)`
+2. For each registered server:
+   - Primary: `NMT_JoinSplit` (flags=0) → spawns real `PlayerController` + pawn
+   - Non-primary: `NMT_JoinNoPawnSplit` (flags=NoPawn) → spawns `ANoPawnPlayerController`
+3. Server responds → `HandleClientPlayer()` → `GameServerAssignPlayerController()`
+4. State transitions: `ConnectingPrimary` → `ConnectedPrimary` (or `Connecting` → `Connected`)
+
+**Primary Server Selection:**
+- `PrimaryGameServerForNextClient` — index into `GameServerConnections[]` (default: 0)
+- `-ProxyCyclePrimaryGameServer` — round-robin across clients
+- `-ProxyClientPrimaryGameServer=random` — randomize
+
+**GUID Architecture:**
+Each backend server has authority to assign NetGUIDs. The proxy uses a single `SharedBackendNetGuidCache` across all `UProxyBackendNetDriver` instances. **Non-overlapping GUID ranges are required** (via `-NetworkGuidSeed=`), otherwise the shared cache collides → `ObjectReplicatorReceivedBunchFail`.
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
