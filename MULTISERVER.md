@@ -373,3 +373,150 @@ Every client-side fix we've written (`OnRep_Controller` re-bind, `RetryInputSetu
 | `RemoteObjectTransfer.cpp` | 97–1433 | `FRemoteObjectTransferQueue` — the DSTM subsystem |
 | `MultiServerBeaconClient.cpp` | 138 | `SetUsingRemoteObjectReferences()` — plugin gate |
 | `MultiServerBeaconHost.cpp` | 39 | Same gate on host side |
+
+---
+
+# Can We Replicate DSTM Without Engine Rebuild?
+
+**No.** After exhaustive study of the proxy architecture, GUID system, and channel management, replicating DSTM behavior at the game level is not feasible. Here's the full analysis of every approach considered and why each fails.
+
+## Proxy Architecture: Decode-Replicate-Re-encode
+
+The proxy does **NOT** forward raw bytes. It fully materializes actors from all game servers into a **shared `UWorld`**, then runs `ServerReplicateActors()` to replicate from that world to clients:
+
+```
+Game Server A ──(UE replication)──► UProxyBackendNetDriver A ──┐
+                                                                ├──► Shared UWorld
+Game Server B ──(UE replication)──► UProxyBackendNetDriver B ──┘      (decode)
+                                                                         │
+                                                         ServerReplicateActors()
+                                                              (re-encode)
+                                                                         │
+                                                                         ▼
+                                                              UProxyNetDriver
+                                                                   │
+                                                              UProxyNetConnection
+                                                                 (Client)
+```
+
+Key proxy behaviors:
+- Backend drivers share a **single** `FProxyBackendNetGUIDCache` (all servers' actors in one GUID space)
+- Backend `ShouldSkipRepNotifies()` returns `true` (no game logic on proxy)
+- Backend `EnableExecuteRPCFunctions(false)` (no RPC execution on proxy)
+- Frontend `FProxyNetGUIDCache::AssignNewNetGUID_Server()` **looks up** the GUID from the shared backend cache — same GUID values flow end-to-end from game server → proxy → client
+- RPCs are forwarded function-by-function via `ForwardRemoteFunction()`, not raw bytes
+- Actor roles are swapped on proxy so clients receive correct `ROLE_SimulatedProxy`/`ROLE_AutonomousProxy`
+
+Source: `MultiServerProxy.cpp` lines 93–148 (GUID lookup), 519–567 (RPC forwarding), 920–928 (role swap), 1010–1015 (ServerReplicateActors)
+
+## Approach 1: Force Net GUIDs on Server-B — FAILS
+
+**Idea:** `FNetGUIDCache` is fully public `ENGINE_API`. We could capture Server-A's PC GUID, transfer it to Server-B, and call `RegisterNetGUID_Server(sameGUID, newPC)` before replication.
+
+**Why it's possible at the API level:**
+```cpp
+// FNetGUIDCache — all public, all ENGINE_API
+ENGINE_API FNetworkGUID GetNetGUID(const UObject* Object) const;
+ENGINE_API bool RemoveNetGUID(const UObject* Object);
+ENGINE_API void RegisterNetGUID_Server(const FNetworkGUID& NetGUID, UObject* Object);
+ENGINE_API void RemoveActorNetGUIDs(const AActor* Actor);
+// FNetworkGUID — plain struct, freely constructible
+static FNetworkGUID CreateFromIndex(uint64 NetIndex, bool bIsStatic);
+```
+
+**Why it fails in practice (4 layered problems):**
+
+1. **No GUID communication channel** — Server-A and Server-B are separate processes. No built-in mechanism to transfer the GUID. Would need SpacetimeDB or shared memory (adds latency and complexity).
+
+2. **Proxy shared cache collision** — The proxy's `FProxyBackendNetGUIDCache` (shared across all backends) uses `RegisterNetGUID_Client` which handles reassignment. This part actually works — it logs a warning and remaps. But the proxy's frontend `FProxyNetGUIDCache` calls `RegisterNetGUID_Server` which asserts:
+   ```cpp
+   check(!ObjectLookup.Contains(NetGUID));  // CRASHES if GUID already exists
+   ```
+   If Server-B's new PC arrives while Server-A's old PC is still in the frontend cache → **assertion failure / crash**.
+
+3. **Timing dependency** — For the frontend cache slot to be free, Server-A's PC must be fully removed from the proxy's replication system first (`RemoveNetworkActor` → `RemoveActorNetGUIDs`). This happens asynchronously when the proxy→client channel for the old PC closes. No guarantee it happens before Server-B's PC arrives.
+
+4. **Channel continuity is not GUID-based** — Even with matching GUIDs, actor channels are per-`UObject*`, not per-GUID. The proxy creates a NEW channel for the new PC object. The client receives a channel close (old PC) followed by a channel open (new PC). Same net effect as different GUIDs — the client destroys and recreates the PC.
+
+## Approach 2: Use `EChannelCloseReason::Migrated` — FAILS
+
+**Idea:** The proxy's `ShouldClientDestroyActor` returns `false` for `EChannelCloseReason::Migrated`. If we close the old PC's channel with `Migrated`, the proxy keeps it alive:
+
+```cpp
+// MultiServerProxy.cpp:658 — the gate we want to trigger
+bool UProxyBackendNetDriver::ShouldClientDestroyActor(AActor* Actor, EChannelCloseReason CloseReason) const
+{
+    return (CloseReason != EChannelCloseReason::Migrated);
+}
+```
+
+`NotifyActorDestroyed` IS callable from game code:
+```cpp
+// NetDriver.h:1781 — ENGINE_API, public, virtual
+ENGINE_API virtual void NotifyActorDestroyed(AActor* Actor, bool IsSeamlessTravel = false,
+    EChannelCloseReason CloseReason = EChannelCloseReason::Destroyed);
+```
+
+**Why it fails (3 problems):**
+
+1. **Proxy keeps actor but client doesn't** — `ShouldClientDestroyActor` controls whether the proxy destroys the actor in ITS shared world. It does NOT control the proxy→client channel close reason. The proxy's `ServerReplicateActors()` determines client channel lifecycle independently. When the old PC becomes irrelevant (no longer anyone's controller), the proxy→client channel closes with `Destroyed` (not `Migrated`) → client destroys its local PC.
+
+2. **Actor irrelevancy kills it anyway** — After route reassignment, the old PC is nobody's `Route->PlayerController`. `APlayerController::IsNetRelevantFor` returns `false` for non-owning connections. The proxy stops including it in `ServerReplicateActors()` → channel closes → client destroys actor.
+
+3. **`PendingSwapConnection` doesn't replicate** — Set by `SwapPlayerControllers` on Server-A, but `UNetConnection*` properties can't replicate (they ARE the replication mechanism). So the proxy's copy of the PC doesn't reflect the swap state.
+
+## Approach 3: Enable `UE_WITH_REMOTE_OBJECT_HANDLE` Without Full Rebuild — FAILS
+
+**Idea:** `#define UE_WITH_REMOTE_OBJECT_HANDLE 1` in our game module before engine includes.
+
+**Why it fails:** ABI mismatch. The engine DLLs were compiled with the define at 0. Enabling it in our module changes class layouts (`APlayerController` gets additional `CachedConnectionPlayerId` serialization, `CharacterMovementComponent` gets remote object members, physics interfaces change). Our module would see different `sizeof()` for engine types → memory corruption → crash.
+
+## Approach 4: Subclass `FNetGUIDCache` (Virtual Override) — FAILS
+
+**Idea:** `AssignNewNetGUID_Server` is `virtual`. We could subclass `FNetGUIDCache`, override it to use our desired GUIDs, and install it on the NetDriver.
+
+**Why it doesn't help:** Even with custom GUID assignment on Server-B, the fundamental channel continuity problem (Approach 1, point 4) remains. The proxy creates per-object channels, not per-GUID channels. A new object with an old GUID still gets a new channel.
+
+## Why DSTM Works and We Can't
+
+DSTM solves the problem at a level we can't reach:
+
+| Layer | What DSTM Does | What We Can Reach |
+|-------|----------------|-------------------|
+| **UObject identity** | Physically moves the C++ object between processes — same pointer, same net GUID | We spawn a NEW object — different pointer, different GUID |
+| **Actor channel** | Same object → same channel → client sees property updates | New object → new channel → client sees destroy + create |
+| **Channel close reason** | `AActor::PostMigrate` calls `NotifyActorDestroyed(Migrated)` — proxy preserves actor | We can call this from game code, but proxy→client propagation doesn't use the same reason |
+| **Replication continuity** | Server-B starts replicating the same GUID → client's existing channel gets new data | Server-B replicates new GUID → client creates new actor |
+
+The proxy is a **transparent relay** designed for DSTM. Without DSTM, it still works (our SwapPlayerControllers approach is handled correctly), but the client inevitably sees a PC actor swap because object identity can't be preserved across processes.
+
+## What We CAN Do (Without Engine Changes)
+
+Our current approach (spawn new PC, `OnRep_Controller` re-bind) is the correct fallback. To minimize the visible "seam":
+
+1. **Robust state transfer in `OnRep_Controller`** — Copy camera transform, input bindings, HUD state from old PC to new PC within the same frame. Already partially implemented.
+
+2. **Pawn pre-replication** — Server-B's pawn is visible to the client BEFORE migration completes (the proxy replicates world actors from all servers, not just primary). Use this to our advantage: the pawn is already there when the PC swap happens.
+
+3. **Hide ghost pawn** — Set Server-B's pawn invisible until formally possessed (via `OnRep_Controller`), preventing the "ghost" appearance.
+
+4. **Single-frame transition** — Ensure `HandleClientPlayer` → `OnRep_Controller` → `SetViewTarget` → `SetupInputMappingContexts` all execute within one frame. The visual pop becomes imperceptible.
+
+5. **Camera transform continuity** — Store last camera world transform in a replicated property on the pawn. When the new PC takes over, immediately set camera to match — no visual jump.
+
+## Definitive Source Locations
+
+| File | Lines | What |
+|------|-------|------|
+| `MultiServerProxy.cpp` | 93–148 | `FProxyNetGUIDCache::LookupNetGUIDFromBackendCache` — GUID pass-through |
+| `MultiServerProxy.cpp` | 152–157 | `FProxyBackendNetGUIDCache::IsNetGUIDAuthority() = false` |
+| `MultiServerProxy.cpp` | 658–664 | `ShouldClientDestroyActor` — Migrated check |
+| `MultiServerProxy.cpp` | 920–928 | Role swap on proxy for client replication |
+| `MultiServerProxy.cpp` | 1010 | `ServerReplicateActors` — re-encode to clients |
+| `MultiServerProxy.h` | 300–323 | Architecture comment: "shared UWorld" model |
+| `PackageMapClient.h` | 228–257 | `FNetGUIDCache` public API (all ENGINE_API) |
+| `PackageMapClient.cpp` | 3277–3290 | `AssignNewNetGUID_Server` — GUID assignment |
+| `PackageMapClient.cpp` | 3374–3396 | `RegisterNetGUID_Server` — `check(!ObjectLookup.Contains)` assertion |
+| `NetDriver.h` | 1781 | `NotifyActorDestroyed` — ENGINE_API, takes CloseReason |
+| `CoreMiscDefines.h` | 620 | `#define UE_WITH_REMOTE_OBJECT_HANDLE 0` |
+| `Actor.cpp` | 1338 | Only place `EChannelCloseReason::Migrated` is set (gated by DSTM) |
