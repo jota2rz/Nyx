@@ -36,8 +36,18 @@ void UNyxReplicationGraph::InitGlobalActorClassSettings()
 	{
 		UClass* Class = *It;
 		AActor* ActorCDO = Cast<AActor>(Class->GetDefaultObject());
-		if (!ActorCDO || !ActorCDO->GetIsReplicated())
+		if (!ActorCDO)
 		{
+			continue;
+		}
+
+		// Non-replicated actors still need ClassInfo registered to prevent
+		// "No ClassInfo found" assert crashes when the proxy encounters them.
+		if (!ActorCDO->GetIsReplicated())
+		{
+			FClassReplicationInfo NonReplicatedInfo;
+			NonReplicatedInfo.SetCullDistanceSquared(0.f);
+			GlobalActorReplicationInfoMap.SetClassInfo(Class, NonReplicatedInfo);
 			continue;
 		}
 
@@ -236,6 +246,20 @@ void UNyxReplicationGraph::RouteAddNetworkActorToNodes(const FNewReplicatedActor
 			{
 				Node->NotifyAddNetworkActor(ActorInfo);
 			}
+			else
+			{
+				// Connection exists but doesn't match any per-connection node.
+				// This happens on the multi-server proxy: the actor's connection is
+				// a backend connection (ProxyBackend*) while per-connection nodes
+				// track frontend client connections (ProxyNetConnection*).
+				// Fall back to global AlwaysRelevant so the proxy can create actor
+				// channels and forward the actor. The proxy's own CanDowngradeActorRole
+				// mechanism handles per-client role assignment (Autonomous vs Simulated).
+				UE_LOG(LogNyxRepGraph, Log,
+					TEXT("RelevantToOwner actor %s has no matching node for connection %s — promoting to AlwaysRelevant"),
+					*GetNameSafe(ActorInfo.Actor), *GetNameSafe(Connection));
+				AlwaysRelevantNode->NotifyAddNetworkActor(ActorInfo);
+			}
 		}
 		else
 		{
@@ -273,6 +297,33 @@ void UNyxReplicationGraph::RouteRemoveNetworkActorToNodes(const FNewReplicatedAc
 			{
 				Node->NotifyRemoveNetworkActor(ActorInfo);
 			}
+			else
+			{
+				// Proxy fallback — was promoted to AlwaysRelevant during Add
+				AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
+			}
+		}
+		else
+		{
+			// Connection already torn down (e.g., proxy child connection closing).
+			// The actor was added to a per-connection node but we can't look it up
+			// by connection anymore. Search all nodes to prevent stale references
+			// that trigger "IsActorValidForReplication" ensures.
+			bool bFoundInNode = false;
+			for (int32 Idx = 0; Idx < ConnectionNodes.Num(); ++Idx)
+			{
+				if (ConnectionNodes[Idx])
+				{
+					ConnectionNodes[Idx]->NotifyRemoveNetworkActor(ActorInfo);
+					bFoundInNode = true;
+				}
+			}
+			// Also try global AlwaysRelevant in case it was promoted there
+			AlwaysRelevantNode->NotifyRemoveNetworkActor(ActorInfo);
+
+			UE_LOG(LogNyxRepGraph, Log,
+				TEXT("RouteRemoveNetworkActor: %s had no connection — searched all nodes (found=%d)"),
+				*GetNameSafe(ActorInfo.Actor), bFoundInNode ? 1 : 0);
 		}
 		ActorsWithoutNetConnection.Remove(ActorInfo.Actor);
 		break;
@@ -304,6 +355,11 @@ void UNyxReplicationGraph::RouteRenameNetworkActorToNodes(const FRenamedReplicat
 			{
 				Node->NotifyActorRenamed(ActorInfo);
 			}
+			else
+			{
+				// Proxy fallback
+				AlwaysRelevantNode->NotifyActorRenamed(ActorInfo);
+			}
 		}
 		break;
 
@@ -315,6 +371,31 @@ void UNyxReplicationGraph::RouteRenameNetworkActorToNodes(const FRenamedReplicat
 		GridNode->RenameActor_Dormancy(ActorInfo);
 		break;
 	}
+}
+
+// ─── Connection Cleanup ────────────────────────────────────────────
+
+void UNyxReplicationGraph::RemoveClientConnection(UNetConnection* NetConnection)
+{
+	// Clean up our per-connection tracking arrays BEFORE the base class tears
+	// down the graph connection. This prevents stale references that cause
+	// "IsActorValidForReplication" ensures when the proxy closes child connections.
+	if (NetConnection)
+	{
+		for (int32 Idx = ConnectionKeys.Num() - 1; Idx >= 0; --Idx)
+		{
+			if (ConnectionKeys[Idx] == NetConnection)
+			{
+				UE_LOG(LogNyxRepGraph, Log, TEXT("RemoveClientConnection: Cleaning up connection node for %s"),
+					*GetNameSafe(NetConnection));
+				ConnectionKeys.RemoveAt(Idx);
+				ConnectionNodes.RemoveAt(Idx);
+				break;
+			}
+		}
+	}
+
+	Super::RemoveClientConnection(NetConnection);
 }
 
 // ─── ServerReplicateActors ─────────────────────────────────────────
@@ -333,6 +414,11 @@ int32 UNyxReplicationGraph::ServerReplicateActors(float DeltaSeconds)
 				if (UReplicationGraphNode_AlwaysRelevant_ForConnection* Node = GetAlwaysRelevantNodeForConnection(Connection))
 				{
 					Node->NotifyAddNetworkActor(FNewReplicatedActorInfo(Actor));
+				}
+				else
+				{
+					// Proxy fallback — promote to AlwaysRelevant
+					AlwaysRelevantNode->NotifyAddNetworkActor(FNewReplicatedActorInfo(Actor));
 				}
 			}
 		}

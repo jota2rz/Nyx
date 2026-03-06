@@ -42,12 +42,14 @@ class NYX_API ANyxCharacter : public ACharacter
 	GENERATED_BODY()
 
 public:
-	ANyxCharacter();
+	ANyxCharacter(const FObjectInitializer& ObjectInitializer = FObjectInitializer::Get());
 
 	virtual void SetupPlayerInputComponent(UInputComponent* PlayerInputComponent) override;
 	virtual void BeginPlay() override;
+	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 	virtual void PossessedBy(AController* NewController) override;
 	virtual void OnRep_PlayerState() override;
+	virtual void OnRep_Controller() override;
 	virtual void GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const override;
 
 	// ──── Stats (replicated from dedicated server) ────
@@ -174,6 +176,10 @@ private:
 	void ServerRPC_RequestAttack();
 
 public:
+	/** Server RPC: teleport character server-side to force a CMC net correction. */
+	UFUNCTION(Server, Reliable)
+	void ServerRPC_ForceNetCorrection(float Offset);
+
 	/** Client RPC: server tells client to travel to another server for zone transfer. */
 	UFUNCTION(Client, Reliable)
 	void ClientRPC_TransferToServer(const FString& Address);
@@ -190,4 +196,12 @@ private:
 
 	/** Sets up input mapping contexts for the local player. Safe to call multiple times. */
 	void SetupInputMappingContexts();
+
+	/** Deferred input setup for proxy-connected clients. */
+	void RetryInputSetup();
+
+	/** True once SetupPlayerInputComponent has been called successfully. */
+	bool bInputSetupComplete = false;
+
+	FTimerHandle InputRetryTimerHandle;
 };

@@ -9,6 +9,7 @@
 #include "Nyx/Player/NyxPlayerPawn.h"
 #include "Nyx/Player/NyxMovementComponent.h"
 #include "Nyx/Sidecar/NyxSidecarSubsystem.h"
+#include "Nyx/Player/NyxCharacter.h"
 #include "Nyx/Test/NyxSmokeTest.h"
 #include "ModuleBindings/SpacetimeDBClient.g.h"
 #include "Engine/Engine.h"
@@ -18,9 +19,11 @@ void UNyxGameInstance::Init()
 {
 	Super::Init();
 
+	UE_LOG(LogNyx, Log, TEXT("NyxGameInstance::Init() — CmdLine: %s"), FCommandLine::Get());
+
 	// ── Proxy NetDriver Override ──
 	// If -ProxyGameServers= is on the command line, this process should run as
-	// a MultiServer proxy. Swap the GameNetDriver definition from IpNetDriver
+	// a MultiServer proxy.  Swap the GameNetDriver definition from IpNetDriver
 	// to ProxyNetDriver BEFORE UWorld::Listen() creates the NetDriver.
 	// We must modify GEngine->NetDriverDefinitions directly because it's a
 	// UPROPERTY(Config) array cached at engine startup — modifying GConfig is too late.
@@ -708,7 +711,43 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset, Nyx.JoinServer, Nyx.SmokeTest"));
+	// ─── Net Correction Test ──────────────────────────────────────────
+
+	// Nyx.ForceCorrection [offset] — teleport character server-side to trigger a net correction
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.ForceCorrection"),
+		TEXT("Force a CMC net correction via server teleport. Usage: Nyx.ForceCorrection [offset] (default: 500)"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			const float Offset = Args.Num() > 0 ? FCString::Atof(*Args[0]) : 500.f;
+
+			UWorld* World = GetWorld();
+			if (!World)
+			{
+				UE_LOG(LogNyx, Error, TEXT("No world available!"));
+				return;
+			}
+
+			APlayerController* PC = World->GetFirstPlayerController();
+			if (!PC || !PC->GetPawn())
+			{
+				UE_LOG(LogNyx, Error, TEXT("No player controller or pawn!"));
+				return;
+			}
+
+			ANyxCharacter* NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
+			if (!NyxChar)
+			{
+				UE_LOG(LogNyx, Error, TEXT("Pawn is not ANyxCharacter!"));
+				return;
+			}
+
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.ForceCorrection %.0f — sending server RPC"), Offset);
+			NyxChar->ServerRPC_ForceNetCorrection(Offset);
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset, Nyx.JoinServer, Nyx.SmokeTest, Nyx.ForceCorrection"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()

@@ -1,6 +1,7 @@
 // Copyright Nyx MMO Project. All Rights Reserved.
 
 #include "NyxCharacter.h"
+#include "NyxCharacterMovementComponent.h"
 #include "Nyx/Nyx.h"
 #include "Components/CapsuleComponent.h"
 #include "GameFramework/SpringArmComponent.h"
@@ -15,9 +16,12 @@
 #include "UObject/ConstructorHelpers.h"
 #include "Nyx/Server/NyxServerSubsystem.h"
 #include "Engine/World.h"
+#include "TimerManager.h"
 #include "DrawDebugHelpers.h"
 
-ANyxCharacter::ANyxCharacter()
+ANyxCharacter::ANyxCharacter(const FObjectInitializer& ObjectInitializer)
+	: Super(ObjectInitializer.SetDefaultSubobjectClass<UNyxCharacterMovementComponent>(
+		ACharacter::CharacterMovementComponentName))
 {
 	PrimaryActorTick.bCanEverTick = false;
 	bReplicates = true;
@@ -147,9 +151,35 @@ void ANyxCharacter::BeginPlay()
 		*UEnum::GetValueAsString(GetLocalRole()),
 		HasAuthority() ? TEXT("true") : TEXT("false"));
 
+	// ── Let pawns pass through each other (server AND client) ──
+	// In the multi-server proxy architecture, multiple characters may spawn at the
+	// same PlayerStart. Their capsules overlap, causing MoveAlongFloor sweeps to
+	// block against each other — the server character never moves, producing
+	// constant corrections that rubber-band the client back to spawn.
+	// Must be set on BOTH server and client so client-side prediction matches
+	// server-side results — otherwise the client blocks against the other pawn
+	// while the server walks through, causing position desync and corrections.
+	GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
+
 	// Try input setup here — will succeed for listen server host, may fail for client
 	// (controller not replicated yet). Client gets a second chance in OnRep_PlayerState.
 	SetupInputMappingContexts();
+
+	// Proxy-connected clients may not get SetupPlayerInputComponent via the normal
+	// possession chain (OnRep_Pawn → PawnClientRestart) due to proxy timing.
+	// Start a retry timer to ensure input gets fully set up.
+	// IMPORTANT: Only do this on actual game clients (NM_Client), NOT on the proxy
+	// (which is NM_DedicatedServer/NM_ListenServer) or game servers.
+	// NOTE: Do NOT check IsLocallyControlled() here — the proxy may assign a
+	// NoPawnPlayerController which returns false for IsLocalController().
+	// AutonomousProxy role alone is sufficient to identify the owned character.
+	if (GetNetMode() == NM_Client && GetLocalRole() == ROLE_AutonomousProxy
+		&& !bInputSetupComplete)
+	{
+		GetWorld()->GetTimerManager().SetTimer(InputRetryTimerHandle,
+			this, &ANyxCharacter::RetryInputSetup,
+			0.2f, true, 0.5f);
+	}
 }
 
 void ANyxCharacter::PossessedBy(AController* NewController)
@@ -158,6 +188,46 @@ void ANyxCharacter::PossessedBy(AController* NewController)
 
 	// Server-side: mapping contexts needed if this is the listen server's local pawn
 	SetupInputMappingContexts();
+}
+
+void ANyxCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
+{
+	GetWorld()->GetTimerManager().ClearTimer(InputRetryTimerHandle);
+	Super::EndPlay(EndPlayReason);
+}
+
+void ANyxCharacter::OnRep_Controller()
+{
+	// Guard: Super::OnRep_Controller() crashes (ACCESS_VIOLATION at 0x510)
+	// when called before BeginPlay — the engine dereferences world/component
+	// pointers that haven't been initialized yet. Skip entirely if too early.
+	if (!HasActorBegunPlay())
+	{
+		UE_LOG(LogNyx, Warning, TEXT("NyxCharacter::OnRep_Controller SKIPPED (BeginPlay not called yet)  Name=%s  Controller=%s"),
+			*GetName(), *GetNameSafe(GetController()));
+		return;
+	}
+
+	Super::OnRep_Controller();
+
+	UE_LOG(LogNyx, Log, TEXT("NyxCharacter::OnRep_Controller  Name=%s  Controller=%s"),
+		*GetName(), *GetNameSafe(GetController()));
+
+	// Don't call PawnClientRestart() directly here — it crashes if the character
+	// isn't fully initialized yet (EXCEPTION_ACCESS_VIOLATION). Instead, ensure
+	// the retry timer is running. RetryInputSetup() has its own safety checks.
+	// Only on actual game clients, and only if this is our locally-controlled pawn.
+	// NOTE: Do NOT check IsLocallyControlled() — see BeginPlay comment.
+	if (GetNetMode() == NM_Client && !bInputSetupComplete
+		&& GetLocalRole() == ROLE_AutonomousProxy)
+	{
+		if (!GetWorld()->GetTimerManager().IsTimerActive(InputRetryTimerHandle))
+		{
+			GetWorld()->GetTimerManager().SetTimer(InputRetryTimerHandle,
+				this, &ANyxCharacter::RetryInputSetup,
+				0.1f, true, 0.0f); // immediate first tick, then 100ms retries
+		}
+	}
 }
 
 void ANyxCharacter::OnRep_PlayerState()
@@ -238,6 +308,10 @@ void ANyxCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 	// SetupPlayerInputComponent is called by APlayerController::SetPawn when
 	// possession completes — GetController() is guaranteed valid here.
 	SetupInputMappingContexts();
+
+	bInputSetupComplete = true;
+	GetWorld()->GetTimerManager().ClearTimer(InputRetryTimerHandle);
+	UE_LOG(LogNyx, Log, TEXT("SetupPlayerInputComponent complete for %s"), *GetName());
 }
 
 void ANyxCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLifetimeProps) const
@@ -334,13 +408,70 @@ void ANyxCharacter::OnRep_CurrentHP()
 
 // ─── Input ─────────────────────────────────────────────────────────
 
+void ANyxCharacter::RetryInputSetup()
+{
+	if (bInputSetupComplete)
+	{
+		GetWorld()->GetTimerManager().ClearTimer(InputRetryTimerHandle);
+		return;
+	}
+
+	// Only run on actual game clients, not proxy/server processes.
+	if (GetNetMode() != NM_Client) return;
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+
+	// The multi-server proxy may assign a NoPawnPlayerController from a
+	// non-primary game server. Try the local player's controller instead.
+	if (!PC || !PC->IsLocalController())
+	{
+		if (UWorld* W = GetWorld())
+		{
+			PC = W->GetFirstPlayerController();
+		}
+	}
+
+	if (PC && PC->IsLocalController())
+	{
+		UE_LOG(LogNyx, Log, TEXT("RetryInputSetup: Forcing PawnClientRestart for %s (Controller=%s)"),
+			*GetName(), *GetNameSafe(PC));
+
+		// Ensure the correct controller acknowledges this pawn
+		if (GetController() != PC)
+		{
+			PC->SetPawn(this);
+		}
+
+		// Force the client-side possession chain which triggers
+		// SetupPlayerInputComponent via Restart() → CreatePlayerInputComponent
+		PC->ClientRestart(this);
+
+		// Force camera to track this character. NoPawnPlayerController::GetViewTarget()
+		// returns a custom target (not the pawn), so the camera component won't activate
+		// unless we explicitly set the view target.
+		PC->SetViewTarget(this);
+	}
+}
+
 void ANyxCharacter::HandleMove(const FInputActionValue& Value)
 {
 	const FVector2D MoveInput = Value.Get<FVector2D>();
 
-	if (Controller)
+	// Use whatever controller is available — on proxy clients GetController()
+	// may return NoPawnPlayerController, but movement math only needs a rotation.
+	AController* MoveController = Controller;
+	if (!MoveController)
 	{
-		const FRotator ControlRot(0.f, Controller->GetControlRotation().Yaw, 0.f);
+		// Fallback: find the local player controller
+		if (UWorld* W = GetWorld())
+		{
+			MoveController = W->GetFirstPlayerController();
+		}
+	}
+
+	if (MoveController)
+	{
+		const FRotator ControlRot(0.f, MoveController->GetControlRotation().Yaw, 0.f);
 		const FVector Forward = FRotationMatrix(ControlRot).GetUnitAxis(EAxis::X);
 		const FVector Right = FRotationMatrix(ControlRot).GetUnitAxis(EAxis::Y);
 
@@ -355,10 +486,17 @@ void ANyxCharacter::HandleLook(const FInputActionValue& Value)
 {
 	const FVector2D LookInput = Value.Get<FVector2D>();
 
+	// AddControllerYawInput/Pitch work on the pawn's Controller member.
+	// If Controller is null but we have a local PC, use it directly.
 	if (Controller)
 	{
 		AddControllerYawInput(LookInput.X);
 		AddControllerPitchInput(LookInput.Y);
+	}
+	else if (APlayerController* PC = GetWorld()->GetFirstPlayerController())
+	{
+		PC->AddYawInput(LookInput.X);
+		PC->AddPitchInput(LookInput.Y);
 	}
 }
 
@@ -416,6 +554,27 @@ void ANyxCharacter::ServerRPC_RequestAttack_Implementation()
 	{
 		ServerSub->RequestResolveHit(SpacetimeIdentity, Target->SpacetimeIdentity, 0); // skill 0 = basic attack
 	}
+}
+
+void ANyxCharacter::ServerRPC_ForceNetCorrection_Implementation(float Offset)
+{
+	// Server-side: teleport the character by offset along a random horizontal direction.
+	// The CMC will detect the mismatch vs client prediction and send a net correction.
+	const float Angle = FMath::FRandRange(0.f, 360.f);
+	const FVector Delta(FMath::Cos(FMath::DegreesToRadians(Angle)) * Offset,
+						 FMath::Sin(FMath::DegreesToRadians(Angle)) * Offset,
+						 0.f);
+
+	const FVector OldLocation = GetActorLocation();
+	const FVector NewLocation = OldLocation + Delta;
+
+	UE_LOG(LogNyx, Warning, TEXT("ForceNetCorrection: Server teleporting %s by %.0f units "
+		"from (%.0f,%.0f,%.0f) to (%.0f,%.0f,%.0f)"),
+		*GetDisplayName(), Offset,
+		OldLocation.X, OldLocation.Y, OldLocation.Z,
+		NewLocation.X, NewLocation.Y, NewLocation.Z);
+
+	SetActorLocation(NewLocation);
 }
 
 void ANyxCharacter::ClientRPC_TransferToServer_Implementation(const FString& Address)

@@ -44,6 +44,7 @@ public:
 	virtual void InitConnectionGraphNodes(UNetReplicationGraphConnection* RepGraphConnection) override;
 	virtual void RouteAddNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo, FGlobalActorReplicationInfo& GlobalInfo) override;
 	virtual void RouteRemoveNetworkActorToNodes(const FNewReplicatedActorInfo& ActorInfo) override;
+	virtual void RemoveClientConnection(UNetConnection* NetConnection) override;
 	virtual int32 ServerReplicateActors(float DeltaSeconds) override;
 
 	// ──── Configuration ────

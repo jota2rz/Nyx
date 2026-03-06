@@ -10,6 +10,7 @@
 #include "Nyx/World/NyxZoneBoundary.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
+#include "Engine/ChildConnection.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Misc/CommandLine.h"
@@ -292,6 +293,17 @@ void ANyxGameMode::CheckZoneBoundaries()
 			{
 				continue;
 			}
+		}
+
+		// Players connected through the MultiServer proxy arrive via UChildConnection.
+		// ClientTravel-based zone transfers are INCOMPATIBLE with the proxy — they
+		// disconnect the client from the proxy and connect directly to a game server,
+		// causing: (1) character invisibility to other proxy-connected clients, and
+		// (2) ReplicationGraph crashes from mixed proxy+direct connections.
+		// The proxy natively handles cross-server replication, so no transfer is needed.
+		if (Cast<UChildConnection>(PC->GetNetConnection()))
+		{
+			continue;
 		}
 
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
