@@ -1,7 +1,12 @@
 # Unreal Engine 5 .gitignore
 
-# Build output logs
-build_output*.txt
+# ── Logs and text output files ──
+*.log
+*.txt
+*.diff
+
+# GitHub source diffs (research artifacts)
+github_source_diffs/
 
 # Compiled binaries
 Binaries/

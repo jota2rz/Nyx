@@ -166,6 +166,17 @@ protected:
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Nyx|Stats")
 	int32 MagicDefense = 0;
 
+public:
+	// ──── Server/Zone Info (replicated for HUD) ────
+
+	/** Which game server this character is on (e.g. "server-1"). Set by GameMode on PostLogin. */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Nyx|Network")
+	FString ServerName;
+
+	/** Which zone this character is in (e.g. "Zone-1 (West)"). Set by GameMode on PostLogin. */
+	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Nyx|Network")
+	FString ZoneName;
+
 private:
 	void HandleMove(const FInputActionValue& Value);
 	void HandleLook(const FInputActionValue& Value);

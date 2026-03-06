@@ -114,6 +114,41 @@ private:
 	/** Timer-based zone boundary check for all connected players. */
 	void CheckZoneBoundaries();
 
+	// ──── Proxy-based pawn migration (MultiServer Replication Plugin) ────
+	//
+	// When a proxy-connected player crosses the zone boundary, authority
+	// transfers seamlessly between game servers:
+	//
+	//   Server A (releasing):
+	//     1. Detects player left its zone
+	//     2. Saves pawn state, destroys pawn
+	//     3. Swaps real PC → ANoPawnPlayerController
+	//     4. Proxy detects: "Server A now has NoPawnPC for this route"
+	//
+	//   Server B (claiming):
+	//     1. Detects NoPawnPC at a position inside its zone
+	//     2. Spawns pawn at NoPawnPC's location
+	//     3. Swaps ANoPawnPlayerController → real PC, possesses pawn
+	//     4. Proxy detects: "Server B now has real PC for this route"
+	//
+	//   Proxy finalizes: primary server flips from A to B. RPCs route to B.
+	//   Client sees no interruption — the proxy handles the transition.
+
+	/**
+	 * Server A side: release authority over a proxy player.
+	 * Saves state, destroys pawn, swaps PC to NoPawnPlayerController.
+	 * The proxy will detect this and begin the migration handshake.
+	 */
+	void ReleasePawnAuthority(APlayerController* PC, ANyxCharacter* NyxChar);
+
+	/**
+	 * Server B side: claim authority over a NoPawnPlayerController.
+	 * Spawns a pawn at the NoPawnPC's position, creates a new real PC,
+	 * swaps NoPawnPC → real PC, and possesses the pawn.
+	 * The proxy will detect this and finalize the migration.
+	 */
+	void ClaimPawnAuthority(APlayerController* NoPawnPC, const FVector& SpawnLocation, const FRotator& SpawnRotation);
+
 	/** Tracks players currently being transferred (prevent double-transfer). */
 	TSet<APlayerController*> PlayersBeingTransferred;
 

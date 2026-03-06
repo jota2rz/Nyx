@@ -48,8 +48,8 @@ bool UNyxCharacterMovementComponent::VerifyClientTimeStamp(
 				// DeltaTime will be (TimeStamp - ProxyLastAcceptedTimeStamp) = actual client frame delta
 				ServerData.CurrentClientTimeStamp = ProxyLastAcceptedTimeStamp;
 
-				UE_LOG(LogNyx, Verbose,
-					TEXT("NyxCMC: Proxy desync recovery — restored timestamp ")
+				UE_LOG(LogNyx, Warning,
+					TEXT("NyxCMC: Proxy desync recovery - restored timestamp ")
 					TEXT("from %.3f to %.3f (client dt=%.4fs) for %s"),
 					ServerInflated, ProxyLastAcceptedTimeStamp,
 					TimeStamp - ProxyLastAcceptedTimeStamp,

@@ -8,22 +8,50 @@
 #include "Nyx/Server/NyxServerSubsystem.h"
 #include "Nyx/Networking/NyxMultiServerSubsystem.h"
 #include "Nyx/World/NyxZoneBoundary.h"
+#include "Nyx/UI/NyxHUD.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
 #include "Engine/ChildConnection.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
+#include "Engine/NetDriver.h"
+#include "Engine/PackageMapClient.h"
 #include "Misc/CommandLine.h"
 
 ANyxGameMode::ANyxGameMode()
 {
 	// Default pawn is NyxCharacter — standard ACharacter with CMC
 	DefaultPawnClass = ANyxCharacter::StaticClass();
+	HUDClass = ANyxHUD::StaticClass();
 }
 
 void ANyxGameMode::StartPlay()
 {
 	Super::StartPlay();
+
+	// ── NetworkGuidSeed: prevent GUID collisions in multi-server setups ──
+	// Each game server needs a unique seed so their GUID counters don't overlap.
+	// The engine's -NetworkGuidSeed= parameter is stripped in Shipping builds,
+	// so we read our own -NyxGuidSeed= and replace the GuidCache with a seeded one.
+	{
+		uint64 GuidSeed = 0;
+		FParse::Value(FCommandLine::Get(), TEXT("-NyxGuidSeed="), GuidSeed);
+		if (GuidSeed > 0)
+		{
+			UNetDriver* NetDriver = GetWorld()->GetNetDriver();
+			if (NetDriver)
+			{
+				PRAGMA_DISABLE_DEPRECATION_WARNINGS
+				NetDriver->GuidCache = TSharedPtr<FNetGUIDCache>(new FNetGUIDCache(NetDriver, GuidSeed));
+				PRAGMA_ENABLE_DEPRECATION_WARNINGS
+				UE_LOG(LogNyx, Log, TEXT("NyxGameMode: Replaced GuidCache with seed %llu (production-safe GUID partitioning)"), GuidSeed);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Warning, TEXT("NyxGameMode: -NyxGuidSeed=%llu specified but NetDriver is null (not a server?)"), GuidSeed);
+			}
+		}
+	}
 
 	const bool bServer = IsNyxServer();
 	UE_LOG(LogNyx, Log, TEXT("NyxGameMode::StartPlay (IsNyxServer=%s  NetMode=%d)"),
@@ -57,7 +85,7 @@ void ANyxGameMode::StartPlay()
 			{
 				ZoneId = CmdZone;
 			}
-			if (FParse::Value(FCommandLine::Get(), TEXT("-ServerId="), CmdServerId, false))
+			if (FParse::Value(FCommandLine::Get(), TEXT("-DedicatedServerId="), CmdServerId, false))
 			{
 				DedicatedServerId = CmdServerId;
 			}
@@ -111,13 +139,12 @@ void ANyxGameMode::StartPlay()
 			}
 
 			// Start zone boundary checking timer (every 0.5s)
-			if (!TransferAddress.IsEmpty())
-			{
-				GetWorld()->GetTimerManager().SetTimer(ZoneCheckTimerHandle,
-					FTimerDelegate::CreateUObject(this, &ANyxGameMode::CheckZoneBoundaries),
-					0.5f, true);
-				UE_LOG(LogNyx, Log, TEXT("Zone boundary checking started (0.5s interval) → transfer to %s"), *TransferAddress);
-			}
+			// Always runs: updates zone info for proxy players + handles transfers for direct players
+			GetWorld()->GetTimerManager().SetTimer(ZoneCheckTimerHandle,
+				FTimerDelegate::CreateUObject(this, &ANyxGameMode::CheckZoneBoundaries),
+				0.5f, true);
+			UE_LOG(LogNyx, Log, TEXT("Zone boundary checking started (0.5s interval). TransferAddr=%s"),
+				TransferAddress.IsEmpty() ? TEXT("(none - proxy mode)") : *TransferAddress);
 		}
 		else
 		{
@@ -193,6 +220,15 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(NewPlayer->GetPawn());
 		if (NyxChar)
 		{
+			// Set server/zone info for HUD display (replicated to client)
+			// Server = always the authority server's ID (the one that owns the pawn)
+			// Zone = determined by spawn position relative to boundary
+			NyxChar->ServerName = DedicatedServerId;
+			const float SpawnX = NyxChar->GetActorLocation().X;
+			NyxChar->ZoneName = (SpawnX < ZoneBoundaryX)
+				? TEXT("Zone-1 (West)")
+				: TEXT("Zone-2 (East)");
+
 			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
 			if (ServerSub)
 			{
@@ -274,8 +310,6 @@ bool ANyxGameMode::IsNyxServer() const
 
 void ANyxGameMode::CheckZoneBoundaries()
 {
-	if (TransferAddress.IsEmpty()) return;
-
 	UWorld* World = GetWorld();
 	if (!World) return;
 
@@ -295,31 +329,88 @@ void ANyxGameMode::CheckZoneBoundaries()
 			}
 		}
 
-		// Players connected through the MultiServer proxy arrive via UChildConnection.
-		// ClientTravel-based zone transfers are INCOMPATIBLE with the proxy — they
-		// disconnect the client from the proxy and connect directly to a game server,
-		// causing: (1) character invisibility to other proxy-connected clients, and
-		// (2) ReplicationGraph crashes from mixed proxy+direct connections.
-		// The proxy natively handles cross-server replication, so no transfer is needed.
-		if (Cast<UChildConnection>(PC->GetNetConnection()))
+		const bool bIsChildConnection = Cast<UChildConnection>(PC->GetNetConnection()) != nullptr;
+
+		// ── NoPawnPlayerController: this server is non-primary for this client. ──
+		// The proxy places NoPawnPCs at the player's world position via
+		// ServerSetViewTargetPosition(). If that position is inside OUR zone,
+		// we should claim authority: spawn a pawn and swap to a real PC.
+		// This is Server B's side of the migration handshake.
+		if (PC->IsA(ANoPawnPlayerController::StaticClass()) && bIsChildConnection)
 		{
+			// NoPawnPC stores the player's world position via SetActorLocation()
+			// (called from ServerSetViewTargetPosition). Access it through the
+			// view target (returns AActor* where GetActorLocation is public,
+			// unlike AController which hides it via HIDE_ACTOR_TRANSFORM_FUNCTIONS).
+			AActor* ViewTarget = PC->GetViewTarget();
+			const FVector NoPawnPos = ViewTarget ? ViewTarget->GetActorLocation() : FVector::ZeroVector;
+
+			// Is the NoPawnPC's tracked position inside our zone?
+			const bool bInOurZone = bOwnsNegativeSide
+				? (NoPawnPos.X < ZoneBoundaryX)
+				: (NoPawnPos.X >= ZoneBoundaryX);
+
+			if (bInOurZone)
+			{
+				UE_LOG(LogNyx, Log, TEXT("Migration CLAIM: NoPawnPC %s is at X=%.0f (in our zone %s) — promoting to full player"),
+					*PC->GetName(), NoPawnPos.X,
+					bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
+
+				ClaimPawnAuthority(PC, NoPawnPos, FRotator::ZeroRotator);
+			}
 			continue;
 		}
 
+		// ── Regular PlayerController with a pawn ──
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
 		if (!NyxChar) continue;
 
 		const float PlayerX = NyxChar->GetActorLocation().X;
+		const bool bPlayerInNegativeSide = (PlayerX < ZoneBoundaryX);
 
-		// Check if player has crossed into the other server's territory
+		// Update replicated HUD info (zone is spatial, server is process identity)
+		FString CorrectServer = DedicatedServerId;
+		FString CorrectZone = bPlayerInNegativeSide
+			? TEXT("Zone-1 (West)")
+			: TEXT("Zone-2 (East)");
+
+		if (NyxChar->ServerName != CorrectServer || NyxChar->ZoneName != CorrectZone)
+		{
+			NyxChar->ServerName = CorrectServer;
+			NyxChar->ZoneName = CorrectZone;
+			UE_LOG(LogNyx, Log, TEXT("Zone update: %s now in %s on %s (X=%.0f, child=%s)"),
+				*PC->GetName(), *CorrectZone, *CorrectServer, PlayerX,
+				bIsChildConnection ? TEXT("yes") : TEXT("no"));
+		}
+
+		// ── Proxy players: check if they should migrate to another server ──
+		if (bIsChildConnection)
+		{
+			// Has the player crossed OUT of this server's zone?
+			const bool bLeftOurZone =
+				(bOwnsNegativeSide && PlayerX >= ZoneBoundaryX) ||
+				(!bOwnsNegativeSide && PlayerX < ZoneBoundaryX);
+
+			if (bLeftOurZone)
+			{
+				UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: %s crossed boundary at X=%.0f — releasing authority"),
+					*PC->GetName(), PlayerX);
+				ReleasePawnAuthority(PC, NyxChar);
+			}
+			continue;
+		}
+
+		// ── Direct-connect players: ClientTravel transfer (non-proxy fallback) ──
+		if (TransferAddress.IsEmpty()) continue;
+
 		bool bShouldTransfer = false;
 		if (bOwnsNegativeSide && PlayerX >= ZoneBoundaryX)
 		{
-			bShouldTransfer = true; // Player crossed east into server-2's zone
+			bShouldTransfer = true;
 		}
 		else if (!bOwnsNegativeSide && PlayerX < ZoneBoundaryX)
 		{
-			bShouldTransfer = true; // Player crossed west into server-1's zone
+			bShouldTransfer = true;
 		}
 
 		if (bShouldTransfer)
@@ -329,17 +420,143 @@ void ANyxGameMode::CheckZoneBoundaries()
 			UE_LOG(LogNyx, Log, TEXT("Zone transfer: %s crossed boundary at X=%.0f → transferring to %s"),
 				*PC->GetName(), PlayerX, *TransferAddress);
 
-			// Save character state to SpacetimeDB before transfer
 			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
 			if (ServerSub)
 			{
 				ServerSub->SaveCharacterState(NyxChar);
 			}
 
-			// Tell the client to travel to the other server
 			NyxChar->ClientRPC_TransferToServer(TransferAddress);
 		}
 	}
+}
+
+void ANyxGameMode::ReleasePawnAuthority(APlayerController* PC, ANyxCharacter* NyxChar)
+{
+	// ── Server A side of proxy migration ──
+	// The player has crossed into another server's zone. We release authority:
+	//   1. Save pawn state to SpacetimeDB
+	//   2. Unpossess and destroy the pawn
+	//   3. Swap the real PC → ANoPawnPlayerController
+	// The proxy detects the PC change and begins finalizing the migration.
+
+	PlayersBeingTransferred.Add(PC);
+
+	// Save character state before destroying pawn
+	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+	if (ServerSub)
+	{
+		ServerSub->SaveCharacterState(NyxChar);
+		ServerSub->OnPlayerLeft(NyxChar);
+	}
+
+	const FVector LastPos = NyxChar->GetActorLocation();
+	const FRotator LastRot = NyxChar->GetActorRotation();
+
+	UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Destroying pawn at (%.0f, %.0f, %.0f) and swapping to NoPawnPC"),
+		LastPos.X, LastPos.Y, LastPos.Z);
+
+	// Unpossess and destroy the pawn
+	PC->UnPossess();
+	NyxChar->Destroy();
+
+	// Spawn a NoPawnPlayerController at the player's last position.
+	// The proxy uses this position for relevancy on non-primary servers.
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	ANoPawnPlayerController* NoPawnPC = GetWorld()->SpawnActor<ANoPawnPlayerController>(
+		ANoPawnPlayerController::StaticClass(), LastPos, LastRot, SpawnParams);
+
+	if (!NoPawnPC)
+	{
+		UE_LOG(LogNyx, Error, TEXT("Migration RELEASE: Failed to spawn NoPawnPlayerController!"));
+		PlayersBeingTransferred.Remove(PC);
+		return;
+	}
+
+	// Swap the connection from the old real PC to the new NoPawnPC.
+	// SwapPlayerControllers transfers the Player/NetConnection and triggers
+	// replication updates that the proxy detects as a PC reassignment.
+	SwapPlayerControllers(PC, NoPawnPC);
+
+	UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Swapped %s → %s. Proxy will detect NoPawnPC on this route."),
+		*PC->GetName(), *NoPawnPC->GetName());
+
+	// Remove tracking for the old PC (the NoPawnPC will be cleaned up when
+	// the other server claims authority, or when the player disconnects)
+	PlayersBeingTransferred.Remove(PC);
+	TransferArrivalTimes.Remove(PC);
+}
+
+void ANyxGameMode::ClaimPawnAuthority(APlayerController* NoPawnPC, const FVector& SpawnLocation, const FRotator& SpawnRotation)
+{
+	// ── Server B side of proxy migration ──
+	// A NoPawnPlayerController on a child connection has its tracked position
+	// inside our zone. We claim authority:
+	//   1. Spawn a pawn at the NoPawnPC's position
+	//   2. Spawn a new real PlayerController
+	//   3. Swap NoPawnPC → real PC (proxy detects the reassignment)
+	//   4. Possess the pawn
+	// The proxy detects the PC change and finalizes the migration.
+
+	UE_LOG(LogNyx, Log, TEXT("Migration CLAIM: Spawning pawn at (%.0f, %.0f, %.0f) and promoting NoPawnPC to real PC"),
+		SpawnLocation.X, SpawnLocation.Y, SpawnLocation.Z);
+
+	// Spawn the pawn at the crossing position
+	FActorSpawnParameters PawnSpawnParams;
+	PawnSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+	ANyxCharacter* NewChar = GetWorld()->SpawnActor<ANyxCharacter>(
+		ANyxCharacter::StaticClass(), SpawnLocation, SpawnRotation, PawnSpawnParams);
+
+	if (!NewChar)
+	{
+		UE_LOG(LogNyx, Error, TEXT("Migration CLAIM: Failed to spawn NyxCharacter!"));
+		return;
+	}
+
+	// Spawn a new real PlayerController
+	FActorSpawnParameters PCSpawnParams;
+	PCSpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+	APlayerController* NewPC = GetWorld()->SpawnActor<APlayerController>(
+		PlayerControllerClass ? PlayerControllerClass.Get() : APlayerController::StaticClass(),
+		FVector::ZeroVector, FRotator::ZeroRotator, PCSpawnParams);
+
+	if (!NewPC)
+	{
+		UE_LOG(LogNyx, Error, TEXT("Migration CLAIM: Failed to spawn PlayerController!"));
+		NewChar->Destroy();
+		return;
+	}
+
+	// Swap the connection: NoPawnPC → real PC
+	// This transfers the Player/NetConnection and triggers the proxy to detect
+	// that this route now has a real game PlayerController (migration event #2).
+	SwapPlayerControllers(NoPawnPC, NewPC);
+
+	// Possess the pawn
+	NewPC->Possess(NewChar);
+
+	// Set replicated HUD info
+	NewChar->ServerName = DedicatedServerId;
+	NewChar->ZoneName = (SpawnLocation.X < ZoneBoundaryX)
+		? TEXT("Zone-1 (West)")
+		: TEXT("Zone-2 (East)");
+
+	// Register with SpacetimeDB
+	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+	if (ServerSub)
+	{
+		FString PlayerName = NewPC->PlayerState
+			? NewPC->PlayerState->GetPlayerName()
+			: NewPC->GetName();
+		ServerSub->OnPlayerJoined(NewChar, PlayerName);
+	}
+
+	// Grace period: prevent immediate bounce-back
+	TransferArrivalTimes.Add(NewPC, GetWorld()->GetTimeSeconds());
+
+	UE_LOG(LogNyx, Log, TEXT("Migration CLAIM: %s now primary on %s at %s. Pawn=%s"),
+		*NewPC->GetName(), *DedicatedServerId, *NewChar->ZoneName, *NewChar->GetName());
 }
 
 void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)

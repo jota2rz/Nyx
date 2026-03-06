@@ -1,6 +1,6 @@
 # Nyx
 
-An open-world MMO built with **Unreal Engine 5.7**, **SpacetimeDB 2.0**, and **Epic Online Services (EOS)**.
+A research on how to build an open-world MMO with **Unreal Engine 5.7**, **SpacetimeDB 2.0**, and **Epic Online Services (EOS)**.
 
 ## Structure
 

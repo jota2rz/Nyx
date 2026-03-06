@@ -328,6 +328,8 @@ void ANyxCharacter::GetLifetimeReplicatedProps(TArray<FLifetimeProperty>& OutLif
 	DOREPLIFETIME(ANyxCharacter, Defense);
 	DOREPLIFETIME(ANyxCharacter, MagicPower);
 	DOREPLIFETIME(ANyxCharacter, MagicDefense);
+	DOREPLIFETIME(ANyxCharacter, ServerName);
+	DOREPLIFETIME(ANyxCharacter, ZoneName);
 }
 
 // ─── Stats ─────────────────────────────────────────────────────────

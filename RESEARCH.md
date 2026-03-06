@@ -5173,15 +5173,15 @@ This is a **viable alternative** to the SpacetimeDB ghost pawn approach (Spike 2
 5. Engine source `PackageMapClient.cpp:3009`: `NetworkGuidIndex[0] = NetworkGuidIndex[1] = NetworkGuidSeed` — defaults to 0
 6. Engine source `PackageMapClient.cpp:3005`: `FParse::Value(FCommandLine::Get(), TEXT("NetworkGuidSeed="), NetworkGuidSeed)` — command-line override
 
-**Fix:** Launch each server with a distinct `-NetworkGuidSeed=` value:
+**Fix:** Launch each server with a distinct GUID seed value. Use `-NyxGuidSeed=` (production-safe, implemented in `NyxGameMode::StartPlay()`) or `-NetworkGuidSeed=` (engine built-in, non-shipping only):
 ```
-Server1: -NetworkGuidSeed=100000
-Server2: -NetworkGuidSeed=200000
+Server1: -NyxGuidSeed=100000
+Server2: -NyxGuidSeed=200000
 ```
 
 **Result:** 0 replication errors, 0 proxy ensure failures, both clients get real `PlayerController`, both have working character + camera + input.
 
-> **Limitation:** `-NetworkGuidSeed=` only works in non-shipping builds (`#if !UE_BUILD_SHIPPING` in `PackageMapClient.cpp:3004`). For shipping, would need engine modification or plugin-level GUID coordination.
+> **Production Fix:** The engine's `-NetworkGuidSeed=` parameter is gated by `#if !UE_BUILD_SHIPPING`, but the `FNetGUIDCache` constructor's seed parameter works unconditionally in all build configs. We implemented a production-safe alternative in `NyxGameMode::StartPlay()` that reads `-NyxGuidSeed=` from the command line and replaces the NetDriver's `GuidCache` with a seeded instance before any clients connect. No engine modification required. See `MULTISERVER.md` for full details.
 
 ---
 
@@ -5256,28 +5256,62 @@ GetCapsuleComponent()->SetCollisionResponseToChannel(ECC_Pawn, ECR_Overlap);
 
 ### Verified Launch Commands
 
+#### 2-Server Setup (Standard)
+
 ```powershell
 $proj = "C:\UE\Nyx\Nyx.uproject"
 $ue = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe"
 
-# Server1 (primary, west zone, GUID seed 100000)
-Start-Process $ue -ArgumentList "$proj /Engine/Maps/Templates/OpenWorld -server -port=7777 -ZoneId=1 -NOSTEAM -MultiServerPrimary -MultiServerBeaconPort=9000 -MultiServerExpectedNumberOfServers=2 -NetworkGuidSeed=100000 -abslog=C:\UE\Nyx\server1_log.txt"
+# Server-1: West zone (X < 0), port 7777
+Start-Process $ue -ArgumentList "$proj -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneId=`"Zone-1 (West)`" -ZoneSide=west -NyxGuidSeed=100000 -abslog=C:\UE\Nyx\server1_log.txt"
 
-# Server2 (east zone, GUID seed 200000)
-Start-Process $ue -ArgumentList "$proj /Engine/Maps/Templates/OpenWorld -server -port=7778 -ZoneId=2 -NOSTEAM -MultiServerBeaconPort=9000 -MultiServerExpectedNumberOfServers=2 -NetworkGuidSeed=200000 -abslog=C:\UE\Nyx\server2_log.txt"
+# Server-2: East zone (X >= 0), port 7778
+Start-Process $ue -ArgumentList "$proj -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneId=`"Zone-2 (East)`" -ZoneSide=east -NyxGuidSeed=200000 -abslog=C:\UE\Nyx\server2_log.txt"
 
-# Wait ~20s for servers to mesh
+# Wait ~15s for servers to start
 
-# Proxy
-Start-Process $ue -ArgumentList "$proj /Engine/Maps/Templates/OpenWorld?game=/Script/Nyx.NyxGameMode -server -port=7780 -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778 -abslog=C:\UE\Nyx\proxy_log.txt -NOSTEAM"
+# Proxy (connects to both servers)
+Start-Process $ue -ArgumentList "$proj -server -port=7780 -log -NOSTEAM -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778 -abslog=C:\UE\Nyx\proxy1_log.txt"
 
-# Wait ~30s for proxy to connect to both servers
+# Wait ~20s for proxy to connect
 
-# Client1
+# Client-1
 Start-Process $ue -ArgumentList "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -WinX=50 -WinY=50 -abslog=C:\UE\Nyx\client1_log.txt -NOSTEAM"
 
-# Client2 (5s after Client1)
+# Client-2
 Start-Process $ue -ArgumentList "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -WinX=900 -WinY=50 -abslog=C:\UE\Nyx\client2_log.txt -NOSTEAM"
+```
+
+#### 3-Server Setup (Overlapping Zone — 2 servers in same zone)
+
+```powershell
+$proj = "C:\UE\Nyx\Nyx.uproject"
+$ue = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe"
+
+# Server-1: West zone, port 7777
+Start-Process $ue -ArgumentList "$proj -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneId=`"Zone-1 (West)`" -ZoneSide=west -NyxGuidSeed=100000 -abslog=C:\UE\Nyx\server1_log.txt"
+
+# Server-2: East zone, port 7778
+Start-Process $ue -ArgumentList "$proj -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneId=`"Zone-2 (East)`" -ZoneSide=east -NyxGuidSeed=200000 -abslog=C:\UE\Nyx\server2_log.txt"
+
+# Server-3: West zone (OVERLAPPING with Server-1), port 7779
+Start-Process $ue -ArgumentList "$proj -server -port=7779 -log -NOSTEAM -DedicatedServerId=server-3 -ZoneId=`"Zone-1 (West)`" -ZoneSide=west -NyxGuidSeed=300000 -abslog=C:\UE\Nyx\server3_log.txt"
+
+# Wait ~15s
+
+# Proxy-1: default primary (Server-1, index 0)
+Start-Process $ue -ArgumentList "$proj -server -port=7780 -log -NOSTEAM -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778,127.0.0.1:7779 -abslog=C:\UE\Nyx\proxy1_log.txt"
+
+# Proxy-2: force Server-3 (index 2) as primary
+Start-Process $ue -ArgumentList "$proj -server -port=7781 -log -NOSTEAM -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778,127.0.0.1:7779 -ProxyClientPrimaryGameServer=2 -abslog=C:\UE\Nyx\proxy2_log.txt"
+
+# Wait ~20s
+
+# Client-1 → Proxy-1 → Server-1 as primary (West zone)
+Start-Process $ue -ArgumentList "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -WinX=50 -WinY=50 -abslog=C:\UE\Nyx\client1_log.txt -NOSTEAM"
+
+# Client-2 → Proxy-2 → Server-3 as primary (West zone, overlapping)
+Start-Process $ue -ArgumentList "$proj 127.0.0.1:7781 -game -WINDOWED -ResX=800 -ResY=600 -WinX=900 -WinY=50 -abslog=C:\UE\Nyx\client2_log.txt -NOSTEAM"
 ```
 
 ---
@@ -5287,9 +5321,28 @@ Start-Process $ue -ArgumentList "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 
 | Property | Value | Location |
 |----------|-------|----------|
 | `ZoneBoundaryX` | `0.f` | `NyxGameMode.h:98` |
-| `bOwnsNegativeSide` | `true` | `NyxGameMode.h:106` |
-| Server1 (ZoneId=1) | West (X < 0) | `-ZoneId=1` flag |
-| Server2 (ZoneId=2) | East (X >= 0) | `-ZoneId=2` flag |
+| `bOwnsNegativeSide` | `true` (default) | `NyxGameMode.h:106` |
+| `-ZoneSide=west` | Sets `bOwnsNegativeSide=true` | Parsed in `StartPlay()` |
+| `-ZoneSide=east` | Sets `bOwnsNegativeSide=false` | Parsed in `StartPlay()` |
+
+**Zone boundary at X=0:**
+- **West (X < 0):** Server-1 default, pass `-ZoneSide=west`
+- **East (X >= 0):** Server-2, **must** pass `-ZoneSide=east`
+
+**HUD display logic:**
+- **Server** = always the authority server's `DedicatedServerId` (the primary server that spawned the pawn). Does NOT change when crossing zones.
+- **Zone** = determined purely by position relative to `ZoneBoundaryX`. Updates dynamically as the player moves.
+
+**Required flags per server:**
+
+| Flag | Server-1 (West) | Server-2 (East) | Server-3 (West overlap) |
+|------|-----------------|-----------------|-------------------------|
+| `-DedicatedServerId=` | `server-1` | `server-2` | `server-3` |
+| `-ZoneId=` | `Zone-1 (West)` | `Zone-2 (East)` | `Zone-1 (West)` |
+| `-ZoneSide=` | `west` | **`east`** (required!) | `west` |
+| `-NyxGuidSeed=` | `100000` | `200000` | `300000` |
+
+> **Critical:** If `-ZoneSide=` is omitted, `bOwnsNegativeSide` defaults to `true` (West). Server-2 **must** pass `-ZoneSide=east` or zone boundary checks and visual markers will be wrong.
 
 Zone transfer uses `ClientRPC_TransferToServer()` for direct connections only. Proxy-connected clients are excluded from zone transfer checks via `UChildConnection` guard in `CheckZoneBoundaries()` — the proxy handles cross-server replication natively.
 
@@ -5318,13 +5371,162 @@ Zone transfer uses `ClientRPC_TransferToServer()` for direct connections only. P
 3. Server responds → `HandleClientPlayer()` → `GameServerAssignPlayerController()`
 4. State transitions: `ConnectingPrimary` → `ConnectedPrimary` (or `Connecting` → `Connected`)
 
-**Primary Server Selection:**
+**Primary Server Selection (Proxy Routing Flags):**
+
+Each connecting client is assigned a **primary** game server (spawns pawn + full `PlayerController`) and **non-primary** servers (spawns `ANoPawnPlayerController`, no pawn, receives replication only). The proxy selects the primary via these command-line flags:
+
+| Flag | Effect |
+|------|--------|
+| *(none)* | All clients get server index 0 as primary (default) |
+| `-ProxyClientPrimaryGameServer=N` | All clients get server index N (0-based) as primary |
+| `-ProxyClientPrimaryGameServer=random` | First client gets a random primary server (one-shot: flag resets after first client) |
+| `-ProxyCyclePrimaryGameServer` | Round-robin: each new client gets the next server. Increments after each client join. |
+
+**Combination:** `-ProxyClientPrimaryGameServer=1 -ProxyCyclePrimaryGameServer` starts at index 1 and cycles (1 → 2 → 0 → 1 → ...).
+
+**Source:** `UProxyNetDriver::InitBase()` parses these flags. `UProxyListenerNotify::NotifyControlMessage(NMT_Join)` applies the selection when a client connects.
+
+**Internal variables:**
 - `PrimaryGameServerForNextClient` — index into `GameServerConnections[]` (default: 0)
-- `-ProxyCyclePrimaryGameServer` — round-robin across clients
-- `-ProxyClientPrimaryGameServer=random` — randomize
+- `bCyclePrimaryGameServer` — set by `-ProxyCyclePrimaryGameServer` flag
+- `bRandomizePrimaryGameServerForNextClient` — set by `-ProxyClientPrimaryGameServer=random` (one-shot, resets to false after first use)
+
+**Example — 3 servers, force second proxy to use Server-3:**
+```powershell
+# Proxy1: default (clients → Server-1 as primary)
+Start-Process $ue -ArgumentList "$proj -server -port=7780 -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778,127.0.0.1:7779 -NOSTEAM"
+
+# Proxy2: force Server-3 (index 2) as primary
+Start-Process $ue -ArgumentList "$proj -server -port=7781 -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778,127.0.0.1:7779 -ProxyClientPrimaryGameServer=2 -NOSTEAM"
+```
 
 **GUID Architecture:**
-Each backend server has authority to assign NetGUIDs. The proxy uses a single `SharedBackendNetGuidCache` across all `UProxyBackendNetDriver` instances. **Non-overlapping GUID ranges are required** (via `-NetworkGuidSeed=`), otherwise the shared cache collides → `ObjectReplicatorReceivedBunchFail`.
+Each backend server has authority to assign NetGUIDs. The proxy uses a single `SharedBackendNetGuidCache` across all `UProxyBackendNetDriver` instances. **Non-overlapping GUID ranges are required** (via `-NyxGuidSeed=`, production-safe replacement for engine's `-NetworkGuidSeed=`), otherwise the shared cache collides → `ObjectReplicatorReceivedBunchFail`. See `MULTISERVER.md` for full analysis.
+
+---
+
+## Spike 21 — Seamless Proxy-Based Pawn Authority Migration (2026-03-06) ✅
+
+**Goal:** When a proxy-connected player crosses a zone boundary, seamlessly migrate pawn authority between game servers using the MultiServer Replication Plugin's built-in migration detection. The client should experience no interruption.
+
+**Status:** COMPLETE — Implementation compiles and follows the official proxy migration protocol.
+
+### Background
+
+Spike 19 implemented cross-server transfer via `ClientTravel` (full disconnect/reconnect). This works for direct-connect clients but causes a visible loading interruption. For proxy-connected clients, the MultiServer Replication Plugin supports **seamless migration** — the proxy manages the connection and the client never disconnects.
+
+### Official Proxy Migration Protocol
+
+The proxy's `ReassignPlayerController()` method (MultiServerProxy.cpp line 1236) documents the expected behavior:
+
+```
+The proxy listens for 2 events when a player controller migrates from one game server to another:
+  * The player controller on the connection to game server A will change to an instance of ANoPawnPlayerController.
+  * The player controller on the connection to game server B will change to the instance of the game's player controller.
+
+IMPORTANT:
+    The code below must not assume that these events will arrive in a specific order, or even arrive at all.
+```
+
+The proxy tracks these events via `FPlayerControllerReassignment`:
+- `bReceivedNoPawnPlayerController` — Server A has swapped to NoPawnPC
+- `bReceivedGamePlayerController` — Server B has swapped to real PC
+
+Once both events arrive (order-independent), `FinalizePlayerControllerReassignment()` flips the primary route: old primary → `EProxyConnectionState::Connected`, new primary → `ConnectedPrimary`. RPCs and replication then route to the new server.
+
+### Implementation
+
+The game server triggers the proxy's migration detection by calling `SwapPlayerControllers()` (from `AGameModeBase`), which transfers the `Player`, `NetConnection`, and replication flags between controllers.
+
+#### Server A — Releasing Authority (`ReleasePawnAuthority`)
+
+When `CheckZoneBoundaries()` detects a proxy player's pawn has crossed out of this server's zone:
+
+1. Save character state to SpacetimeDB
+2. Call `OnPlayerLeft()` to handle cleanup
+3. Record last position/rotation from pawn
+4. `PC->UnPossess()` — detach pawn
+5. `NyxChar->Destroy()` — destroy the pawn actor
+6. Spawn `ANoPawnPlayerController` at the player's last position
+7. `SwapPlayerControllers(RealPC, NoPawnPC)` — transfers connection ownership
+
+The proxy detects the PC change and records "Server A now has NoPawnPC for this route."
+
+#### Server B — Claiming Authority (`ClaimPawnAuthority`)
+
+`CheckZoneBoundaries()` iterates all controllers. When it finds an `ANoPawnPlayerController` on a `UChildConnection` (proxy-routed) whose tracked position is inside this server's zone:
+
+1. Get position via `PC->GetViewTarget()->GetActorLocation()` (the NoPawnPC stores position via `SetActorLocation`, but `AController` hides `GetActorLocation` via `HIDE_ACTOR_TRANSFORM_FUNCTIONS` — access through the `AActor*` view target instead)
+2. Spawn `ANyxCharacter` at that position
+3. Spawn a new real `APlayerController` using `PlayerControllerClass`
+4. `SwapPlayerControllers(NoPawnPC, NewPC)` — transfers connection ownership
+5. `NewPC->Possess(NewChar)` — pawn possession
+6. Set replicated HUD properties (`ServerName`, `ZoneName`)
+7. Register with SpacetimeDB, set grace period
+
+The proxy detects "Server B now has real PC for this route" and calls `FinalizePlayerControllerReassignment()`.
+
+#### CheckZoneBoundaries — Three Cases
+
+The rewritten `CheckZoneBoundaries()` handles three player types:
+
+| Player Type | Detection | Action |
+|-------------|-----------|--------|
+| NoPawnPC on child connection | `PC->IsA(ANoPawnPlayerController)` + `UChildConnection` | Check position → `ClaimPawnAuthority()` |
+| Real PC with pawn on child connection | Has `ANyxCharacter` pawn + `UChildConnection` | Update HUD, check boundary → `ReleasePawnAuthority()` |
+| Direct-connect player | No `UChildConnection` | Existing `ClientTravel` transfer (Spike 19) |
+
+### Key Technical Findings
+
+1. **`AController::GetActorLocation()` is inaccessible.** UE5's `HIDE_ACTOR_TRANSFORM_FUNCTIONS()` macro makes `GetActorLocation()` private for all `AController` subclasses. To get an `ANoPawnPlayerController`'s position, use `PC->GetViewTarget()->GetActorLocation()` — `GetViewTarget()` returns `this` as an `AActor*` where the method is public. The NoPawnPC sets its own position via `SetActorLocation()` inside `ServerSetViewTargetPosition_Implementation`.
+
+2. **`SwapPlayerControllers()` is already in `AGameModeBase`.** No custom implementation needed — the engine's `SwapPlayerControllers(OldPC, NewPC)` transfers `Player`, `NetConnection`, `NetPlayerIndex`, and calls `SetPlayer()`. This triggers the replication updates that the proxy's `ReassignPlayerController()` detects.
+
+3. **Order-independent finalization.** The proxy's `FPlayerControllerReassignment` tracks both events independently. Server A's release and Server B's claim can happen in any order, and the proxy will finalize when both have arrived. If an event never arrives, the route stays in `PendingReassign` state.
+
+4. **`EChannelCloseReason::Migrated`** prevents premature actor destruction during migration. The proxy's `ShouldClientDestroyActor()` checks for this close reason before deciding whether to replicate destruction to the client.
+
+5. **Grace period prevents ping-pong.** A 5-second `TransferGracePeriodSeconds` window after a new PC arrives prevents the zone check from immediately bouncing the player back across the boundary.
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `Source/Nyx/Core/NyxGameMode.h` | Added `ReleasePawnAuthority()`, `ClaimPawnAuthority()` declarations with documentation |
+| `Source/Nyx/Core/NyxGameMode.cpp` | Rewrote `CheckZoneBoundaries()` for 3 player types; added `ReleasePawnAuthority()` and `ClaimPawnAuthority()` methods |
+
+### Sequence Diagram
+
+```
+Client (via Proxy)         Server A (primary)        Server B (non-primary)        Proxy
+       │                         │                          │                        │
+       │  ◄──── replication ──── │                          │                        │
+       │                         │  Player crosses          │                        │
+       │                         │  zone boundary           │                        │
+       │                         │                          │                        │
+       │                         │── ReleasePawnAuthority() │                        │
+       │                         │   Save to SpacetimeDB    │                        │
+       │                         │   Destroy pawn           │                        │
+       │                         │   Swap PC → NoPawnPC     │                        │
+       │                         │                          │                        │
+       │                         │ ─ ─ ─ ─ ─ NoPawnPC replicated ─ ─ ─ ─ ─ ─ ─ ─ ► │
+       │                         │                          │   ReceivedNoPawnPC()   │
+       │                         │                          │                        │
+       │                         │                          │  CheckZoneBoundaries() │
+       │                         │                          │  NoPawnPC in our zone  │
+       │                         │                          │── ClaimPawnAuthority() │
+       │                         │                          │   Spawn pawn           │
+       │                         │                          │   Swap NoPawnPC → PC   │
+       │                         │                          │   Possess pawn         │
+       │                         │                          │                        │
+       │                         │                          │ ─ real PC replicated ► │
+       │                         │                          │   ReceivedGamePC()     │
+       │                         │                          │                        │
+       │                         │                          │    FinalizeReassign()  │
+       │                         │                          │    Primary: A → B      │
+       │  ◄──── replication ──── ──────────────────────── ─ ┤                        │
+       │        (now from B)                                │                        │
+```
 
 ---
 
