@@ -279,3 +279,97 @@ SetupInputMappingContexts();
 | `NyxCharacter.cpp` | `OnRep_Controller()` post-migration re-bind, `RetryInputSetup()` with guard, `SetupPlayerInputComponent()` with SetViewTarget |
 | `NyxGameInstance.cpp` | `-ProxyGameServers=` detection, NetDriver swap to ProxyNetDriver |
 | `NyxHUD.cpp` | Canvas HUD — needs work for post-migration PC |
+---
+
+# DSTM vs Manual Migration: Why Our Approach Is a Workaround
+
+## The Intended Migration Path: DSTM (Distributed State Transfer Machine)
+
+The engine contains a fully implemented **seamless** migration system gated behind `UE_WITH_REMOTE_OBJECT_HANDLE`. When enabled, `APlayerController::PostMigrate()` physically transfers the **same PC instance** between servers:
+
+**Send side** (Server-A releasing):
+1. Serializes `CachedConnectionPlayerId` via `APlayerController::Serialize()`
+2. Nulls out `NetConnection` and `Player` (server-specific)
+3. Detaches PC from `UNetConnection`
+4. Spawns `ANoPawnPlayerController` placeholder on the connection
+5. Transfers the serialized PC object to Server-B via `RemoteObjectTransfer.cpp`
+
+**Receive side** (Server-B claiming):
+1. Deserializes the PC object — same net GUID preserved
+2. Finds the connection by `CachedConnectionPlayerId`
+3. Destroys the existing `ANoPawnPlayerController` placeholder
+4. Binds the original PC to the connection (`NetConnection`, `Player`, `NetPlayerIndex`)
+5. Verifies `HandshakeId` consistency
+
+**Key benefit**: Same net GUID → the client's existing PlayerController object gets updated via replication from the new server → no disruption to camera, input, or HUD.
+
+## Why DSTM Is Disabled
+
+`UE_WITH_REMOTE_OBJECT_HANDLE` is `#define`d as **0** in `CoreMiscDefines.h` (line 620). This compiles out:
+- `APlayerController::PostMigrate()` entirely
+- `APlayerController::Serialize()` migration path
+- All of `RemoteObjectTransfer.cpp`'s `FRemoteObjectTransferQueue` subsystem
+
+The MultiServerReplication plugin also gates its usage:
+
+```cpp
+// MultiServerBeaconClient.cpp:138
+NetDriver->SetUsingRemoteObjectReferences(
+    !!UE_WITH_REMOTE_OBJECT_HANDLE && GMultiServerAllowRemoteObjectReferences);
+```
+
+With the define at 0, this evaluates to `false` always, regardless of the `multiserver.AllowRemoteObjectReferences` CVar.
+
+## Our Manual Path (What We're Doing Instead)
+
+Without DSTM, we manually orchestrate the swap:
+
+1. **Server-A**: Spawn `ANoPawnPlayerController`, call `SwapPlayerControllers(RealPC, NoPawnPC)`, destroy pawn + old PC
+2. **Server-B**: Spawn **new** `APlayerController` + new `ANyxCharacter`, call `SwapPlayerControllers(NoPawnPC, NewPC)`, possess
+
+## Why the Proxy Handles Our Approach Correctly
+
+The proxy's `ReassignPlayerController()` doesn't care whether the game PC is the same instance or a new one. It dispatches based solely on type:
+
+```cpp
+// MultiServerProxy.cpp:1244
+if (PlayerController->IsA(ANoPawnPlayerController::StaticClass()))
+    ReceivedReassignedNoPawnPlayerController(Route);
+else
+    ReceivedReassignedGamePlayerController(Route);
+```
+
+Both events (NoPawnPC on old route + game PC on new route) trigger `FinalizePlayerControllerReassignment()` which flips route states: old → `Connected`, new → `ConnectedPrimary`. This works identically for both DSTM and manual paths.
+
+## The Root Cause of All Client-Side Issues
+
+| | DSTM Path | Our Manual Path |
+|---|-----------|-----------------|
+| **PC on client** | Same object, same net GUID | **New** object, **new** net GUID |
+| **Client experience** | Replication updates existing PC seamlessly | Old PC lingers, new PC arrives — two PCs coexist briefly |
+| **Camera** | Stays attached | Detaches (old PC had view target, new PC doesn't) |
+| **Input** | Stays bound | Lost (old PC's bindings, new PC has none) |
+| **HUD** | Stays attached | Lost (HUD was on old PC) |
+| **Pawn** | Same pawn, authority transfers | New pawn spawns, old pawn destroyed — ghost visible briefly |
+
+Every client-side fix we've written (`OnRep_Controller` re-bind, `RetryInputSetup` guard, `SetViewTarget` in `SetupPlayerInputComponent`) is compensating for the fact that the client receives a completely new PlayerController instead of keeping the same one.
+
+## Options Forward
+
+1. **Enable DSTM** — Set `UE_WITH_REMOTE_OBJECT_HANDLE 1` in `CoreMiscDefines.h` and rebuild the engine from source. This gives us the seamless `PostMigrate()` migration. Major undertaking (engine source modification + full rebuild) but is the intended design.
+
+2. **Keep manual path, harden client handling** — Continue with spawn-new-PC approach. Improve `OnRep_Controller`, `HandleClientPlayer`, and pawn re-bind to handle the two-PC coexistence window cleanly. This is what we've been doing.
+
+3. **Hybrid: replicate key state** — Instead of spawning a brand new PC on Server-B, serialize the old PC's camera/input/HUD state and apply it to the new PC. Still a new net GUID though, so the client still sees a PC swap — limited benefit over option 2.
+
+## Source Locations (DSTM)
+
+| File | Lines | Content |
+|------|-------|---------|
+| `CoreMiscDefines.h` | 620 | `#define UE_WITH_REMOTE_OBJECT_HANDLE 0` — the kill switch |
+| `PlayerController.cpp` | 5028–5125 | `PostMigrate()` — full Send/Receive logic |
+| `PlayerController.cpp` | 5202–5224 | `Serialize()` — migration serialization of `CachedConnectionPlayerId` |
+| `PlayerController.cpp` | 6665–6718 | `ANoPawnPlayerController` implementation |
+| `RemoteObjectTransfer.cpp` | 97–1433 | `FRemoteObjectTransferQueue` — the DSTM subsystem |
+| `MultiServerBeaconClient.cpp` | 138 | `SetUsingRemoteObjectReferences()` — plugin gate |
+| `MultiServerBeaconHost.cpp` | 39 | Same gate on host side |
