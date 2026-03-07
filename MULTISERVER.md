@@ -636,3 +636,137 @@ The Discord comment about DSTM being "incomplete" likely refers to exactly this:
 2. **Even building from source wouldn't help** — we'd still need to write the transport layer ourselves (binding the delegates to beacon connections)
 3. **Our manual SwapPlayerControllers approach is the correct non-DSTM path** — the proxy handles it properly
 4. **Focus on client-side robustness** — hide the PC swap from the user via `OnRep_Controller` state transfer, camera continuity, ghost pawn suppression
+
+---
+
+# The Breakthrough: Seamless Migration Without DSTM or Engine Changes
+
+## The Proxy Already Supports Seamless Migration — We Just Weren't Using It
+
+The proxy has a built-in migration mechanism we overlooked. The comment on `ShouldClientDestroyActor` (`MultiServerProxy.cpp:660`) says it explicitly:
+
+> *"If an actor is destroyed remotely on a game server because it's being migrated to another server then it shouldn't be destroyed on the proxy when removed from the replication system of the originating server. When the actor arrives on the destination server it will be added to that server's replication system and **the actor will be re-used on the proxy since it's still referenced in the shared backend NetGUID cache**."*
+
+Combined with the proxy's GUID architecture:
+- All backend drivers share one `FProxyBackendNetGUIDCache` (GUID=X → PC_proxy)
+- The frontend `FProxyNetGUIDCache::AssignNewNetGUID_Server` looks up from the shared backend cache
+- Client actor channels are keyed by the proxy's frontend GUID, not the backend object pointer
+
+**If we close the backend channel with `EChannelCloseReason::Migrated` AND make Server-B reuse the same GUID, the proxy→client channel stays open and the client sees normal property updates on its existing PC.**
+
+## The Solution: Two Changes to Game Code
+
+### Server-A — `ReleasePawnAuthority`:
+
+```cpp
+// 1. Close PC channel with Migrated (not Destroyed) — proxy keeps PC alive
+GetWorld()->GetNetDriver()->NotifyActorDestroyed(PC, false, EChannelCloseReason::Migrated);
+
+// 2. Capture PC's GUID for transfer to Server-B
+FNetworkGUID PCGuid = GetWorld()->GetNetDriver()->GuidCache->GetNetGUID(PC);
+// Store PCGuid.ObjectId in SpacetimeDB migration record
+
+// 3. Continue with SwapPlayerControllers + DestroyActor as before
+// DestroyActor's internal NotifyActorDestroyed finds no channel (already removed) → no-op
+```
+
+### Server-B — `ClaimPawnAuthority`:
+
+```cpp
+// 1. Spawn new PC (same class)
+APlayerController* NewPC = World->SpawnActor<APlayerController>(PlayerControllerClass, ...);
+
+// 2. Force the SAVED GUID before first replication tick
+FNetworkGUID SavedGUID;
+SavedGUID.ObjectId = storedObjectId; // retrieved from SpacetimeDB
+GetWorld()->GetNetDriver()->GuidCache->RegisterNetGUID_Server(SavedGUID, NewPC);
+
+// 3. Continue with SwapPlayerControllers + Possess as before
+```
+
+### Why it works — step by step:
+
+1. **Server-A** calls `NotifyActorDestroyed(PC, false, Migrated)` → channel closes with `Migrated` reason on Server-A's backend connection
+2. **Proxy backend** receives close → `ShouldClientDestroyActor(PC_proxy, Migrated)` returns `false` → PC_proxy stays alive in shared UWorld
+3. **GUID preserved in shared backend cache**: GUID=X → PC_proxy (never removed because actor not destroyed)
+4. **Proxy→client channel for PC_proxy was never closed** (proxy only closes frontend channels when it destroys actors from the shared world)
+5. **Server-A side cleanup**: `DestroyActor` runs → its internal `NotifyActorDestroyed(PC)` finds no channel (already removed in step 1) → no second close sent to proxy
+6. **Server-B** spawns new PC, forces GUID=X via `RegisterNetGUID_Server`
+7. **Server-B** replicates new PC with GUID=X to proxy → proxy backend cache resolves GUID=X to **existing** PC_proxy → properties update in-place
+8. **Proxy frontend** replicates PC_proxy to client via the **same open channel** → client receives normal property update
+9. **Client** sees `OnRep_Controller`, `OnRep_Pawn` fire as normal replication events → seamless
+
+### What the client experiences:
+
+**Nothing unusual.** Their existing PlayerController receives property updates from the new server. Same actor, same channel, same GUID. Indistinguishable from a normal replication tick.
+
+## All Required APIs Are Public
+
+No engine modification, no plugin fork, no recompilation of anything except our game module:
+
+| API | Access | Used For |
+|-----|--------|----------|
+| `UNetDriver::NotifyActorDestroyed(Actor, false, EChannelCloseReason::Migrated)` | ENGINE_API virtual public | Close channel with Migrated reason |
+| `FNetGUIDCache::GetNetGUID(Object)` | ENGINE_API public | Capture PC's GUID on Server-A |
+| `FNetGUIDCache::RegisterNetGUID_Server(GUID, Object)` | ENGINE_API public | Force saved GUID on Server-B |
+| `FNetGUIDCache::RemoveNetGUID(Object)` | ENGINE_API public | Remove auto-assigned GUID before forcing (if needed) |
+| `EChannelCloseReason::Migrated` | public enum | Channel close reason that proxy preserves actors for |
+| `ShouldClientDestroyActor` override on `UProxyBackendNetDriver` | Already exists in plugin | Returns `false` for `Migrated` — no proxy code change needed |
+
+## GUID Communication: Server-A → Server-B
+
+GUIDs are `uint64` values. We need to pass them between servers during migration. Options:
+
+1. **SpacetimeDB** — Already used for player state. Store GUID values in the migration record alongside position/rotation.
+2. **Command-line seed math** — Server-A uses seed 100000, Server-B uses 200000. GUIDs are deterministic (seed + counter). If we know the counter value, Server-B can reconstruct the GUID without communication. But this is fragile.
+3. **Beacon RPC** — MultiServerReplication plugin already has beacon connections between servers. Could add a custom RPC, but requires plugin modification.
+
+**SpacetimeDB is the simplest** — it's already in the migration flow and `uint64` serialization is trivial.
+
+## Risks and Mitigations
+
+### 1. Component GUIDs
+Pawns have subcomponents (mesh, movement, camera) each with their own GUID. Options:
+- **Preserve component GUIDs too** — Capture all GUIDs for actor + components, transfer and force all on Server-B. More complex but fully seamless.
+- **Let components get new GUIDs** — The proxy will create new frontend channels for components. Client creates new component objects. Since components are owned by the pawn actor, `OnRep` events will re-attach them. Brief visual artifact possible during one frame.
+- **Recommended**: Start with PC GUID only (most critical for input/camera continuity), add component GUIDs if artifacts visible.
+
+### 2. Timing — GUID Must Be Forced Before Replication
+`RegisterNetGUID_Server` on Server-B must happen before `ServerReplicateActors` processes the new PC. Two safe approaches:
+- Call `RegisterNetGUID_Server` immediately after `SpawnActor`, before `SwapPlayerControllers` (all in same frame)
+- Use `FActorSpawnParameters::bDeferConstruction = true`, register GUID, then `FinishSpawning`
+
+### 3. `check(!ObjectLookup.Contains(NetGUID))` in `RegisterNetGUID_Server`
+Server-B's GUID cache shouldn't contain Server-A's GUID (different seed ranges: 100000 vs 200000). If the spawned PC auto-assigns a GUID before we force, call `RemoveNetGUID(NewPC)` first to clear the auto-assigned one.
+
+### 4. Proxy Backend Cache: Old Object vs New Object
+When Server-B's replication arrives with GUID=X, the shared backend cache already has GUID=X → PC_proxy. `RegisterNetGUID_Client` handles this case explicitly:
+```cpp
+// PackageMapClient.cpp:3441 — handles reassignment gracefully
+if (OldObject != NULL && OldObject != Object) {
+    UE_LOG(Warning, "Reassigning NetGUID <%s> to %s (was assigned to %s)");
+}
+// Removes old mapping, registers new one
+```
+If `OldObject == Object` (same proxy-side PC, which it should be since proxy preserved it): logs verbose, re-registers. **Works perfectly.**
+
+### 5. Same Approach for Pawn/Character
+Apply identical treatment to `ANyxCharacter`:
+- Server-A: `NotifyActorDestroyed(Pawn, false, Migrated)`, capture GUID
+- Server-B: Spawn pawn, force saved GUID, possess
+- Client: Existing pawn object gets property updates from new server. Position/rotation updates seamlessly.
+
+## Comparison: Before vs After
+
+| Aspect | Current (SwapPC, no Migrated) | New (Migrated + GUID forcing) |
+|--------|-------------------------------|-------------------------------|
+| **Proxy PC object** | Destroyed, new one created | Same object preserved and reused |
+| **Proxy→client channel** | Closed and reopened | Stays open |
+| **Client PC actor** | Destroyed, new one spawned | Same actor, property update |
+| **Client camera** | Detaches, reattaches via hack | Stays attached (same PC) |
+| **Client input** | Lost, rebind via OnRep_Controller | Stays bound (same PC) |
+| **Client HUD** | Destroyed with old PC | Stays (same PC) |
+| **Ghost pawn visible** | Yes (brief window) | No (same pawn actor updated) |
+| **Engine modification** | None | None |
+| **Plugin modification** | None | None |
+| **Game code changes** | Complex client-side hacks | 6 lines in Release + 4 lines in Claim |
