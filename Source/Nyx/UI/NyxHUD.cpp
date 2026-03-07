@@ -7,6 +7,7 @@
 #include "Engine/Font.h"
 #include "Engine/World.h"
 #include "Engine/NetConnection.h"
+#include "EngineUtils.h"
 
 void ANyxHUD::DrawHUD()
 {
@@ -14,6 +15,7 @@ void ANyxHUD::DrawHUD()
 
 	if (!Canvas) return;
 
+	// ── Find the best PC — prefer the one that actually has a NyxCharacter pawn ──
 	APlayerController* PC = GetOwningPlayerController();
 	if (!PC) return;
 
@@ -26,12 +28,50 @@ void ANyxHUD::DrawHUD()
 		ProxyInfo = Conn->URL.Host + TEXT(":") + FString::FromInt(Conn->URL.Port);
 	}
 
-	// Server + Zone: replicated from the game server via NyxCharacter
+	// Server + Zone: replicated from the game server via NyxCharacter.
+	// After proxy migration, the owning PC's pawn may become null (proxy
+	// reassignment disrupts the PC→Pawn link). Find the active NyxCharacter
+	// by iterating all NyxCharacters and picking the locally controlled one
+	// with input setup complete. This survives any proxy PC swaps.
 	FString ServerInfo = TEXT("N/A");
 	FString ZoneInfo = TEXT("N/A");
 	FString PosInfo = TEXT("N/A");
 
-	ANyxCharacter* NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
+	ANyxCharacter* NyxChar = nullptr;
+
+	// Strategy 1: Try the owning PC's pawn first (cheapest)
+	NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
+
+	// Strategy 2: Try all local PCs' pawns
+	if (!NyxChar)
+	{
+		for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+		{
+			APlayerController* OtherPC = It->Get();
+			if (OtherPC && OtherPC->IsLocalController())
+			{
+				NyxChar = Cast<ANyxCharacter>(OtherPC->GetPawn());
+				if (NyxChar)
+				{
+					break;
+				}
+			}
+		}
+	}
+
+	// Strategy 3: Iterate all NyxCharacters and find the locally controlled one
+	if (!NyxChar)
+	{
+		for (TActorIterator<ANyxCharacter> It(GetWorld()); It; ++It)
+		{
+			if (It->IsLocallyControlled())
+			{
+				NyxChar = *It;
+				break;
+			}
+		}
+	}
+
 	if (NyxChar)
 	{
 		if (!NyxChar->ServerName.IsEmpty())

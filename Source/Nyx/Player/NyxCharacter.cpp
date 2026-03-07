@@ -18,6 +18,7 @@
 #include "Engine/World.h"
 #include "TimerManager.h"
 #include "DrawDebugHelpers.h"
+#include "EngineUtils.h"
 
 ANyxCharacter::ANyxCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UNyxCharacterMovementComponent>(
@@ -231,6 +232,7 @@ void ANyxCharacter::PossessedBy(AController* NewController)
 void ANyxCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorld()->GetTimerManager().ClearTimer(InputRetryTimerHandle);
+	GetWorld()->GetTimerManager().ClearTimer(CameraIntegrityTimerHandle);
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -408,6 +410,32 @@ void ANyxCharacter::SetupPlayerInputComponent(UInputComponent* PlayerInputCompon
 				*GetName(), *GetNameSafe(PC),
 				PC->PlayerCameraManager ? TEXT("true") : TEXT("false"));
 		}
+
+		// ── Post-migration cleanup: Hide/disable old NyxCharacters on the client ──
+		// After proxy migration, the old NyxCharacter from the previous server may
+		// still exist on the client (proxy channel not yet closed). Hide it to prevent
+		// visual artifacts and ensure the camera stays on the new character.
+		for (TActorIterator<ANyxCharacter> It(GetWorld()); It; ++It)
+		{
+			ANyxCharacter* OtherChar = *It;
+			if (OtherChar && OtherChar != this && OtherChar->bInputSetupComplete)
+			{
+				UE_LOG(LogNyx, Log, TEXT("Post-migration cleanup: Hiding old character %s (replaced by %s)"),
+					*OtherChar->GetName(), *GetName());
+				OtherChar->SetActorHiddenInGame(true);
+				OtherChar->SetActorEnableCollision(false);
+				OtherChar->bInputSetupComplete = false; // Prevent it from interfering
+				OtherChar->GetWorld()->GetTimerManager().ClearTimer(OtherChar->CameraIntegrityTimerHandle);
+			}
+		}
+
+		// ── Start camera/input integrity timer ──
+		// The proxy may disrupt the PC→Pawn link during finalization (~5s after
+		// migration). This timer periodically checks and re-establishes the
+		// camera view target and controller link if needed.
+		GetWorld()->GetTimerManager().SetTimer(CameraIntegrityTimerHandle,
+			this, &ANyxCharacter::CheckCameraAndInputIntegrity,
+			1.0f, true, 2.0f);
 	}
 }
 
@@ -564,6 +592,93 @@ void ANyxCharacter::RetryInputSetup()
 		// returns a custom target (not the pawn), so the camera component won't activate
 		// unless we explicitly set the view target.
 		PC->SetViewTarget(this);
+	}
+}
+
+void ANyxCharacter::CheckCameraAndInputIntegrity()
+{
+	// Only runs on the client for the active character
+	if (GetNetMode() != NM_Client || !bInputSetupComplete)
+	{
+		GetWorld()->GetTimerManager().ClearTimer(CameraIntegrityTimerHandle);
+		return;
+	}
+
+	// If this character is hidden (superseded by a newer character), stop checking.
+	if (IsHidden())
+	{
+		GetWorld()->GetTimerManager().ClearTimer(CameraIntegrityTimerHandle);
+		return;
+	}
+
+	APlayerController* PC = Cast<APlayerController>(GetController());
+	if (!PC || !PC->IsLocalController())
+	{
+		// Controller was lost (proxy reassignment). Re-bind to the local PC.
+		PC = GetWorld()->GetFirstPlayerController();
+		if (!PC || !PC->IsLocalController())
+		{
+			// Try all PCs
+			for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+			{
+				APlayerController* TestPC = It->Get();
+				if (TestPC && TestPC->IsLocalController())
+				{
+					PC = TestPC;
+					break;
+				}
+			}
+		}
+	}
+
+	if (!PC || !PC->IsLocalController())
+	{
+		return; // No local PC available yet
+	}
+
+	bool bNeedsRepair = false;
+
+	// Check if the PC's pawn is still us
+	if (PC->GetPawn() != this)
+	{
+		UE_LOG(LogNyx, Warning, TEXT("CameraIntegrity: PC %s pawn is %s, expected %s — repairing"),
+			*PC->GetName(), *GetNameSafe(PC->GetPawn()), *GetName());
+		PC->SetPawn(this);
+		bNeedsRepair = true;
+	}
+
+	// Check if the view target is still us
+	if (PC->PlayerCameraManager)
+	{
+		AActor* CurrentViewTarget = PC->PlayerCameraManager->GetViewTarget();
+		if (CurrentViewTarget != this)
+		{
+			UE_LOG(LogNyx, Warning, TEXT("CameraIntegrity: ViewTarget is %s, expected %s — repairing"),
+				*GetNameSafe(CurrentViewTarget), *GetName());
+			PC->SetViewTarget(this);
+			bNeedsRepair = true;
+		}
+	}
+
+	// If controller was lost, re-bind
+	if (GetController() != PC)
+	{
+		UE_LOG(LogNyx, Warning, TEXT("CameraIntegrity: Controller is %s, expected %s — repairing"),
+			*GetNameSafe(GetController()), *PC->GetName());
+
+		// Re-establish the PC→Pawn link
+		PC->SetPawn(this);
+		PC->ClientRestart(this);
+		PC->SetViewTarget(this);
+		SetupInputMappingContexts();
+
+		UE_LOG(LogNyx, Log, TEXT("CameraIntegrity: Repaired controller link for %s → %s"),
+			*GetName(), *PC->GetName());
+	}
+
+	if (bNeedsRepair)
+	{
+		UE_LOG(LogNyx, Log, TEXT("CameraIntegrity: Repair complete for %s"), *GetName());
 	}
 }
 

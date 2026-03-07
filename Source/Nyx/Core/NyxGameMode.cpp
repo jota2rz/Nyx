@@ -16,6 +16,7 @@
 #include "Engine/World.h"
 #include "Engine/NetDriver.h"
 #include "Engine/PackageMapClient.h"
+#include "Misc/NetworkGuid.h"
 #include "Misc/CommandLine.h"
 
 ANyxGameMode::ANyxGameMode()
@@ -94,6 +95,11 @@ void ANyxGameMode::StartPlay()
 				*SpacetimeDBHost, *DatabaseName, *ZoneId, *DedicatedServerId);
 
 			ServerSub->ConnectAndRegister(SpacetimeDBHost, DatabaseName, ZoneId, DedicatedServerId, 500);
+
+			// Bind to external character save events for migration detection.
+			// When another server saves a character (during ReleasePawnAuthority),
+			// we check if the saved position is in our zone and trigger a claim.
+			ServerSub->OnExternalCharacterSaved.AddDynamic(this, &ANyxGameMode::HandleExternalCharacterSaved);
 
 			// ── MultiServer mesh: if cmd-line specifies peers, join the mesh ──
 			UNyxMultiServerSubsystem* MultiSub = GetGameInstance()->GetSubsystem<UNyxMultiServerSubsystem>();
@@ -229,6 +235,14 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 				? TEXT("Zone-1 (West)")
 				: TEXT("Zone-2 (East)");
 
+			// NOTE: Deterministic GUID forcing is disabled. The proxy assigns different
+			// HandshakeIds per backend server (e.g. 123 for Server-1, 124 for Server-2),
+			// so MakeMigrationGUID produces different GUIDs on each server. Combined with
+			// EChannelCloseReason::Migrated (which keeps old proxy-side actors alive),
+			// this creates duplicate actors on the client. A stable cross-server client
+			// identifier is needed to make this approach work.
+			// See: MakeMigrationGUID / AssignMigrationGUID (kept for future use).
+
 			// Skip SpacetimeDB registration for migration claims — ClaimPawnAuthority
 			// handles it separately. OnPlayerJoined restores position from the DB cache,
 			// which would override the NoPawnPC's authoritative position.
@@ -245,7 +259,25 @@ void ANyxGameMode::PostLogin(APlayerController* NewPlayer)
 						: NewPlayer->GetName();
 					ServerSub->OnPlayerJoined(NyxChar, PlayerName);
 				}
-			}
+				// ── Clamp restored position to owning zone ──
+				// SpacetimeDB may restore a position from a previous session that's
+				// in the OTHER server's zone. If we keep it, the pawn immediately
+				// triggers a release → claim cascade (triple pawn on client).
+				const FVector RestoredPos = NyxChar->GetActorLocation();
+				const bool bRestoredInOurZone = bOwnsNegativeSide
+					? (RestoredPos.X < ZoneBoundaryX)
+					: (RestoredPos.X >= ZoneBoundaryX);
+				if (!bRestoredInOurZone)
+				{
+					const float SafeX = bOwnsNegativeSide
+						? (ZoneBoundaryX - 100.f)
+						: (ZoneBoundaryX + 100.f);
+					const FVector SafePos(SafeX, RestoredPos.Y, RestoredPos.Z);
+					NyxChar->SetActorLocation(SafePos);
+					UE_LOG(LogNyx, Warning, TEXT("PostLogin: Clamped %s from X=%.0f to X=%.0f — saved position was outside our zone %s"),
+						*NyxChar->GetName(), RestoredPos.X, SafeX,
+						bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
+				}			}
 		}
 		else
 		{
@@ -289,6 +321,32 @@ void ANyxGameMode::Logout(AController* Exiting)
 	}
 
 	Super::Logout(Exiting);
+}
+
+void ANyxGameMode::HandleExternalCharacterSaved(const FCharacterStatsType& Stats)
+{
+	// Another server saved a character — check if the saved position is in OUR zone.
+	// This happens when the other server releases a player during migration
+	// (ReleasePawnAuthority calls SaveCharacterState before swapping to NoPawnPC).
+	const double SavedX = Stats.SavedPosX;
+	const bool bSavedInOurZone = bOwnsNegativeSide
+		? (SavedX < ZoneBoundaryX)
+		: (SavedX >= ZoneBoundaryX);
+
+	if (bSavedInOurZone)
+	{
+		bMigrationClaimPending = true;
+		MigrationClaimPosition = FVector(Stats.SavedPosX, Stats.SavedPosY, Stats.SavedPosZ);
+		UE_LOG(LogNyx, Log, TEXT("Migration signal received: %s saved at (%.0f, %.0f, %.0f) — IN our %s zone. Claim pending."),
+			*Stats.DisplayName, Stats.SavedPosX, Stats.SavedPosY, Stats.SavedPosZ,
+			bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
+	}
+	else
+	{
+		UE_LOG(LogNyx, Log, TEXT("Migration signal ignored: %s saved at (%.0f, %.0f, %.0f) — outside our %s zone"),
+			*Stats.DisplayName, Stats.SavedPosX, Stats.SavedPosY, Stats.SavedPosZ,
+			bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
+	}
 }
 
 void ANyxGameMode::EnterWorld()
@@ -373,14 +431,38 @@ void ANyxGameMode::CheckZoneBoundaries()
 			if (Track.FirstSeenTime == 0.0)
 			{
 				Track.FirstSeenTime = CurrentTime;
+				Track.InitialPosition = NoPawnPos;
 				UE_LOG(LogNyx, Log, TEXT("NoPawnPC %s first seen at X=%.1f (%s our zone %s)"),
 					*PC->GetName(), NoPawnPos.X,
 					bInOurZone ? TEXT("IN") : TEXT("outside"),
 					bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
 			}
 
+			// Track if the position has moved significantly from initial value.
+			// Proxy-setup NoPawnPCs sit at (0,0,0) or the boundary until the proxy
+			// starts forwarding real player positions. A significant move means the
+			// proxy is actively syncing — this NoPawnPC represents a real player.
+			if (!Track.bPositionHasMoved)
+			{
+				const float PosDelta = FVector::Dist(NoPawnPos, Track.InitialPosition);
+				if (PosDelta > 100.0f) // 1 meter threshold
+				{
+					Track.bPositionHasMoved = true;
+					UE_LOG(LogNyx, Log, TEXT("NoPawnPC %s position moved %.0f units from initial (%.0f,%.0f,%.0f) to (%.0f,%.0f,%.0f)"),
+						*PC->GetName(), PosDelta,
+						Track.InitialPosition.X, Track.InitialPosition.Y, Track.InitialPosition.Z,
+						NoPawnPos.X, NoPawnPos.Y, NoPawnPos.Z);
+				}
+			}
+
 			if (bInOurZone)
 			{
+				// ── Released by us: block claims until position exits our zone ──
+				if (Track.bReleasedByUs)
+				{
+					continue;
+				}
+
 				// Record when the NoPawnPC entered our zone (if not already in)
 				if (Track.EnteredOurZoneTime == 0.0)
 				{
@@ -389,19 +471,18 @@ void ANyxGameMode::CheckZoneBoundaries()
 
 				const double TimeInZone = CurrentTime - Track.EnteredOurZoneTime;
 				bool bShouldClaim = false;
+				FVector ClaimPosition = NoPawnPos;
 
 				if (Track.bWasEverOutsideOurZone && TimeInZone >= NoPawnClaimGracePeriodSeconds)
 				{
-					// Normal migration: position transitioned from outside → inside our zone
 					UE_LOG(LogNyx, Log, TEXT("Migration CLAIM (transition): NoPawnPC %s at X=%.0f — was outside, now in %s zone for %.1fs"),
 						*PC->GetName(), NoPawnPos.X,
 						bOwnsNegativeSide ? TEXT("west") : TEXT("east"), TimeInZone);
 					bShouldClaim = true;
 				}
-				else if (!Track.bWasEverOutsideOurZone && TimeInZone >= InitialNoPawnGracePeriodSeconds)
+				else if (!Track.bWasEverOutsideOurZone && Track.bPositionHasMoved && TimeInZone >= SettledNoPawnClaimGracePeriodSeconds)
 				{
-					// Spawn-in-wrong-zone: position was always in our zone (long grace)
-					UE_LOG(LogNyx, Log, TEXT("Migration CLAIM (initial): NoPawnPC %s at X=%.0f — always in %s zone for %.1fs (primary server should have released)"),
+					UE_LOG(LogNyx, Log, TEXT("Migration CLAIM (settled): NoPawnPC %s at X=%.0f — position moved, in %s zone for %.1fs"),
 						*PC->GetName(), NoPawnPos.X,
 						bOwnsNegativeSide ? TEXT("west") : TEXT("east"), TimeInZone);
 					bShouldClaim = true;
@@ -409,7 +490,7 @@ void ANyxGameMode::CheckZoneBoundaries()
 
 				if (bShouldClaim)
 				{
-					ClaimPawnAuthority(PC, NoPawnPos, FRotator::ZeroRotator);
+					ClaimPawnAuthority(PC, ClaimPosition, FRotator::ZeroRotator);
 				}
 			}
 			else
@@ -417,6 +498,56 @@ void ANyxGameMode::CheckZoneBoundaries()
 				// NoPawnPC is outside our zone — mark and reset entry timer
 				Track.bWasEverOutsideOurZone = true;
 				Track.EnteredOurZoneTime = 0.0;
+
+				// Clear release flag after enough time
+				if (Track.bReleasedByUs)
+				{
+					const double TimeSinceRelease = CurrentTime - Track.ReleasedByUsTime;
+					if (TimeSinceRelease > 8.0)
+					{
+						Track.bReleasedByUs = false;
+						Track.ReleasedByUsTime = 0.0;
+						UE_LOG(LogNyx, Log, TEXT("NoPawnPC %s release flag cleared — position outside our zone after %.1fs since release"),
+							*PC->GetName(), TimeSinceRelease);
+					}
+				}
+
+				// ── SpacetimeDB migration claim ──
+				// The proxy cannot reliably signal us when the other server releases.
+				// Instead, we use SpacetimeDB: when the other server releases, it
+				// calls SaveCharacterState() which updates character_stats in the DB.
+				// Both servers subscribe to character_stats. Our HandleExternalCharacterSaved()
+				// fires, checks if the saved position is in our zone, and sets
+				// bMigrationClaimPending = true.
+				//
+				// Here we consume that signal: find any NoPawnPC that represents a
+				// real player (bPositionHasMoved) and isn't ours (bReleasedByUs),
+				// then claim it at the saved position.
+				if (bMigrationClaimPending && !Track.bReleasedByUs && Track.bPositionHasMoved)
+				{
+					// Use the SpacetimeDB-provided crossing position
+					FVector ClaimPos = MigrationClaimPosition;
+
+					// Safety: ensure the claim position is in our zone
+					const bool bClaimInOurZone = bOwnsNegativeSide
+						? (ClaimPos.X < ZoneBoundaryX)
+						: (ClaimPos.X >= ZoneBoundaryX);
+					if (!bClaimInOurZone)
+					{
+						ClaimPos.X = bOwnsNegativeSide
+							? (ZoneBoundaryX - 100.f)
+							: (ZoneBoundaryX + 100.f);
+					}
+
+					UE_LOG(LogNyx, Log, TEXT("Migration CLAIM (spacetimedb): NoPawnPC %s — SpacetimeDB signaled migration. Stale pos X=%.0f, claiming at (%.0f, %.0f, %.0f) in %s zone"),
+						*PC->GetName(),
+						NoPawnPos.X,
+						ClaimPos.X, ClaimPos.Y, ClaimPos.Z,
+						bOwnsNegativeSide ? TEXT("west") : TEXT("east"));
+
+					bMigrationClaimPending = false;
+					ClaimPawnAuthority(PC, ClaimPos, FRotator::ZeroRotator);
+				}
 			}
 			continue;
 		}
@@ -516,6 +647,13 @@ void ANyxGameMode::ReleasePawnAuthority(APlayerController* PC, ANyxCharacter* Ny
 	UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Destroying pawn at (%.0f, %.0f, %.0f) and swapping to NoPawnPC"),
 		LastPos.X, LastPos.Y, LastPos.Z);
 
+	// NOTE: Migrated close reason is disabled. The proxy assigns different
+	// HandshakeIds per backend, so deterministic GUIDs don't match between servers.
+	// Migrated + mismatched GUIDs = duplicate actors on client. Instead, we let
+	// DestroyActor close channels with the default Destroyed reason. The proxy
+	// destroys old actors, Server-B creates new ones, and client-side fallbacks
+	// (OnRep_Controller re-bind) handle the transition.
+
 	// Unpossess and destroy the pawn
 	PC->UnPossess();
 	NyxChar->Destroy();
@@ -549,6 +687,20 @@ void ANyxGameMode::ReleasePawnAuthority(APlayerController* PC, ANyxCharacter* Ny
 
 	UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Swapped %s → %s (HandshakeId=%u). Proxy will detect NoPawnPC on this route."),
 		*PC->GetName(), *NoPawnPC->GetName(), HandshakeId);
+
+	// Pre-populate tracking for the new NoPawnPC with bReleasedByUs = true.
+	// This prevents us from re-claiming our own NoPawnPC when the proxy
+	// briefly bounces its position back into our zone after the route change.
+	{
+		FNoPawnMigrationTracking Track;
+		Track.bReleasedByUs = true;
+		Track.ReleasedByUsTime = GetWorld()->GetTimeSeconds();
+		Track.FirstSeenTime = Track.ReleasedByUsTime;
+		Track.InitialPosition = LastPos;
+		// Starting position is outside our zone (player just crossed boundary)
+		Track.bWasEverOutsideOurZone = true;
+		NoPawnTracking.Add(NoPawnPC, Track);
+	}
 
 	// Remove tracking for the old PC (the NoPawnPC will be cleaned up when
 	// the other server claims authority, or when the player disconnects)
@@ -606,6 +758,9 @@ void ANyxGameMode::ClaimPawnAuthority(APlayerController* NoPawnPC, const FVector
 		NewChar->Destroy();
 		return;
 	}
+
+	// NOTE: Deterministic GUID forcing disabled — HandshakeId differs per backend.
+	// See PostLogin comment for details.
 
 	// ── SwapPlayerControllers (NoPawnPC → NewPC) ──
 	// ANoPawnPlayerController has Player==nullptr (engine doesn't set it for
@@ -692,4 +847,58 @@ bool ANyxGameMode::IsProxyServer() const
 	// If this flag is present, we're a proxy — not a real game server.
 	return FParse::Param(FCommandLine::Get(), TEXT("ProxyGameServers"))
 		|| FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers="));
+}
+
+// ─── Seamless Migration: Deterministic GUID Helpers ────────────────
+
+FNetworkGUID ANyxGameMode::MakeMigrationGUID(uint32 HandshakeId, uint8 Slot)
+{
+	// Compute a deterministic GUID that both Server-A and Server-B can derive
+	// independently from the stable ClientHandshakeId. This avoids any inter-server
+	// communication for GUID transfer.
+	//
+	// The NetIndex is placed in a high uint64 range (0x200000000000+) that can
+	// never collide with sequential GUIDs assigned from seeds (100000, 200000, etc.).
+	//
+	// Layout of NetIndex:
+	//   Bits 47-44: Slot (0=PC, 1=Pawn, 2-15 reserved for component GUIDs)
+	//   Bits 43-0:  HandshakeId (supports up to ~17 trillion unique clients)
+	//   Bit 48:     Always 1 (sentinel — separates from sequential range)
+	//
+	// CreateFromIndex(NetIndex, false) produces: ObjectId = NetIndex << 1
+	// → even number → IsDynamic() == true (required for spawned actors)
+	const uint64 NetIndex = 0x200000000000ULL
+		| (static_cast<uint64>(Slot) << 40)
+		| static_cast<uint64>(HandshakeId);
+	return FNetworkGUID::CreateFromIndex(NetIndex, false);
+}
+
+void ANyxGameMode::AssignMigrationGUID(AActor* Actor, uint32 HandshakeId, uint8 Slot)
+{
+	if (!Actor) return;
+
+	UNetDriver* NetDriver = GetWorld()->GetNetDriver();
+	if (!NetDriver) return;
+
+	TSharedPtr<FNetGUIDCache>& Cache = NetDriver->GetNetGuidCache();
+	if (!Cache.IsValid()) return;
+
+	const FNetworkGUID DesiredGUID = MakeMigrationGUID(HandshakeId, Slot);
+	const FNetworkGUID CurrentGUID = Cache->GetNetGUID(Actor);
+
+	if (CurrentGUID.IsValid())
+	{
+		if (CurrentGUID == DesiredGUID)
+		{
+			// Already assigned the correct migration GUID
+			return;
+		}
+		// Remove auto-assigned GUID so RegisterNetGUID_Server won't hit check()
+		Cache->RemoveNetGUID(Actor);
+	}
+
+	Cache->RegisterNetGUID_Server(DesiredGUID, Actor);
+
+	UE_LOG(LogNyx, Log, TEXT("Migration GUID: Assigned %s to %s (HandshakeId=%u, Slot=%u)"),
+		*DesiredGUID.ToString(), *Actor->GetName(), HandshakeId, Slot);
 }

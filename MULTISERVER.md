@@ -770,3 +770,201 @@ Apply identical treatment to `ANyxCharacter`:
 | **Engine modification** | None | None |
 | **Plugin modification** | None | None |
 | **Game code changes** | Complex client-side hacks | 6 lines in Release + 4 lines in Claim |
+
+---
+
+# Seamless Migration: Implementation Progress (Test Runs 5–10)
+
+## Current Architecture
+
+```
+┌──────────┐       ┌───────────┐       ┌──────────┐
+│ Client   │◄─────►│   Proxy   │◄─────►│ Server-1 │  (West zone, X < 0)
+│          │       │ (port 7780)│◄─────►│ (port 7777, seed 100000)
+└──────────┘       └───────────┘       └──────────┘
+                         ▲
+                         │
+                         ▼
+                   ┌──────────┐
+                   │ Server-2 │  (East zone, X ≥ 0)
+                   │ (port 7778, seed 200000)
+                   └──────────┘
+                         ▲
+                         │
+                         ▼
+                   ┌─────────────┐
+                   │ SpacetimeDB │  (persistence + migration signal)
+                   └─────────────┘
+```
+
+Zone boundary at `X = 0`. Proxy assigns **different HandshakeIds per backend** (e.g., Server-1=123, Server-2=124 for the same player).
+
+## Migration Flow (Final Design)
+
+### 1. Release (Server-A — player leaving its zone)
+
+`NyxGameMode::ReleasePawnAuthority(PC, NyxChar)`:
+
+1. `SaveCharacterState(NyxChar)` → writes position/stats to SpacetimeDB (**this is the migration signal**)
+2. `OnPlayerLeft(NyxChar)` → removes from managed characters
+3. `PC->UnPossess()` → detach pawn
+4. `NyxChar->Destroy()` → destroy the pawn (proxy replicates destruction to client)
+5. Spawn `ANoPawnPlayerController` at the player's last position
+6. `SwapPlayerControllers(PC, NoPawnPC)` → transfers Player/NetConnection
+7. Transfer `ClientHandshakeId` to NoPawnPC
+8. Pre-populate `NoPawnTracking` with `bReleasedByUs = true` (prevents self-re-claim)
+
+### 2. SpacetimeDB Cross-Server Signal
+
+- Server-1's `SaveCharacterState()` updates `character_stats` table
+- Both servers subscribe to `SELECT * FROM character_stats`
+- Server-2's `NyxServerSubsystem::HandleCharacterStatsUpdate` detects a position change for a character **not** in its `ManagedCharacters` map → fires `OnExternalCharacterSaved` delegate
+- `NyxGameMode::HandleExternalCharacterSaved` checks if the saved position is in our zone → sets `bMigrationClaimPending = true`, stores `MigrationClaimPosition`
+- `CheckZoneBoundaries` consumes the flag in the NoPawnPC "outside our zone" branch
+
+### 3. Claim (Server-B — player arriving in its zone)
+
+`NyxGameMode::ClaimPawnAuthority(NoPawnPC, SpawnLocation, SpawnRotation)`:
+
+1. Get NoPawnPC's `NetConnection`
+2. Spawn new `ANyxCharacter` at the crossing position
+3. Spawn new `APlayerController`
+4. Transfer `ClientHandshakeId` to new PC
+5. Set `NoPawnPC->Player = NetConn` (required for SwapPlayerControllers)
+6. `SwapPlayerControllers(NoPawnPC, NewPC)` → proxy detects the swap
+7. `NewPC->InitPlayerState()` / `NewPC->Possess(NewChar)` / `PostLogin(NewPC)`
+8. Set position, `ServerName`, `ZoneName`, grace period
+9. Clean up NoPawnPC tracking, destroy NoPawnPC
+
+### 4. Proxy Finalization
+
+Requires **both** signals before finalizing:
+
+- `ReceivedReassignedNoPawnPlayerController` (from Server-A's swap)
+- `ReceivedReassignedGamePlayerController` (from Server-B's swap)
+
+→ `FinalizePlayerControllerReassignment` updates primary player mapping and route states (`PendingReassign` → `ConnectedPrimary`).
+
+## NoPawnPC Tracking State Machine
+
+```
+NoPawnPC appears (via proxy child connection)
+  │
+  ├─ bReleasedByUs = true?
+  │    YES → We released this player. Block all claims.
+  │           After 8s: clear flag.
+  │           Outside our zone: safe to ignore.
+  │
+  ├─ bMigrationClaimPending = true? (SpacetimeDB signal)
+  │    YES → AND !bReleasedByUs AND bPositionHasMoved?
+  │           → CLAIM at MigrationClaimPosition (clamped to our zone)
+  │
+  ├─ In our zone, transition (was outside → now inside)?
+  │    After 2s grace → CLAIM at current position
+  │
+  └─ In our zone, settled (always inside, position moved)?
+       After 4s grace → CLAIM at current position
+```
+
+## Test Run Results
+
+### Test 5 — Out-of-zone spawn
+
+**Problem**: After migration, the new character spawned at the default PlayerStart, outside Server-B's zone, causing immediate bounce-back.
+**Fix**: PostLogin position clamping — if spawned position is outside our zone, clamp to boundary.
+**Status**: ✅ Fixed
+
+### Test 6–7 — Server-1 re-claim
+
+**Problem**: After releasing, Server-1's NoPawnPC position briefly bounced back into its zone (proxy route change), triggering a re-claim.
+**Fix**: `bReleasedByUs` flag in `FNoPawnMigrationTracking`. Server never re-claims a NoPawnPC that it released. Flag clears after 8 seconds.
+**Status**: ✅ Fixed
+
+### Test 8 — Position sync deadlock (proxy stops updating NoPawnPC)
+
+**Problem**: Server-2 never claimed because the NoPawnPC's position never moved into its zone. After Server-1 releases (destroys the pawn), the proxy has no primary PC pawn to derive the NoPawnPC's position from.
+
+**Technical detail**: `PrepareStateForRelevancy()` calls `SetRemoteViewTarget()` using the primary PC's `GetPlayerViewPoint()`. With no pawn, there's no viewpoint. The NoPawnPC position freezes at its proxy-side connection position (typically far from the actual crossing point).
+
+Additionally, the proxy's `SetRemoteViewTarget` has an optimization:
+```cpp
+if (LastViewTargetPos.Equals(ViewTargetPos)) return;
+```
+A standing-still player produces zero position updates — indistinguishable from a released server. This makes stale-position detection impossible.
+
+**Fix**: Replaced all position-based / time-based detection with SpacetimeDB coordination.
+**Status**: ✅ Fixed
+
+### Test 9 — False positive timeout claim
+
+**Problem**: Added a 10-second timeout claim (if `bPositionHasMoved` and 10s since first seen, claim). Server-2 claimed at 03:17:49 (10s after NoPawnPC first appeared) while the player was still in the **west** zone. Server-1 didn't release until 7 seconds later.
+
+**Root cause**: NoPawnPCs exist from **proxy connection time**, not migration time. The proxy establishes a child connection to all backends at initial login. The NoPawnPC has been receiving position updates from Server-1's primary PC pawn the entire time. `bPositionHasMoved = true` immediately, and the 10s timeout counted from connection time.
+
+**Fix**: Removed timeout approach. Replaced with SpacetimeDB coordination.
+**Status**: ✅ Fixed
+
+### Test 10 — SpacetimeDB coordination works! (but client-side issue)
+
+**Server-side result**: ✅ WORKING PERFECTLY
+- Server-1 releases at X=208 at 03:52:08
+- SpacetimeDB notifies Server-2 within **0.06 seconds**
+- Server-2 claims within **0.5 seconds** at the crossing position (208, 290, 98)
+- Server-1 does NOT re-claim (`bReleasedByUs` held, cleared after 8s)
+- No false positives
+
+**Client-side result**: ❌ HUD disappears, camera goes underground ~5-10s after migration
+
+**Client-side root cause**:
+1. Client has TWO NyxCharacters simultaneously — `NyxCharacter_0` (from Server-1, with `PC_1`) and `NyxCharacter_1` (from Server-2, with `PC_2`)
+2. `NyxCharacter_0` is **never** explicitly destroyed on the client (proxy channel not yet closed)
+3. At +5s after claim: `SetReplicates called on actor 'NyxCharacter_1' that is not valid for having its role modified` — the proxy's `AddNetworkActor()` treats the character as a locally-spawned authority actor and calls `SetReplicates(false)`, disrupting the PC→Pawn link
+4. HUD's `PC->GetPawn()` returns null → shows "N/A"
+5. Camera view target lost → camera falls underground
+
+**Fix applied (3 changes, untested)**:
+
+1. **`NyxHUD.cpp` — Resilient character discovery**: 3-tier fallback instead of just `PC->GetPawn()`:
+   - Try owning PC's pawn (fast path)
+   - Try all local PCs' pawns (catches PC swap)
+   - `TActorIterator<ANyxCharacter>` for locally controlled one (last resort)
+
+2. **`NyxCharacter.cpp` — Camera/input integrity timer**: Every 1s (starting 2s after setup), checks:
+   - PC→Pawn link → repairs via `SetPawn(this)`
+   - Camera view target → repairs via `SetViewTarget(this)`
+   - Controller link → repairs via `ClientRestart(this)` + `SetViewTarget(this)`
+
+3. **`NyxCharacter.cpp` — Old character cleanup**: When new NyxCharacter completes input setup, iterates all existing NyxCharacters and hides/disables old ones (`SetActorHiddenInGame(true)`, `SetActorEnableCollision(false)`, clears `bInputSetupComplete`)
+
+**Status**: Server-side ✅, Client-side fix needs Test Run 11 validation
+
+## Modified Files (all uncommitted, since 4c1ce1a)
+
+| File | Key Changes |
+|------|-------------|
+| `Source/Nyx/Core/NyxGameMode.h` | `HandleExternalCharacterSaved()`, `bMigrationClaimPending`, `MigrationClaimPosition`, `FNoPawnMigrationTracking` with `bReleasedByUs` |
+| `Source/Nyx/Core/NyxGameMode.cpp` | SpacetimeDB delegate binding in `StartPlay`, `HandleExternalCharacterSaved()` implementation, SpacetimeDB claim path in `CheckZoneBoundaries`, full `ReleasePawnAuthority` / `ClaimPawnAuthority` |
+| `Source/Nyx/Server/NyxServerSubsystem.h` | `FOnExternalCharacterSaved` delegate, `OnExternalCharacterSaved` property |
+| `Source/Nyx/Server/NyxServerSubsystem.cpp` | External character save detection in `HandleCharacterStatsUpdate` (fires when position changes for character not in `ManagedCharacters`) |
+| `Source/Nyx/Player/NyxCharacter.h` | `CheckCameraAndInputIntegrity()`, `CameraIntegrityTimerHandle` |
+| `Source/Nyx/Player/NyxCharacter.cpp` | Camera integrity timer start, old character cleanup in `SetupPlayerInputComponent`, `CheckCameraAndInputIntegrity()` implementation, `EngineUtils.h` include |
+| `Source/Nyx/UI/NyxHUD.cpp` | 3-tier NyxCharacter discovery fallback, `EngineUtils.h` include |
+
+## Known Issues / Next Steps
+
+1. **Test Run 10 client-side fix is untested** — Camera integrity timer + old character cleanup + HUD resilience need validation in Test Run 11
+2. **`SetReplicates` warning** — The proxy's `AddNetworkActor` calls `SetReplicates(false)` on actors with `ROLE_Authority`. After migration, the new NyxCharacter may briefly appear as `ROLE_Authority` before the proxy sets the replicated role. The integrity timer works around this but doesn't prevent the warning itself.
+3. **Dual-character persistence** — The old NyxCharacter from Server-1 is hidden but not destroyed (only the proxy can destroy replicated actors via channel close). If the proxy never closes the old channel, the hidden actor persists indefinitely. Monitor for memory/actor leaks.
+4. **Reverse migration** — Walking back across the boundary (east → west) not yet tested. Same flow should work symmetrically but needs validation.
+5. **Edge cases** — Player standing exactly on X=0, rapid back-and-forth crossing, network latency spikes during migration.
+6. **Deterministic GUID approach abandoned** — HandshakeId differs per backend, so GUID forcing doesn't work across servers. Current approach uses `SwapPlayerControllers` + client-side fallbacks instead.
+
+## Launch Configuration
+
+```powershell
+# launch_test.ps1 starts:
+# Server-1: port 7777, west zone, NyxGuidSeed=100000, DedicatedServerId=server-1
+# Server-2: port 7778, east zone, NyxGuidSeed=200000, DedicatedServerId=server-2
+# Proxy:    port 7780, connects to both servers
+# Client:   connects to proxy at 127.0.0.1:7780
+```

@@ -4,7 +4,9 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
+#include "Misc/NetworkGuid.h"
 #include "Nyx/Data/NyxTypes.h"
+#include "ModuleBindings/Types/CharacterStatsType.g.h"
 #include "NyxGameMode.generated.h"
 
 class ANyxCharacter;
@@ -149,6 +151,20 @@ private:
 	 */
 	void ClaimPawnAuthority(APlayerController* NoPawnPC, const FVector& SpawnLocation, const FRotator& SpawnRotation);
 
+	// ──── Seamless Migration: Deterministic GUID Forcing ────
+	//
+	// Both servers compute the same deterministic GUID for a given ClientHandshakeId.
+	// Server-A assigns this GUID at PostLogin; Server-B forces the same GUID on claim.
+	// Combined with EChannelCloseReason::Migrated, the proxy reuses the same
+	// proxy-side object, and the client sees zero interruption.
+
+	/** Compute a deterministic migration GUID from HandshakeId and slot index.
+	 *  Slot 0 = PlayerController, Slot 1 = Pawn. */
+	static FNetworkGUID MakeMigrationGUID(uint32 HandshakeId, uint8 Slot);
+
+	/** Assign a deterministic migration GUID to an actor (replaces any auto-assigned GUID). */
+	void AssignMigrationGUID(AActor* Actor, uint32 HandshakeId, uint8 Slot);
+
 	/** Tracks players currently being transferred (prevent double-transfer). */
 	TSet<APlayerController*> PlayersBeingTransferred;
 
@@ -167,11 +183,28 @@ private:
 		/** Whether the NoPawnPC position was ever observed outside our zone. */
 		bool bWasEverOutsideOurZone = false;
 
+		/** Whether the NoPawnPC position has moved significantly from its initial value.
+		 *  Proxy-setup NoPawnPCs start at (0,0,0) or the boundary. Real migration
+		 *  NoPawnPCs receive position updates from the proxy as it syncs the player's
+		 *  actual world position. We use this to distinguish the two cases. */
+		bool bPositionHasMoved = false;
+
+		/** True if this NoPawnPC was created by our own ReleasePawnAuthority().
+		 *  Prevents the releasing server from immediately re-claiming when
+		 *  the proxy bounces the NoPawnPC position back into our zone. */
+		bool bReleasedByUs = false;
+
+		/** The first position we observed for this NoPawnPC. */
+		FVector InitialPosition = FVector::ZeroVector;
+
 		/** When the NoPawnPC most recently entered our zone (0 = not currently in zone). */
 		double EnteredOurZoneTime = 0.0;
 
 		/** When we first detected this NoPawnPC. */
 		double FirstSeenTime = 0.0;
+
+		/** When we released this NoPawnPC (set by ReleasePawnAuthority). 0 = not released by us. */
+		double ReleasedByUsTime = 0.0;
 	};
 
 	/** Migration tracking for each NoPawnPC we monitor. */
@@ -187,10 +220,35 @@ private:
 	 *  causing a ghost pawn on the client that steals possession. */
 	static constexpr float NoPawnClaimGracePeriodSeconds = 2.0f;
 
-	/** Grace period for NoPawnPCs that were ALWAYS in our zone (spawn-in-wrong-zone case).
-	 *  Must be >= TransferGracePeriodSeconds so the primary server releases first.
-	 *  0.5s buffer to handle network timing. */
-	static constexpr float InitialNoPawnGracePeriodSeconds = 5.5f;
+	/** Grace period for NoPawnPCs that started in our zone and whose position has moved.
+	 *  Longer than transition grace to give the primary server time to detect the
+	 *  boundary crossing and release. */
+	static constexpr float SettledNoPawnClaimGracePeriodSeconds = 4.0f;
+
+	// ──── SpacetimeDB Migration Signal ────
+	//
+	// The proxy cannot reliably signal Server-B when Server-A releases.
+	// Position-based detection has a deadlock: after Server-A releases,
+	// the proxy stops syncing NoPawnPC positions (no pawn viewpoint),
+	// but stale-position detection has false positives (standing player
+	// also produces zero position updates due to proxy's Equals optimization).
+	//
+	// Solution: use SpacetimeDB as the coordination mechanism.
+	// When Server-A releases, it saves the character state (SaveCharacterState).
+	// Both servers subscribe to character_stats. Server-B receives the update,
+	// sees the saved position is in its zone, and claims the NoPawnPC.
+
+	/** Called when SpacetimeDB notifies us that another server saved a character.
+	 *  Checks if the saved position is in our zone and triggers a migration claim. */
+	UFUNCTION()
+	void HandleExternalCharacterSaved(const FCharacterStatsType& Stats);
+
+	/** True when SpacetimeDB signals that a character was saved with a position
+	 *  in our zone by another server. Consumed by CheckZoneBoundaries. */
+	bool bMigrationClaimPending = false;
+
+	/** The position from the SpacetimeDB save (crossing position). */
+	FVector MigrationClaimPosition = FVector::ZeroVector;
 
 	FTimerHandle ZoneCheckTimerHandle;
 };

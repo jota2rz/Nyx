@@ -303,6 +303,18 @@ void UNyxServerSubsystem::HandleCharacterStatsUpdate(const FEventContext& Contex
 			UE_LOG(LogNyxServer, Log, TEXT("%s leveled up to %u!"), *NewRow.DisplayName, NewRow.Level);
 		}
 	}
+	else
+	{
+		// Character not managed by us — another server saved this character.
+		// Could be a migration signal: the other server released the player
+		// and saved their last position before handing off.
+		if (OldRow.SavedPosX != NewRow.SavedPosX || OldRow.SavedPosY != NewRow.SavedPosY || OldRow.SavedPosZ != NewRow.SavedPosZ)
+		{
+			UE_LOG(LogNyxServer, Log, TEXT("External character save detected: %s pos=(%.0f,%.0f,%.0f) zone=%s"),
+				*NewRow.DisplayName, NewRow.SavedPosX, NewRow.SavedPosY, NewRow.SavedPosZ, *NewRow.SavedZoneId);
+			OnExternalCharacterSaved.Broadcast(NewRow);
+		}
+	}
 }
 
 // ─── Combat ────────────────────────────────────────────────────────

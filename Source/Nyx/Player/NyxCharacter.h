@@ -211,8 +211,12 @@ private:
 	/** Deferred input setup for proxy-connected clients. */
 	void RetryInputSetup();
 
+	/** Periodic check to re-establish camera/input if the proxy disrupts the PC→Pawn link. */
+	void CheckCameraAndInputIntegrity();
+
 	/** True once SetupPlayerInputComponent has been called successfully. */
 	bool bInputSetupComplete = false;
 
 	FTimerHandle InputRetryTimerHandle;
+	FTimerHandle CameraIntegrityTimerHandle;
 };

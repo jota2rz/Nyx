@@ -112,6 +112,14 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Nyx|Server")
 	FOnCharacterLoaded OnCharacterLoaded;
 
+	/** Fired when SpacetimeDB notifies us that a character we DON'T manage was saved.
+	 *  This happens when another server saves a character during migration release.
+	 *  The GameMode uses this to detect a pending migration claim. */
+	DECLARE_DYNAMIC_MULTICAST_DELEGATE_OneParam(FOnExternalCharacterSaved, const FCharacterStatsType&, Stats);
+
+	UPROPERTY(BlueprintAssignable, Category = "Nyx|Server")
+	FOnExternalCharacterSaved OnExternalCharacterSaved;
+
 	// ──── Config ────
 
 	/** This server's zone ID. */
