@@ -520,3 +520,119 @@ Our current approach (spawn new PC, `OnRep_Controller` re-bind) is the correct f
 | `NetDriver.h` | 1781 | `NotifyActorDestroyed` — ENGINE_API, takes CloseReason |
 | `CoreMiscDefines.h` | 620 | `#define UE_WITH_REMOTE_OBJECT_HANDLE 0` |
 | `Actor.cpp` | 1338 | Only place `EChannelCloseReason::Migrated` is set (gated by DSTM) |
+
+---
+
+# DSTM Code Audit: Is It Actually Complete?
+
+**No.** An Epic developer reportedly confirmed the DSTM system is incomplete. After auditing every line of the gated code, the developer was right: the framework is architecturally complete but **the inter-server network transport is entirely missing** from shipped UE 5.7 source.
+
+## What IS Complete (and well-implemented)
+
+The on-server lifecycle works end-to-end:
+
+| Component | File | Status |
+|-----------|------|--------|
+| Object serialization | `RemoteObjectSerialization.cpp` | ✅ `FArchiveRemoteObjectWriter`/`Reader` — fully functional |
+| Migration archives | `Archive.h` line 340 | ✅ `IsMigratingRemoteObjects()` flag + `SetMigratingRemoteObjects()` |
+| Transfer queue | `RemoteObjectTransfer.cpp` lines 118–319 | ✅ `TickSubsystem()` — priority arbitration, multi-server commit |
+| PostMigrate on send | `RemoteObjectTransfer.cpp` line 241 | ✅ Calls `PostMigrate()` on every sent object |
+| PostMigrate on receive | `RemoteObjectTransfer.cpp` line 914 | ✅ Calls `PostMigrate()` after deserialization |
+| AActor::PostMigrate | `Actor.cpp` lines 1290–1360 | ✅ Removes from world, notifies replication, disables ticks |
+| APlayerController::PostMigrate | `PlayerController.cpp` lines 5028–5125 | ✅ NoPawnPC swap, connection rebind |
+| APlayerController::Serialize | `PlayerController.cpp` lines 5202–5224 | ✅ Saves/restores `CachedConnectionPlayerId` |
+| Remote object handles | `ObjectHandle.h` line 42 | ✅ Tagged-pointer union for `FRemoteObjectHandlePrivate` |
+| Ownership tracking | `RemoteObject.h` lines 202–221 | ✅ `IsOwned()`, `IsRemote()`, `GetOwnerServerId()`, `ChangeOwnerServerId()` |
+| Remote object stubs | `RemoteObject.h` line 128 | ✅ `FRemoteObjectStub` with all metadata fields |
+| Per-class migration serialization | Various | ✅ `UActorComponent`, `USceneComponent`, `UPrimitiveComponent`, `UCharacterMovementComponent`, `UShapeComponent`, `UPhysicsConstraintComponent` |
+
+## What Is MISSING (The Critical Gap)
+
+### 1. No Network Transport — Delegates Default to Disk I/O
+
+`SendRemoteObject()` just invokes a delegate:
+```cpp
+// RemoteObjectTransfer.cpp:746
+void SendRemoteObject(const FMigrateSendParams& Params) {
+    RemoteObjectTransferDelegate.Execute(Params);  // <-- who handles this?
+}
+```
+
+The default binding (`RemoteObject.cpp` line 319):
+```cpp
+if (!RemoteObjectTransferDelegate.IsBound())
+    RemoteObjectTransferDelegate.BindStatic(&UE::RemoteObject::Serialization::Disk::SaveObjectToDisk);
+
+if (!RequestRemoteObjectDelegate.IsBound())
+    RequestRemoteObjectDelegate.BindLambda([](/* ... */) {
+        UE::RemoteObject::Serialization::Disk::LoadObjectFromDisk(MigrationContext);
+    });
+```
+
+All four transport delegates default to **local disk read/write**:
+
+| Delegate | Default | Purpose |
+|----------|---------|---------|
+| `RemoteObjectTransferDelegate` | `SaveObjectToDisk` | Send serialized object to remote server |
+| `RequestRemoteObjectDelegate` | `LoadObjectFromDisk` | Request object from owning server |
+| `StoreRemoteObjectDataDelegate` | `SaveObjectToDisk` | Persist unreachable objects |
+| `RestoreRemoteObjectDataDelegate` | `LoadObjectFromDisk` | Restore from persistence |
+
+**Nobody in the shipped source ever rebinds these delegates to network I/O.** Verified by searching the entire engine + all plugins for `RemoteObjectTransferDelegate.Bind` — only the one default disk binding exists.
+
+### 2. MultiServerReplication Plugin Has ZERO DSTM Integration
+
+The plugin provides inter-server beacon connections (`AMultiServerBeaconClient`, `UMultiServerNode`, `UMultiServerPeerConnection`) that could theoretically transport objects. But it **never** references:
+
+- `RemoteObjectTransferDelegate` or `RequestRemoteObjectDelegate`
+- `FRemoteObjectTransferQueue` or `FRemoteObjectData`
+- `TransferObjectOwnershipToRemoteServer` or `MigrateObject`
+- `PostMigrate` — not even a single `#include` of `RemoteObjectTransfer.h`
+
+The plugin's only interaction with the remote object system is calling `SetUsingRemoteObjectReferences()` based on the compile-time define:
+```cpp
+// MultiServerBeaconClient.cpp:138
+NetDriver->SetUsingRemoteObjectReferences(!!UE_WITH_REMOTE_OBJECT_HANDLE && GMultiServerAllowRemoteObjectReferences);
+```
+
+Since `UE_WITH_REMOTE_OBJECT_HANDLE` = 0, this always evaluates to `false`.
+
+### 3. No `FRemoteServerConnection` Class
+
+The delegate-based design assumes some external code provides actual inter-server data transport. No such class (`FRemoteServerConnection`, `FDSTMTransport`, etc.) exists in the shipped source. There is presumably an internal-only Epic plugin that binds these delegates to actual network communication.
+
+### 4. Empty Request Lifecycle Hooks
+
+```cpp
+// RemoteObjectTransfer.cpp:115
+void BeginRequest() final { }
+void EndRequest(bool bTransactionCommitted) final { }
+```
+
+Per-transaction setup/teardown hooks are stubbed as empty bodies.
+
+### 5. Referenced File Does Not Exist
+
+`RemoteObject.h` comments reference `DstmPhysicsMigration.cpp` — this file does not exist in shipped UE 5.7. It likely exists in an unreleased internal plugin.
+
+## Even With Full Engine Rebuild — Would It Work?
+
+**No.** Setting `UE_WITH_REMOTE_OBJECT_HANDLE 1` and rebuilding would:
+
+1. ✅ Enable `PostMigrate()` on `APlayerController` — connection rebinding logic would compile and run
+2. ✅ Enable `Serialize()` migration path — `CachedConnectionPlayerId` would be saved/restored
+3. ✅ Enable the transfer queue — `FRemoteObjectTransferQueue::TickSubsystem()` would process requests
+4. ❌ **Still serialize to disk** — `SendRemoteObject()` would call `SaveObjectToDisk` since nobody rebinds the delegate
+5. ❌ **Still no inter-server transport** — Server-B would never receive the serialized object because there's no network path
+6. ❌ **ABI changes everywhere** — `FObjectHandle` becomes `FRemoteObjectHandlePrivate` (tagged pointer), changing layout of every `TObjectPtr<>` property in the engine
+
+**The DSTM framework is a well-designed abstraction layer waiting for a transport implementation that Epic hasn't shipped publicly.** The `PostMigrate` callbacks, serialization paths, and transfer queue are all production-quality code — they just have nothing to talk through.
+
+## What This Means For Us
+
+The Discord comment about DSTM being "incomplete" likely refers to exactly this: the framework is there but the networking glue isn't. This confirms our earlier conclusion:
+
+1. **We cannot use DSTM** — not because the lifecycle code is broken, but because there's no transport
+2. **Even building from source wouldn't help** — we'd still need to write the transport layer ourselves (binding the delegates to beacon connections)
+3. **Our manual SwapPlayerControllers approach is the correct non-DSTM path** — the proxy handles it properly
+4. **Focus on client-side robustness** — hide the PC swap from the user via `OnRep_Controller` state transfer, camera continuity, ghost pawn suppression
