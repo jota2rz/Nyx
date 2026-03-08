@@ -10,7 +10,7 @@
 #include "NyxGameMode.generated.h"
 
 class ANyxCharacter;
-class UNyxDSTMSubsystem;
+class UDSTMSubsystem;
 
 /**
  * Nyx game mode — Option 4 architecture.
