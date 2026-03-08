@@ -16,9 +16,15 @@
 #include "UObject/ConstructorHelpers.h"
 #include "Nyx/Server/NyxServerSubsystem.h"
 #include "Engine/World.h"
+#include "Engine/Engine.h"
+#include "Engine/LocalPlayer.h"
 #include "TimerManager.h"
 #include "DrawDebugHelpers.h"
 #include "EngineUtils.h"
+#include "GameFramework/PlayerController.h"
+#include "Nyx/UI/NyxHUD.h"
+#include "UObject/UnrealType.h"
+#include "Engine/Level.h"
 
 ANyxCharacter::ANyxCharacter(const FObjectInitializer& ObjectInitializer)
 	: Super(ObjectInitializer.SetDefaultSubobjectClass<UNyxCharacterMovementComponent>(
@@ -233,6 +239,9 @@ void ANyxCharacter::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
 	GetWorld()->GetTimerManager().ClearTimer(InputRetryTimerHandle);
 	GetWorld()->GetTimerManager().ClearTimer(CameraIntegrityTimerHandle);
+
+	LastKnownPC = nullptr;
+
 	Super::EndPlay(EndPlayReason);
 }
 
@@ -268,17 +277,53 @@ void ANyxCharacter::OnRep_Controller()
 	// from the initial setup, but the NEW PC has no view target, no input bindings,
 	// and no HUD. We must detect this "controller changed to a new local PC" case
 	// and re-establish everything.
+	//
+	// CRITICAL: If this character already had input setup AND just lost its controller
+	// (GetController() == None), this is the OLD character being "retired" during
+	// migration. The server closed its channel with EChannelCloseReason::Migrated,
+	// keeping it alive on the client, but the PC swap (PC→NoPawnPC) destroyed the
+	// old controller reference. We must NOT rebind — the new character (from the
+	// destination server) will handle setup with its own PC. Without this guard the
+	// old character steals the new PC via GetFirstPlayerController(), causing dual-PC
+	// confusion, camera loss, and CameraIntegrity cascading failures.
 	if (!PC || !PC->IsLocalController())
 	{
-		// Try the world's first PC — proxy may not have set controller ownership yet
+		if (bInputSetupComplete)
+		{
+			// Old character lost its controller during migration — let it go.
+			// CRITICAL: Stop CameraIntegrity timer NOW. Without this, the timer
+			// fires in the ~300ms gap before the new character spawns and hides
+			// this character, causing it to rebind to the old PC and steal it
+			// from the new character that's about to arrive.
+			GetWorld()->GetTimerManager().ClearTimer(CameraIntegrityTimerHandle);
+			bInputSetupComplete = false; // Mark as retired so nothing else tries to repair
+			UE_LOG(LogNyx, Log, TEXT("OnRep_Controller: %s lost controller (migration release) — NOT rebinding. Stopped CameraIntegrity timer."),
+				*GetName());
+			return;
+		}
+		// New character: proxy may not have set controller ownership yet.
 		PC = GetWorld()->GetFirstPlayerController();
 	}
 
 	if (PC && PC->IsLocalController())
 	{
+		// Cache this PC as the last known valid controller for CameraIntegrity
+		// fallback recovery. The UPROPERTY TObjectPtr keeps the PC in memory
+		// even after the proxy's destruction chain garbage-marks it.
+		// We do NOT AddToRoot — MarkAsGarbage has check(!IsRooted()) which
+		// would crash. Instead, we let the garbage happen and recover in
+		// CheckCameraAndInputIntegrity by ClearGarbage + re-registering.
+		if (LastKnownPC != PC)
+		{
+			LastKnownPC = PC;
+			UE_LOG(LogNyx, Warning, TEXT("OnRep_Controller: Cached %s for migration recovery"),
+				*PC->GetName());
+		}
+
 		if (bInputSetupComplete)
 		{
 			// Controller changed AFTER initial input setup — this is a migration swap.
+			// The actual controller (not a fallback) was set on us by the proxy.
 			// Force full re-initialization on the new PC.
 			UE_LOG(LogNyx, Log, TEXT("OnRep_Controller: Post-migration re-bind for %s → new PC=%s"),
 				*GetName(), *GetNameSafe(PC));
@@ -578,6 +623,12 @@ void ANyxCharacter::RetryInputSetup()
 		UE_LOG(LogNyx, Log, TEXT("RetryInputSetup: Forcing PawnClientRestart for %s (Controller=%s)"),
 			*GetName(), *GetNameSafe(PC));
 
+		// Cache this PC for CameraIntegrity fallback
+		if (LastKnownPC != PC)
+		{
+			LastKnownPC = PC;
+		}
+
 		// Ensure the correct controller acknowledges this pawn
 		if (GetController() != PC)
 		{
@@ -614,26 +665,225 @@ void ANyxCharacter::CheckCameraAndInputIntegrity()
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->IsLocalController())
 	{
-		// Controller was lost (proxy reassignment). Re-bind to the local PC.
-		PC = GetWorld()->GetFirstPlayerController();
-		if (!PC || !PC->IsLocalController())
+		// Controller was lost. During migration, the proxy finalization can disrupt
+		// the PC→Pawn link ~5s after the new character spawns. The old character
+		// won't reach here because: (a) OnRep_Controller clears bInputSetupComplete
+		// and stops this timer, and (b) it's hidden, so CameraIntegrity exits above.
+		//
+		// Strategy: Use LastKnownPC — the PC that was last successfully bound to
+		// this character. On the client, GetNetConnection() returns nullptr for ALL
+		// PCs and the iterator order is unpredictable, making it impossible to
+		// distinguish which PC is the "active" one from Server-2. We cache the
+		// correct PC in OnRep_Controller when the proxy first sets it.
+		//
+		// If LastKnownPC is stale (e.g. destroyed or no longer local after proxy
+		// finalization), search for any local PC. At this point the old character
+		// RECOVERY STRATEGY — the proxy's finalization at ~5s post-migration:
+		//   1. Calls SetReplicates on the character (warning logged)
+		//   2. Destroys/PendingKills PC_2 (severs Controller link)
+		//   3. Clears PC_2->Player (breaks IsLocalController())
+		//   BUT ULocalPlayer still references PC_2 — so we can restore it.
+		//
+		// Step 1: Get the authoritative PC from ULocalPlayer (survives proxy damage)
+		// Step 2: If it's PendingKill, clear the flag (our UPROPERTY prevents GC anyway)
+		// Step 3: If its Player ref was cleared, restore the bidirectional LP↔PC link
+		// Step 4: Use the restored PC for rebinding
+
+		ULocalPlayer* LP = GEngine ? GEngine->GetFirstGamePlayer(GetWorld()) : nullptr;
+		APlayerController* LPPC = LP ? LP->PlayerController : nullptr;
+
+		UE_LOG(LogNyx, Warning, TEXT("CameraIntegrity: %s controller lost — Recovery diag:"), *GetName());
+		UE_LOG(LogNyx, Warning, TEXT("  LastKnownPC: Ptr=%d ObjValid=%d Name=%s"),
+			(LastKnownPC != nullptr), (LastKnownPC != nullptr) ? ::IsValid(LastKnownPC.Get()) : false,
+			(LastKnownPC != nullptr) ? *LastKnownPC->GetName() : TEXT("null"));
+		UE_LOG(LogNyx, Warning, TEXT("  ULocalPlayer: %s  LP->PC=%s  LPPC_Valid=%d"),
+			LP ? *LP->GetName() : TEXT("null"),
+			LPPC ? *LPPC->GetName() : TEXT("null"),
+			LPPC ? ::IsValid(LPPC) : false);
+
+		if (LPPC)
 		{
-			// Try all PCs
-			for (FConstPlayerControllerIterator It = GetWorld()->GetPlayerControllerIterator(); It; ++It)
+			// ULocalPlayer still knows the correct PC. Restore it.
+			// The proxy's destruction chain does (in UWorld::DestroyActor):
+			//   1. bActorIsBeingDestroyed = true (blocks ALL RPCs + network ops)
+			//   2. OnNetCleanup → Player=NULL, NetConnection=NULL
+			//   3. Destroyed() callback → EndPlay → AController::UnPossess()
+			//   4. RemoveActor (removes from level actor list + network list)
+			//   5. UnregisterAllComponents (input, camera, tick all disabled)
+			//   6. MarkAsGarbage + MarkComponentsAsGarbage (GC flags)
+			//   7. RegisterAllActorTickFunctions(false) (tick functions disabled)
+			// We must undo ALL of these steps to fully restore the PC.
+
+			if (!::IsValid(LPPC) || LPPC->IsActorBeingDestroyed())
 			{
-				APlayerController* TestPC = It->Get();
-				if (TestPC && TestPC->IsLocalController())
+				// ── Step 1: Clear Garbage flags ──
+				if (!::IsValid(LPPC))
 				{
-					PC = TestPC;
-					break;
+					LPPC->ClearGarbage();
 				}
+
+				// ── Step 2: Clear bActorIsBeingDestroyed via UProperty reflection ──
+				// This is THE critical flag — while set, ALL RPCs are rejected
+				// ("actor is being destroyed"), NetworkObjectList rejects re-add,
+				// and the CMC can't send ServerMove (causing 96-move limit).
+				// It's a private UPROPERTY bitfield, so we use reflection to clear it.
+				if (LPPC->IsActorBeingDestroyed())
+				{
+					FBoolProperty* DestroyProp = CastField<FBoolProperty>(
+						AActor::StaticClass()->FindPropertyByName(TEXT("bActorIsBeingDestroyed")));
+					if (DestroyProp)
+					{
+						DestroyProp->SetPropertyValue_InContainer(LPPC, false);
+						UE_LOG(LogNyx, Warning, TEXT("  Cleared bActorIsBeingDestroyed on %s (now BeingDestroyed=%d)"),
+							*LPPC->GetName(), LPPC->IsActorBeingDestroyed());
+					}
+				}
+
+				// ── Step 3: ClearGarbage on ALL components ──
+				for (UActorComponent* Comp : LPPC->GetComponents())
+				{
+					if (Comp && !::IsValid(Comp))
+					{
+						Comp->ClearGarbage();
+					}
+				}
+
+				// ── Step 4: ClearGarbage + clear destroy on owned actors ──
+				auto RestoreOwnedActor = [](AActor* OwnedActor)
+				{
+					if (!OwnedActor) return;
+					if (!::IsValid(OwnedActor))
+					{
+						OwnedActor->ClearGarbage();
+					}
+					if (OwnedActor->IsActorBeingDestroyed())
+					{
+						FBoolProperty* Prop = CastField<FBoolProperty>(
+							AActor::StaticClass()->FindPropertyByName(TEXT("bActorIsBeingDestroyed")));
+						if (Prop) Prop->SetPropertyValue_InContainer(OwnedActor, false);
+					}
+					for (UActorComponent* Comp : OwnedActor->GetComponents())
+					{
+						if (Comp && !::IsValid(Comp))
+						{
+							Comp->ClearGarbage();
+						}
+					}
+				};
+				RestoreOwnedActor(LPPC->PlayerCameraManager);
+				RestoreOwnedActor(LPPC->MyHUD);
+
+				// ── Step 5: Re-add to level actor list ──
+				// DestroyActor calls RemoveActor which nulls the slot in
+				// Level->Actors and removes from ActorsForGC.
+				if (ULevel* ActorLevel = LPPC->GetLevel())
+				{
+					ActorLevel->TryAddActorToList(LPPC, /*bAddUnique=*/true);
+					UE_LOG(LogNyx, Warning, TEXT("  Re-added %s to level actor list"), *LPPC->GetName());
+				}
+
+				// ── Step 6: Re-register all components ──
+				// Now safe because bActorIsBeingDestroyed is cleared.
+				LPPC->RegisterAllComponents();
+				if (LPPC->PlayerCameraManager) LPPC->PlayerCameraManager->RegisterAllComponents();
+				if (LPPC->MyHUD) LPPC->MyHUD->RegisterAllComponents();
+
+				// ── Step 7: Re-enable tick functions ──
+				LPPC->RegisterAllActorTickFunctions(/*bRegister=*/true, /*bDoComponents=*/true);
+				if (LPPC->PlayerCameraManager)
+					LPPC->PlayerCameraManager->RegisterAllActorTickFunctions(true, true);
+
+				// ── Step 8: Re-add to network actor list ──
+				GetWorld()->AddNetworkActor(LPPC);
+
+				UE_LOG(LogNyx, Warning, TEXT("  Full recovery complete on %s (IsValid=%d, BeingDestroyed=%d)"),
+					*LPPC->GetName(), ::IsValid(LPPC), LPPC->IsActorBeingDestroyed());
+			}
+
+			// ── Step 9: Restore Player link ──
+			if (LPPC->Player == nullptr)
+			{
+				LPPC->Player = LP;
+				UE_LOG(LogNyx, Warning, TEXT("  Restored Player link: %s → %s"), *LPPC->GetName(), *LP->GetName());
+			}
+
+			if (LPPC->IsLocalController())
+			{
+				PC = LPPC;
+				LastKnownPC = PC;
+				UE_LOG(LogNyx, Warning, TEXT("  Recovered PC from ULocalPlayer: %s"), *PC->GetName());
+			}
+			else
+			{
+				UE_LOG(LogNyx, Warning, TEXT("  LPPC still not local after restore — IsLocalController=%d Player=%s"),
+					LPPC->IsLocalController(),
+					LPPC->Player ? *LPPC->Player->GetName() : TEXT("null"));
 			}
 		}
-	}
+		else if (LastKnownPC != nullptr)
+		{
+			// No LP->PC available, try our cached reference
+			if (!::IsValid(LastKnownPC.Get()) || LastKnownPC->IsActorBeingDestroyed())
+			{
+				if (!::IsValid(LastKnownPC.Get()))
+					LastKnownPC->ClearGarbage();
+				if (LastKnownPC->IsActorBeingDestroyed())
+				{
+					FBoolProperty* DestroyProp = CastField<FBoolProperty>(
+						AActor::StaticClass()->FindPropertyByName(TEXT("bActorIsBeingDestroyed")));
+					if (DestroyProp) DestroyProp->SetPropertyValue_InContainer(LastKnownPC.Get(), false);
+				}
+				for (UActorComponent* Comp : LastKnownPC->GetComponents())
+				{
+					if (Comp && !::IsValid(Comp))
+						Comp->ClearGarbage();
+				}
+				if (ULevel* ActorLevel = LastKnownPC->GetLevel())
+					ActorLevel->TryAddActorToList(LastKnownPC.Get(), true);
+				LastKnownPC->RegisterAllComponents();
+				LastKnownPC->RegisterAllActorTickFunctions(true, true);
+				GetWorld()->AddNetworkActor(LastKnownPC.Get());
+			}
+			if (LP && LastKnownPC->Player == nullptr)
+			{
+				LastKnownPC->Player = LP;
+			}
+			if (LastKnownPC->IsLocalController())
+			{
+				PC = LastKnownPC.Get();
+				UE_LOG(LogNyx, Warning, TEXT("  Recovered PC from LastKnownPC cache: %s"), *PC->GetName());
+			}
+		}
 
-	if (!PC || !PC->IsLocalController())
-	{
-		return; // No local PC available yet
+		if (!PC)
+		{
+			UE_LOG(LogNyx, Log, TEXT("CameraIntegrity: %s has no local controller — skipping repair this tick"),
+				*GetName());
+			return;
+		}
+
+		// After full recovery: if CameraManager or HUD are still null
+		// (not just garbage'd but actually destroyed), respawn them.
+		if (!PC->PlayerCameraManager)
+		{
+			PC->SpawnPlayerCameraManager();
+			UE_LOG(LogNyx, Warning, TEXT("  Respawned PlayerCameraManager for %s → %s"),
+				*PC->GetName(),
+				PC->PlayerCameraManager ? *PC->PlayerCameraManager->GetName() : TEXT("FAILED"));
+		}
+		if (!PC->MyHUD)
+		{
+			FActorSpawnParameters SpawnInfo;
+			SpawnInfo.Owner = PC;
+			SpawnInfo.ObjectFlags |= RF_Transient;
+			AHUD* NewHUD = GetWorld()->SpawnActor<ANyxHUD>(SpawnInfo);
+			if (NewHUD)
+			{
+				NewHUD->PlayerOwner = PC;
+				PC->MyHUD = NewHUD;
+				UE_LOG(LogNyx, Warning, TEXT("  Respawned HUD for %s → %s"), *PC->GetName(), *NewHUD->GetName());
+			}
+		}
 	}
 
 	bool bNeedsRepair = false;
@@ -660,7 +910,7 @@ void ANyxCharacter::CheckCameraAndInputIntegrity()
 		}
 	}
 
-	// If controller was lost, re-bind
+	// If controller was lost, re-bind (only if we found a PC that owns us)
 	if (GetController() != PC)
 	{
 		UE_LOG(LogNyx, Warning, TEXT("CameraIntegrity: Controller is %s, expected %s — repairing"),
@@ -671,6 +921,24 @@ void ANyxCharacter::CheckCameraAndInputIntegrity()
 		PC->ClientRestart(this);
 		PC->SetViewTarget(this);
 		SetupInputMappingContexts();
+
+		// The proxy's SetReplicates call may have changed our role to
+		// ROLE_SimulatedProxy, breaking CMC's client-side prediction.
+		// Restore AutonomousProxy so movement replication works correctly.
+		if (GetLocalRole() != ROLE_AutonomousProxy)
+		{
+			SetAutonomousProxy(true);
+			UE_LOG(LogNyx, Warning, TEXT("CameraIntegrity: Restored AutonomousProxy role for %s"),
+				*GetName());
+		}
+
+		// Flush stale saved moves that accumulated while the controller was lost.
+		// Without this, CMC hits the 96-move limit and movement stalls.
+		if (UCharacterMovementComponent* CMC = GetCharacterMovement())
+		{
+			CMC->FlushServerMoves();
+			UE_LOG(LogNyx, Warning, TEXT("CameraIntegrity: Flushed stale server moves for %s"), *GetName());
+		}
 
 		UE_LOG(LogNyx, Log, TEXT("CameraIntegrity: Repaired controller link for %s → %s"),
 			*GetName(), *PC->GetName());

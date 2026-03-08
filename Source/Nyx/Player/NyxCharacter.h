@@ -217,6 +217,17 @@ private:
 	/** True once SetupPlayerInputComponent has been called successfully. */
 	bool bInputSetupComplete = false;
 
+	/** Cached reference to the last valid PC that controlled this character.
+	 *  Used by CameraIntegrity to re-bind after proxy disruptions. On the client,
+	 *  GetNetConnection() returns nullptr for ALL PCs, and the iterator order is
+	 *  unpredictable, so we save the correct PC when we know it's valid.
+	 *
+	 *  MUST be UPROPERTY — a strong GC reference that prevents the engine from
+	 *  garbage-collecting the PC when the proxy disruption clears the controller
+	 *  link. TWeakObjectPtr allowed PC_2 to be GC'd, making recovery impossible. */
+	UPROPERTY()
+	TObjectPtr<APlayerController> LastKnownPC;
+
 	FTimerHandle InputRetryTimerHandle;
 	FTimerHandle CameraIntegrityTimerHandle;
 };

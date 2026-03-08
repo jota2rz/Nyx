@@ -266,19 +266,28 @@ SetupInputMappingContexts();
 | RetryInputSetup ghost pawn guard | ✅ Fixed |
 | Post-migration PC re-bind (OnRep_Controller) | ✅ Fixed |
 | Claim timing (2s grace period) | ✅ Fixed |
-| HUD after migration | ⚠️ Partial — N/A shown (new PC may need HUD re-creation) |
-| Camera stability after migration | ⚠️ Under investigation — still occasional issues |
-| Pre-migration ghost pawn visibility | ⚠️ Ghost pawn from server-2 is visible to client before migration completes |
+| HUD 3-tier fallback discovery | ✅ Fixed (Test 11) |
+| Camera integrity timer (1s periodic) | ✅ Fixed (Test 11) |
+| Old character cleanup (hide + disable) | ✅ Fixed (Test 11) |
+| Migrated channel close (pawn survival) | ✅ Fixed (Test 12) |
+| PC garbage recovery (ClearGarbage) | ✅ Fixed (Test 14) |
+| PlayerCameraManager respawn | ✅ Fixed (Test 14) |
+| HUD respawn (ANyxHUD) | ✅ Fixed (Test 14) |
+| "No owning connection" fix | ✅ Fixed (Test 15) |
+| Strong PC reference (UPROPERTY TObjectPtr) | ✅ Fixed (Test 16) |
+| bActorIsBeingDestroyed cleared via reflection | ✅ Built (Test 19, awaiting validation) |
+| Full DestroyActor reversal (9-step recovery) | ✅ Built (Test 19, awaiting validation) |
 
 ## Key Files
 
 | File | What it does for migration |
 |------|---------------------------|
-| `NyxGameMode.cpp` | `CheckZoneBoundaries()`, `ReleasePawnAuthority()`, `ClaimPawnAuthority()` |
-| `NyxGameMode.h` | Grace period constants (`NoPawnClaimGracePeriodSeconds`, `TransferGracePeriodSeconds`) |
-| `NyxCharacter.cpp` | `OnRep_Controller()` post-migration re-bind, `RetryInputSetup()` with guard, `SetupPlayerInputComponent()` with SetViewTarget |
+| `NyxGameMode.cpp` | `CheckZoneBoundaries()`, `ReleasePawnAuthority()` (with Migrated channel close), `ClaimPawnAuthority()` |
+| `NyxGameMode.h` | Grace period constants, `FNoPawnMigrationTracking`, SpacetimeDB claim signals |
+| `NyxCharacter.cpp` | 9-step DestroyActor reversal in `CheckCameraAndInputIntegrity()`, `OnRep_Controller()` migration guard, old character cleanup, `RetryInputSetup()` with guard, includes `UObject/UnrealType.h` + `Engine/Level.h` for reflection |
+| `NyxCharacter.h` | `LastKnownPC` (`UPROPERTY() TObjectPtr<APlayerController>`), `CameraIntegrityTimerHandle` |
 | `NyxGameInstance.cpp` | `-ProxyGameServers=` detection, NetDriver swap to ProxyNetDriver |
-| `NyxHUD.cpp` | Canvas HUD — needs work for post-migration PC |
+| `NyxHUD.cpp` | 3-tier NyxCharacter discovery fallback (PC pawn → all local PCs → TActorIterator) |
 ---
 
 # DSTM vs Manual Migration: Why Our Approach Is a Workaround
@@ -938,26 +947,181 @@ A standing-still player produces zero position updates — indistinguishable fro
 
 **Status**: Server-side ✅, Client-side fix needs Test Run 11 validation
 
+### Tests 11–13 — Migrated Channel Close + Client-Side Fixes Validated
+
+Test 11 validated the 3-tier HUD fallback, camera integrity timer, and old character cleanup.
+
+Test 12 introduced `EChannelCloseReason::Migrated` to `ReleasePawnAuthority` — closing the pawn's
+backend channels with `Migrated` instead of letting `Destroy()` close them with `Destroyed`.
+The proxy's `ShouldClientDestroyActor` returns `false` for `Migrated`, so the client's pawn
+stays alive across the migration boundary. This eliminated the ghost pawn flash.
+
+Test 13 refined the channel close to also close components (mesh, movement, capsule) so the
+old pawn freezes cleanly at the boundary rather than rubber-banding.
+
+**Status**: ✅ All three working — server-side migration + client pawn survival confirmed.
+
+### Tests 14–16 — Proxy Finalization Destroys PC_2
+
+**Discovery**: ~5 seconds after migration, the proxy's `FinalizePlayerControllerReassignment`
+calls `DestroyActor` on the client's `PlayerController_2` (the new PC from Server-2).
+This is not a bug — it's the proxy consolidating routes. But it destroys the very PC the
+client needs for camera, input, and HUD.
+
+**Test 14 — ClearGarbage recovery**:
+PC_2 was garbage-marked but still referenced by `ULocalPlayer`. Added `ClearGarbage()` calls
+to undo the GC flag. Also added respawn logic for `PlayerCameraManager` and `HUD` since
+`DestroyActor` destroys owned actors too. HUD came back, camera worked intermittently.
+
+**Test 15 — "No owning connection" fix**:
+After recovery, the PC's `Player` reference was null (cleared by `OnNetCleanup` during
+`DestroyActor`). RPCs failed with "No owning connection for PC". Added Player link restoration:
+`LPPC->Player = LP` (bidirectional `ULocalPlayer ↔ APlayerController` reference).
+
+**Test 16 — Strong GC reference**:
+`LastKnownPC` was a `TWeakObjectPtr` — by design, weak references don't prevent GC.
+When the proxy destroy chain ran, the GC collected PC_2 before recovery could fire.
+Changed to `UPROPERTY() TObjectPtr<APlayerController>` — a strong GC reference that keeps
+the object alive even when garbage-marked.
+
+**Status**: ✅ PC survives GC, Player link restored, CameraManager + HUD respawned.
+
+### Test 17 — AddToRoot Crash
+
+**Attempted fix**: Called `AddToRoot()` on PC_2 when caching it, hoping to prevent GC entirely.
+
+**Result**: Hard crash — `MarkAsGarbage` has `check(!IsRooted())`. When the proxy's `DestroyActor`
+chain calls `MarkAsGarbage`, the rooted object hits the assertion and crashes.
+
+**Fix**: Removed all `AddToRoot` / `RemoveFromRoot` calls. Root protection is fundamentally
+incompatible with the proxy's destruction flow. The strong `UPROPERTY TObjectPtr` reference
+keeps the object in memory without rooting, and `ClearGarbage` undoes the GC flag post-facto.
+
+**Status**: ✅ Crash eliminated.
+
+### Test 18 — bActorIsBeingDestroyed: The Real Blocker
+
+**Symptom**: "Didn't crash after crossing boundary but the HUD disappeared and couldn't
+control the character anymore." ClearGarbage + RegisterAllComponents fired correctly.
+CameraManager respawned. HUD respawned. But nothing worked.
+
+**Log evidence**:
+```
+LogNet: Warning: Remote function ServerAcknowledgePossession called from actor
+  PlayerController_2 while actor is being destroyed. Function will not be processed.
+```
+```
+Ensure condition failed: !Actor->IsActorBeingDestroyed()
+  [Source/Runtime/Engine/Private/NetworkObjectList.cpp:83]
+```
+```
+LogNetPlayerMovement: Warning: UCharacterMovementComponent has 96 saved moves
+  (to clear, change CVar p.NetMaxSavedMoveCount to 0)
+```
+
+**Root cause analysis**: `UWorld::DestroyActor()` (line 855 of `LevelActor.cpp`) sets
+`bActorIsBeingDestroyed = true` **as the very first operation** via `FMarkActorIsBeingDestroyed`.
+This flag is:
+
+1. **One-way** — no public API to clear it. `FMarkActorIsBeingDestroyed` is a private struct,
+   friend only to `UWorld`.
+2. **Blocks ALL RPCs** — `ProcessRemoteFunction` checks `IsActorBeingDestroyed()` and rejects.
+3. **Blocks NetworkObjectList re-add** — `ensure(!Actor->IsActorBeingDestroyed())` fails.
+4. **Blocks CMC ServerMove** — saved moves accumulate forever (96-move limit).
+
+The full `DestroyActor` damage chain (7 steps, all must be undone):
+
+| Step | What DestroyActor Does | Effect |
+|------|----------------------|--------|
+| 1 | `bActorIsBeingDestroyed = true` | Blocks ALL RPCs, network ops |
+| 2 | `OnNetCleanup` → `Player=NULL`, `NetConnection=NULL` | Breaks ownership |
+| 3 | `Destroyed()` → `EndPlay` → `UnPossess()` | Severs controller link |
+| 4 | `RemoveActor` from level actor list + network list | Actor invisible to systems |
+| 5 | `UnregisterAllComponents` | Input, camera, tick disabled |
+| 6 | `MarkAsGarbage` + `MarkComponentsAsGarbage` | GC flags set |
+| 7 | `RegisterAllActorTickFunctions(false)` | Tick functions disabled |
+
+`ClearGarbage` only undoes step 6. Steps 1–5 and 7 were still active, which is why
+everything looked recovered but nothing actually worked.
+
+**Status**: Root cause identified. Fix designed for Test 19.
+
+### Test 19 — Full DestroyActor Reversal (9-Step Recovery)
+
+**Key insight**: `bActorIsBeingDestroyed` is a **private UPROPERTY bitfield** in `AActor`
+(line 631 of `Actor.h`). While there's no public setter, it IS accessible via `FBoolProperty`
+reflection because UE's property system can access any `UPROPERTY` regardless of C++ visibility.
+
+**The fix** — `CheckCameraAndInputIntegrity` now performs a complete 9-step recovery when
+it detects the PC has been destroyed by the proxy:
+
+```
+Step 1: ClearGarbage on PC                    (undoes step 6)
+Step 2: Clear bActorIsBeingDestroyed           (undoes step 1 — THE critical fix)
+        via FBoolProperty::SetPropertyValue_InContainer reflection
+Step 3: ClearGarbage on ALL PC components      (undoes step 6 for components)
+Step 4: RestoreOwnedActor lambda               (undoes steps 1+6 on CameraManager and HUD)
+        - ClearGarbage + clear bActorIsBeingDestroyed + clear component garbage
+Step 5: Re-add to level actor list             (undoes step 4)
+        via ULevel::TryAddActorToList(PC, true)
+Step 6: RegisterAllComponents                  (undoes step 5)
+        on PC, CameraManager, and HUD
+Step 7: RegisterAllActorTickFunctions(true)    (undoes step 7)
+        on PC and CameraManager
+Step 8: AddNetworkActor                        (undoes step 4 network removal)
+        via UWorld::AddNetworkActor(PC)
+Step 9: Restore Player link                    (undoes step 2)
+        PC->Player = ULocalPlayer
+```
+
+After the 9-step recovery, the existing repair code (pawn re-bind, view target,
+`SetAutonomousProxy`, `FlushServerMoves`) handles the rest.
+
+**Key reflection code**:
+```cpp
+FBoolProperty* DestroyProp = CastField<FBoolProperty>(
+    AActor::StaticClass()->FindPropertyByName(TEXT("bActorIsBeingDestroyed")));
+if (DestroyProp)
+    DestroyProp->SetPropertyValue_InContainer(LPPC, false);
+```
+
+**Key APIs used** (all public ENGINE_API):
+| API | Purpose |
+|-----|---------|
+| `FBoolProperty::SetPropertyValue_InContainer` | Clear private UPROPERTY via reflection |
+| `AActor::ClearGarbage()` | Remove RF_MirroredGarbage flag |
+| `ULevel::TryAddActorToList(Actor, true)` | Re-add to level's actor array |
+| `AActor::RegisterAllComponents()` | Re-register all components |
+| `AActor::RegisterAllActorTickFunctions(true, true)` | Re-enable tick |
+| `UWorld::AddNetworkActor(Actor)` | Re-add to network object list |
+
+**Build result**: ✅ Compiles successfully. Awaiting Test 19 runtime validation.
+
+**Expected outcome**: RPCs should no longer be rejected ("actor is being destroyed"),
+`NetworkObjectList` re-add should succeed without ensure failure, CMC should send
+`ServerMove` normally (no more 96 saved moves), and the PC should be fully functional
+with camera, input, and HUD working post-migration.
+
 ## Modified Files (all uncommitted, since 4c1ce1a)
 
 | File | Key Changes |
 |------|-------------|
 | `Source/Nyx/Core/NyxGameMode.h` | `HandleExternalCharacterSaved()`, `bMigrationClaimPending`, `MigrationClaimPosition`, `FNoPawnMigrationTracking` with `bReleasedByUs` |
-| `Source/Nyx/Core/NyxGameMode.cpp` | SpacetimeDB delegate binding in `StartPlay`, `HandleExternalCharacterSaved()` implementation, SpacetimeDB claim path in `CheckZoneBoundaries`, full `ReleasePawnAuthority` / `ClaimPawnAuthority` |
+| `Source/Nyx/Core/NyxGameMode.cpp` | SpacetimeDB delegate binding in `StartPlay`, `HandleExternalCharacterSaved()` implementation, SpacetimeDB claim path in `CheckZoneBoundaries`, full `ReleasePawnAuthority` / `ClaimPawnAuthority`, `EChannelCloseReason::Migrated` channel close in Release |
 | `Source/Nyx/Server/NyxServerSubsystem.h` | `FOnExternalCharacterSaved` delegate, `OnExternalCharacterSaved` property |
 | `Source/Nyx/Server/NyxServerSubsystem.cpp` | External character save detection in `HandleCharacterStatsUpdate` (fires when position changes for character not in `ManagedCharacters`) |
-| `Source/Nyx/Player/NyxCharacter.h` | `CheckCameraAndInputIntegrity()`, `CameraIntegrityTimerHandle` |
-| `Source/Nyx/Player/NyxCharacter.cpp` | Camera integrity timer start, old character cleanup in `SetupPlayerInputComponent`, `CheckCameraAndInputIntegrity()` implementation, `EngineUtils.h` include |
+| `Source/Nyx/Player/NyxCharacter.h` | `CheckCameraAndInputIntegrity()`, `CameraIntegrityTimerHandle`, `LastKnownPC` as `UPROPERTY() TObjectPtr<APlayerController>` (strong GC ref) |
+| `Source/Nyx/Player/NyxCharacter.cpp` | 9-step DestroyActor reversal in `CheckCameraAndInputIntegrity()` (ClearGarbage, bActorIsBeingDestroyed reflection clear, TryAddActorToList, RegisterAllComponents, RegisterAllActorTickFunctions, AddNetworkActor, Player link restore), `OnRep_Controller` migration guard (stops timer on old char), `RestoreOwnedActor` lambda for CameraManager/HUD, FlushServerMoves, SetAutonomousProxy restore |
 | `Source/Nyx/UI/NyxHUD.cpp` | 3-tier NyxCharacter discovery fallback, `EngineUtils.h` include |
 
 ## Known Issues / Next Steps
 
-1. **Test Run 10 client-side fix is untested** — Camera integrity timer + old character cleanup + HUD resilience need validation in Test Run 11
-2. **`SetReplicates` warning** — The proxy's `AddNetworkActor` calls `SetReplicates(false)` on actors with `ROLE_Authority`. After migration, the new NyxCharacter may briefly appear as `ROLE_Authority` before the proxy sets the replicated role. The integrity timer works around this but doesn't prevent the warning itself.
-3. **Dual-character persistence** — The old NyxCharacter from Server-1 is hidden but not destroyed (only the proxy can destroy replicated actors via channel close). If the proxy never closes the old channel, the hidden actor persists indefinitely. Monitor for memory/actor leaks.
+1. **Test 19 runtime validation pending** — The 9-step DestroyActor reversal compiles and should fix RPCs, NetworkObjectList, and CMC saved moves. Needs live test to confirm.
+2. **Reflection fragility** — `bActorIsBeingDestroyed` is accessed via `FindPropertyByName` string lookup. If Epic renames or removes this UPROPERTY in a future engine version, the recovery silently fails. The `if (DestroyProp)` guard prevents crashes but the PC would remain broken.
+3. **Proxy design assumption** — We're undoing destruction that the proxy intentionally caused. If the proxy's finalization logic changes (e.g., it stops calling DestroyActor on the consolidated PC), the recovery code becomes unnecessary but harmless.
 4. **Reverse migration** — Walking back across the boundary (east → west) not yet tested. Same flow should work symmetrically but needs validation.
 5. **Edge cases** — Player standing exactly on X=0, rapid back-and-forth crossing, network latency spikes during migration.
-6. **Deterministic GUID approach abandoned** — HandshakeId differs per backend, so GUID forcing doesn't work across servers. Current approach uses `SwapPlayerControllers` + client-side fallbacks instead.
+6. **Deterministic GUID approach abandoned** — HandshakeId differs per backend, so GUID forcing doesn't work across servers. Current approach uses `SwapPlayerControllers` + client-side recovery instead.
 
 ## Launch Configuration
 
@@ -968,3 +1132,224 @@ A standing-still player produces zero position updates — indistinguishable fro
 # Proxy:    port 7780, connects to both servers
 # Client:   connects to proxy at 127.0.0.1:7780
 ```
+
+---
+
+# Tier 2: DSTM Activation + Shared-Disk Transport
+
+## The Proxy Was DESIGNED for DSTM Migration
+
+The most important discovery is in `ShouldClientDestroyActor` (`MultiServerProxy.cpp:658`):
+
+```cpp
+bool UProxyBackendNetDriver::ShouldClientDestroyActor(AActor* Actor, EChannelCloseReason CloseReason) const
+{
+    // If an actor is destroyed remotely on a game server because it's being migrated to another
+    // server then it shouldn't be destroyed on the proxy when removed from the replication system
+    // of the originating server. When the actor arrives on the destination server it will be added
+    // to that server's replication system and the actor will be RE-USED on the proxy since it's
+    // still referenced in the shared backend NetGUID cache.
+    return (CloseReason != EChannelCloseReason::Migrated);
+}
+```
+
+The comment explicitly describes the DSTM flow: Server-1 closes with `Migrated`, actor survives on proxy, Server-2 picks it up → same `UObject*` re-used → client never sees destroy/create. The proxy architecture was built around a working DSTM transport that **doesn't exist yet in shipped source**.
+
+## What Iris IS and ISN'T
+
+**Iris is NOT migration.** It's UE5's modern property-level replication framework (delta compression, filtering, prioritization) sitting alongside `UNetDriver`. The migration primitives live entirely in **CoreUObject's `RemoteObjectTransfer` API** — a separate system that Iris can optionally integrate with via `FRemoteObjectReferenceNetSerializer`.
+
+`FReplicationSystemParams::bUseRemoteObjectReferences` (IrisCore API) is the Iris-side toggle for `FRemoteObjectReference` net-serialization — cross-server object identity. But the actual migrate/serialize/transfer/deserialize lifecycle is in `RemoteObjectTransfer.h/.cpp`.
+
+## DSTM Architecture: What Exists vs What's Missing
+
+### What EXISTS (compiles with UE_WITH_REMOTE_OBJECT_HANDLE=1):
+
+| Component | Location | Status |
+|-----------|----------|--------|
+| `FMigrateSendParams`, `FRemoteObjectData` | CoreUObject `RemoteObjectTransfer.h` | Full structs |
+| `TransferObjectOwnershipToRemoteServer()` | `RemoteObjectTransfer.cpp:1056` | Complete |
+| `OnObjectDataReceived()` | `RemoteObjectTransfer.cpp:1175` | Complete receive handler |
+| `SendRemoteObject()` | `RemoteObjectTransfer.cpp:746` | Dispatches to delegate |
+| `AActor::PostMigrate()` | `Actor.cpp:1260-1450` | Full send/receive lifecycle |
+| `APlayerController::PostMigrate()` | `PlayerController.cpp:5028-5125` | NoPawnPC swap, connection rebind |
+| DSTM Transport delegates | `RemoteObjectTransfer.h:147-170` | Declared, default to disk I/O |
+| `ShouldClientDestroyActor(Migrated)` | `MultiServerProxy.cpp:658` | Actor re-use on proxy |
+| Beacon unlimited bunches | `MultiServerBeaconClient.cpp:60` | `SetUnlimitedBunchSizeAllowed(true)` |
+| `multiserver.AllowRemoteObjectReferences` CVar | `MultiServerBeaconClient.cpp:17` | Default `1` |
+
+### What's MISSING:
+
+| Gap | Impact |
+|-----|--------|
+| `UE_WITH_REMOTE_OBJECT_HANDLE = 0` | Gated in `CoreMiscDefines.h:620`. Disables PostMigrate, remote identity |
+| No network transport binding | `RemoteObjectTransferDelegate` defaults to `SaveObjectToDisk` with per-server paths |
+| Per-server disk paths | Default uses `GetLocalServerId()` in filename — servers can't read each other's files |
+| No game-side migration trigger | Servers never call `TransferObjectOwnershipToRemoteServer()` |
+
+## DSTM Delegate Interface
+
+Transport contracts in `RemoteObjectTransfer.h`:
+
+| Delegate | Purpose |
+|----------|---------|
+| `RemoteObjectTransferDelegate` | **Main send** — serialized object data to remote server |
+| `RequestRemoteObjectDelegate` | **Pull-request** — request migration from another server |
+| `RemoteObjectDeniedTransferDelegate` | Denial notification |
+| `StoreRemoteObjectDataDelegate` | Persist to database |
+| `RestoreRemoteObjectDataDelegate` | Restore from database |
+
+Default bindings use `SaveObjectToDisk` / `LoadObjectFromDisk` with per-server filename: `{ProjectSavedDir}/{LocalServerId}-{ObjectId}_{OwnerServerId}.remote`
+
+The `!IsBound()` guard means anyone can pre-bind before `InitRemoteObjects()`.
+
+## The Ideal Seamless Flow
+
+```
+Server-1                    Proxy                     Server-2                  Client
+   │                          │                          │                        │
+   │ TransferOwnership()      │                          │                        │
+   │ ──serialize──► shared    │                          │                        │
+   │ PostMigrate(Send)        │                          │                        │
+   │ CloseChannel(Migrated)──►│                          │                        │
+   │                          │ ShouldDestroy=false      │ SpacetimeDB signal     │
+   │                          │ Actor stays alive        │ LoadFromSharedDisk()   │
+   │                          │                          │ OnObjectDataReceived() │
+   │                          │                          │ PostMigrate(Receive)   │
+   │                          │                          │ Deserialize PC+Pawn    │
+   │                          │◄──Server-2 replicates────│ StartReplicating()     │
+   │                          │ Same UObject* found      │                        │
+   │                          │ via shared GUID cache    │                        │
+   │                          │──replication continues──►│ No destroy/create!     │
+   │                          │                          │                        │ Seamless ✓
+```
+
+## Implementation
+
+### Step 1: Engine Change — DONE
+`UE_WITH_REMOTE_OBJECT_HANDLE` → `1` in `D:\UnrealEngine\Engine\Source\Runtime\Core\Public\Misc\CoreMiscDefines.h`.
+
+Enables: `PostMigrate()`, `Serialize()` migration, `FRemoteObjectTransferQueue`, ownership tracking, `SetUsingRemoteObjectReferences(true)` on beacons.
+
+### Step 2: Shared-Disk Transport (`NyxDSTMTransport.h/cpp`)
+Custom delegate binding using shared directory so both servers read/write to same path.
+
+### Step 3: Server ID Init
+`FRemoteServerId::InitGlobalServerId()` per server.
+
+### Step 4: Migration Trigger
+`ReleasePawnAuthority` → `TransferObjectOwnershipToRemoteServer(PC, DestServerId)`.
+`ClaimPawnAuthority` → `MigrateObjectFromRemoteServer(ObjectId, OwnerServerId)`.
+
+### Step 5: Engine Rebuild
+Full rebuild from `D:\UnrealEngine` — required for ABI compatibility.
+
+---
+
+## Tier 2A: Simplified Migrated Close (No Engine Rebuild)
+
+### Discovery
+
+During Tier 2 implementation, a critical shortcut was discovered that eliminates the
+need for a full engine rebuild:
+
+1. **`EChannelCloseReason::Migrated` is always available** — not gated behind
+   `UE_WITH_REMOTE_OBJECT_HANDLE`. The enum is in `CoreNetTypes.h` (CoreUObject).
+
+2. **Proxy always handles Migrated** — `UProxyBackendNetDriver::ShouldClientDestroyActor`
+   returns `false` for `Migrated` regardless of the DSTM flag. This is compiled into the
+   MultiServer plugin unconditionally.
+
+3. **Channel close is a public API** — `UNetConnection::FindActorChannelRef(Actor)` returns
+   the channel, and `UActorChannel::Close(EChannelCloseReason)` is public/virtual.
+
+This means we can prevent client-side pawn destruction during migration with a single
+code change — no engine source modification, no rebuild, no ABI break.
+
+### Approach
+
+```
+Server-A (releasing):                             Client:
+  1. Close pawn channels with Migrated             Pawn stays alive (frozen)
+  2. Unpossess + Destroy pawn (no-op on channels)  Camera keeps target ✓
+  3. Swap PC → NoPawnPC                            HUD keeps controller ✓
+
+Server-B (claiming):                              Client:
+  1. SpacetimeDB signal → claim NoPawnPC           Receives new pawn
+  2. Spawn new pawn + PC                           PC possession changes
+  3. Possess → replicate                           Camera switches to new pawn ✓
+```
+
+### Key Code Change (ReleasePawnAuthority)
+
+```cpp
+// Close pawn channels with Migrated BEFORE destroying
+if (UNetDriver* NetDriver = GetWorld()->GetNetDriver())
+{
+    for (int32 i = NetDriver->ClientConnections.Num() - 1; i >= 0; i--)
+    {
+        UNetConnection* Conn = NetDriver->ClientConnections[i];
+        if (Conn)
+        {
+            UActorChannel* Chan = Conn->FindActorChannelRef(NyxChar);
+            if (Chan)
+            {
+                Chan->bClearRecentActorRefs = false;
+                Chan->Close(EChannelCloseReason::Migrated);
+            }
+        }
+    }
+}
+// Destroy() now finds channels already closed → Destroyed close is no-op
+PC->UnPossess();
+NyxChar->Destroy();
+```
+
+### How It Works
+
+1. **Server-A** closes the pawn's replication channel with `EChannelCloseReason::Migrated`
+   to the proxy (backend net driver). This sends a close bunch with reason=Migrated.
+
+2. **Proxy** receives the close. `UProxyBackendNetDriver::ShouldClientDestroyActor`
+   returns `false` for Migrated. The proxy does NOT close the client-facing channel.
+   The client's pawn actor stays alive.
+
+3. The subsequent `NyxChar->Destroy()` calls `UNetDriver::NotifyActorDestroyed` internally
+   which tries to close channels with `Destroyed` — but channels are already closing
+   (Migrated wins). The pawn is destroyed on the server but NOT on the client.
+
+4. **Server-B** claims via SpacetimeDB signal, spawns a new pawn, and possesses it.
+   The proxy replicates the new pawn as a separate actor to the client.
+
+5. **Client** sees: old pawn frozen at the crossing position + new pawn active.
+   Camera follows the new pawn once the PC possession replicates.
+
+### Known Limitations
+
+| Issue | Impact | Future Fix |
+|-------|--------|------------|
+| Ghost pawn on client | Old pawn frozen at boundary, not destroyed | Full DSTM with RemoteObjectId → proxy reuses actor |
+| Two pawns briefly visible | Cosmetic — old freezes, new activates | Same actor continuity via DSTM |
+| No GUID matching | Proxy treats Server-B's pawn as a new actor | Requires `UE_WITH_REMOTE_OBJECT_HANDLE=1` + engine rebuild |
+
+### Why This Is Better Than Current Behavior
+
+**Current (Destroyed close)**:
+- Pawn destroyed on client → camera loses target → HUD breaks → brief black screen
+- Client must wait for Server-B's new pawn → camera/HUD rebuilds from scratch
+
+**With Migrated close**:
+- Pawn stays alive → camera keeps target → HUD keeps binding
+- When Server-B's pawn arrives, smooth transition (possession change, not rebuild)
+- No black screen, no HUD loss
+
+### Future: Tier 2B — Full DSTM (Engine Rebuild)
+
+The engine source changes at `D:\UnrealEngine` are preserved for future work:
+- `UE_WITH_REMOTE_OBJECT_HANDLE=1` in `CoreMiscDefines.h`
+- `FMigrationRoutingInfo` + `GetMigrationRoutingInfo()` in `RemoteObjectTransfer.h/cpp`
+
+When built, this enables the full DSTM pipeline described above:
+- Same `FRemoteObjectId` across servers → proxy reuses exact same actor
+- No ghost pawn, no two-actor artifact
+- True zero-interruption seamless migration

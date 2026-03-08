@@ -15,6 +15,8 @@
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Engine/NetDriver.h"
+#include "Engine/NetConnection.h"
+#include "Engine/ActorChannel.h"
 #include "Engine/PackageMapClient.h"
 #include "Misc/NetworkGuid.h"
 #include "Misc/CommandLine.h"
@@ -647,14 +649,51 @@ void ANyxGameMode::ReleasePawnAuthority(APlayerController* PC, ANyxCharacter* Ny
 	UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Destroying pawn at (%.0f, %.0f, %.0f) and swapping to NoPawnPC"),
 		LastPos.X, LastPos.Y, LastPos.Z);
 
-	// NOTE: Migrated close reason is disabled. The proxy assigns different
-	// HandshakeIds per backend, so deterministic GUIDs don't match between servers.
-	// Migrated + mismatched GUIDs = duplicate actors on client. Instead, we let
-	// DestroyActor close channels with the default Destroyed reason. The proxy
-	// destroys old actors, Server-B creates new ones, and client-side fallbacks
-	// (OnRep_Controller re-bind) handle the transition.
+	// ── Migrated close reason: prevent HUD/camera loss during migration ──
+	// Close the pawn's replication channels with EChannelCloseReason::Migrated
+	// BEFORE destroying it. The proxy's UProxyBackendNetDriver::ShouldClientDestroyActor
+	// returns false for Migrated, keeping the pawn alive on the client.
+	//
+	// Without this: Destroy() closes with Destroyed → proxy destroys client-side
+	// pawn → camera loses target → HUD loses controller → brief black screen.
+	//
+	// With this: channels pre-closed with Migrated → proxy keeps pawn alive →
+	// client camera keeps its target → when Server-B spawns a new pawn and
+	// possesses it, the client smoothly transitions (old pawn frozen, new active).
+	//
+	// Note: the old pawn becomes a "ghost" on the client (frozen, no updates).
+	// Server-B will signal the client to destroy it after the new pawn is ready.
+	if (UNetDriver* NetDriver = GetWorld()->GetNetDriver())
+	{
+		UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: NetDriver=%s, ClientConnections=%d"),
+			*NetDriver->GetName(), NetDriver->ClientConnections.Num());
 
-	// Unpossess and destroy the pawn
+		for (int32 i = NetDriver->ClientConnections.Num() - 1; i >= 0; i--)
+		{
+			UNetConnection* Connection = NetDriver->ClientConnections[i];
+			if (Connection)
+			{
+				UActorChannel* Channel = Connection->FindActorChannelRef(NyxChar);
+				UE_LOG(LogNyx, Log, TEXT("Migration RELEASE:   Connection[%d]=%s (%s) — Channel=%s"),
+					i, *Connection->GetName(), *Connection->GetClass()->GetName(),
+					Channel ? TEXT("FOUND") : TEXT("null"));
+				if (Channel)
+				{
+					Channel->bClearRecentActorRefs = false;
+					Channel->Close(EChannelCloseReason::Migrated);
+					UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: Closed pawn channel with Migrated reason on connection %s"),
+						*Connection->GetName());
+				}
+			}
+		}
+	}
+	else
+	{
+		UE_LOG(LogNyx, Error, TEXT("Migration RELEASE: NetDriver is NULL!"));
+	}
+
+	// Unpossess and destroy the pawn — channels already closed with Migrated,
+	// so Destroy()'s internal NotifyActorDestroyed(Destroyed) is a no-op.
 	PC->UnPossess();
 	NyxChar->Destroy();
 
