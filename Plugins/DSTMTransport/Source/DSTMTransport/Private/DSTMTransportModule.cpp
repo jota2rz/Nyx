@@ -26,6 +26,16 @@ void FDSTMTransportModule::StartupModule()
 void FDSTMTransportModule::ShutdownModule()
 {
 	UE_LOG(LogDSTM, Log, TEXT("DSTMTransport: ShutdownModule"));
+
+#if UE_WITH_REMOTE_OBJECT_HANDLE
+	if (bServerIdentityInitialized)
+	{
+		UE::RemoteObject::Transfer::RemoteObjectTransferDelegate.Unbind();
+		UE::RemoteObject::Transfer::RequestRemoteObjectDelegate.Unbind();
+
+		UE_LOG(LogDSTM, Log, TEXT("DSTMTransport: Transport delegates unbound."));
+	}
+#endif
 }
 
 FDSTMTransportModule& FDSTMTransportModule::Get()
@@ -101,9 +111,17 @@ void FDSTMTransportModule::BindTransportDelegates()
 /**
  * Find the DSTMSubsystem in any active game instance.
  * Works on dedicated servers where GameViewport may not exist.
+ * Caches the result to avoid iterating world contexts on every delegate call.
  */
 static UDSTMSubsystem* FindDSTMSubsystem()
 {
+	static TWeakObjectPtr<UDSTMSubsystem> CachedSubsystem;
+
+	if (CachedSubsystem.IsValid())
+	{
+		return CachedSubsystem.Get();
+	}
+
 	if (!GEngine)
 	{
 		return nullptr;
@@ -117,6 +135,7 @@ static UDSTMSubsystem* FindDSTMSubsystem()
 			UDSTMSubsystem* Sub = GI->GetSubsystem<UDSTMSubsystem>();
 			if (Sub)
 			{
+				CachedSubsystem = Sub;
 				return Sub;
 			}
 		}

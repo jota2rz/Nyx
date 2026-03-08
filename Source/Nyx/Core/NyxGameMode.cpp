@@ -668,14 +668,14 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 			PlayersBeingTransferred.Add(PC);
 
 			// Transfer the PlayerController — engine handles everything:
-			// 1. Serializes PC + all subobjects
+			// 1. Serializes PC + all subobjects (including the possessed Pawn)
 			// 2. AActor::PostMigrate(Send) — channel close with Migrated
 			// 3. APlayerController::PostMigrate(Send) — NoPawnPC swap, connection save
 			// 4. RemoteObjectTransferDelegate fires → beacon sends to destination
+			// Note: The Pawn is included as a subobject of the PC — no separate
+			// transfer is needed. Transferring it separately would cause a
+			// double-transfer / crash.
 			DSTMSub->TransferActorToServer(PC, DestServerId);
-
-			// Transfer the Pawn separately
-			DSTMSub->TransferActorToServer(NyxChar, DestServerId);
 
 			UE_LOG(LogNyx, Log,
 				TEXT("Migration DSTM: Transfer initiated. Engine will handle PostMigrate + delivery."));

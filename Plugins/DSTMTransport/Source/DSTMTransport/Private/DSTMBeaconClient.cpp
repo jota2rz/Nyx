@@ -74,7 +74,18 @@ void ADSTMBeaconClient::ServerRequestMigrateObject_Implementation(
 	uint32 RequestingServerIdRaw)
 {
 	UE_LOG(LogDSTMBeacon, Log,
-		TEXT("DSTM Request: ObjectId=%llu requested by server %u"),
+		TEXT("DSTM Request [Server RPC]: ObjectId=%llu requested by server %u"),
+		ObjectIdRaw, RequestingServerIdRaw);
+
+	OnMigrationRequested.Broadcast(ObjectIdRaw, RequestingServerIdRaw);
+}
+
+void ADSTMBeaconClient::ClientRequestMigrateObject_Implementation(
+	uint64 ObjectIdRaw,
+	uint32 RequestingServerIdRaw)
+{
+	UE_LOG(LogDSTMBeacon, Log,
+		TEXT("DSTM Request [Client RPC]: ObjectId=%llu requested by server %u"),
 		ObjectIdRaw, RequestingServerIdRaw);
 
 	OnMigrationRequested.Broadcast(ObjectIdRaw, RequestingServerIdRaw);

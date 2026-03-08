@@ -153,6 +153,7 @@ void UDSTMSubsystem::ShutdownMesh()
 	if (DSTMNode)
 	{
 		UE_LOG(LogDSTMSub, Log, TEXT("Shutting down DSTM mesh"));
+		// UMultiServerNode handles cleanup in BeginDestroy
 		DSTMNode = nullptr;
 		PeerBeacons.Empty();
 		ServerIdHashToPeerId.Empty();
@@ -292,9 +293,25 @@ void UDSTMSubsystem::HandleObjectRequest(
 	ADSTMBeaconClient* Beacon = FindBeaconForServer(LastKnownServerId.GetValue());
 	if (Beacon)
 	{
-		Beacon->ServerRequestMigrateObject(
-			ObjectId.GetValue(),
-			DestServerId.GetValue());
+		// Send via the appropriate RPC direction based on beacon authority
+		if (Beacon->HasAuthority())
+		{
+			// We are the server side of this beacon connection → use Client RPC
+			Beacon->ClientRequestMigrateObject(
+				ObjectId.GetValue(),
+				DestServerId.GetValue());
+		}
+		else
+		{
+			// We are the client side → use Server RPC
+			Beacon->ServerRequestMigrateObject(
+				ObjectId.GetValue(),
+				DestServerId.GetValue());
+		}
+
+		UE_LOG(LogDSTMSub, Log,
+			TEXT("DSTM Request: Dispatched via %s RPC"),
+			Beacon->HasAuthority() ? TEXT("Client") : TEXT("Server"));
 	}
 	else
 	{
