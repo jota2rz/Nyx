@@ -86,6 +86,18 @@ public:
 		uint64 ObjectIdRaw,
 		uint32 RequestingServerIdRaw);
 
+	/**
+	 * Request migration in the reverse direction (server → client beacon side).
+	 * Called when we are the authority side of the beacon connection.
+	 *
+	 * @param ObjectIdRaw          - FRemoteObjectId of the requested object
+	 * @param RequestingServerIdRaw - FRemoteServerId of the requesting server (us)
+	 */
+	UFUNCTION(Client, Reliable)
+	void ClientRequestMigrateObject(
+		uint64 ObjectIdRaw,
+		uint32 RequestingServerIdRaw);
+
 	// ──── Delegates ────
 
 	DECLARE_MULTICAST_DELEGATE_SixParams(FOnMigrationDataReceived,
