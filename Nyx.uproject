@@ -39,7 +39,7 @@
 			"Enabled": true
 		},
 		{
-			"Name": "NyxDSTMTransport",
+			"Name": "DSTMTransport",
 			"Enabled": true
 		},
 		{

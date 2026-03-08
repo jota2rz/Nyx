@@ -1,31 +1,31 @@
-// Copyright Nyx MMO Project. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
-#include "NyxDSTMBeaconClient.h"
+#include "DSTMBeaconClient.h"
 
-#include UE_INLINE_GENERATED_CPP_BY_NAME(NyxDSTMBeaconClient)
+#include UE_INLINE_GENERATED_CPP_BY_NAME(DSTMBeaconClient)
 
-DEFINE_LOG_CATEGORY_STATIC(LogNyxDSTMBeacon, Log, All);
+DEFINE_LOG_CATEGORY_STATIC(LogDSTMBeacon, Log, All);
 
 // ─── Constructor ──────────────────────────────────────────────────
 
-ANyxDSTMBeaconClient::ANyxDSTMBeaconClient()
+ADSTMBeaconClient::ADSTMBeaconClient()
 {
 }
 
 // ─── Connection ───────────────────────────────────────────────────
 
-void ANyxDSTMBeaconClient::OnConnected()
+void ADSTMBeaconClient::OnConnected()
 {
 	Super::OnConnected();
 
-	UE_LOG(LogNyxDSTMBeacon, Log,
-		TEXT("NyxDSTMBeacon: Connected to peer %s (local=%s) — DSTM transport ready"),
+	UE_LOG(LogDSTMBeacon, Log,
+		TEXT("DSTMBeacon: Connected to peer %s (local=%s) — DSTM transport ready"),
 		*GetRemotePeerId(), *GetLocalPeerId());
 }
 
 // ─── Migration Data Transfer RPCs ─────────────────────────────────
 
-void ANyxDSTMBeaconClient::ServerReceiveMigratedObject_Implementation(
+void ADSTMBeaconClient::ServerReceiveMigratedObject_Implementation(
 	uint64 ObjectIdRaw,
 	uint32 OwnerServerIdRaw,
 	uint32 PhysicsServerIdRaw,
@@ -33,7 +33,7 @@ void ANyxDSTMBeaconClient::ServerReceiveMigratedObject_Implementation(
 	uint32 SenderServerIdRaw,
 	const TArray<uint8>& SerializedData)
 {
-	UE_LOG(LogNyxDSTMBeacon, Log,
+	UE_LOG(LogDSTMBeacon, Log,
 		TEXT("DSTM Recv [Server RPC]: ObjectId=%llu, Owner=%u, Physics=%u, Sender=%u, DataSize=%d bytes"),
 		ObjectIdRaw, OwnerServerIdRaw, PhysicsServerIdRaw, SenderServerIdRaw, SerializedData.Num());
 
@@ -42,7 +42,7 @@ void ANyxDSTMBeaconClient::ServerReceiveMigratedObject_Implementation(
 		PhysicsLocalIslandId, SenderServerIdRaw, SerializedData);
 }
 
-void ANyxDSTMBeaconClient::ClientReceiveMigratedObject_Implementation(
+void ADSTMBeaconClient::ClientReceiveMigratedObject_Implementation(
 	uint64 ObjectIdRaw,
 	uint32 OwnerServerIdRaw,
 	uint32 PhysicsServerIdRaw,
@@ -50,7 +50,7 @@ void ANyxDSTMBeaconClient::ClientReceiveMigratedObject_Implementation(
 	uint32 SenderServerIdRaw,
 	const TArray<uint8>& SerializedData)
 {
-	UE_LOG(LogNyxDSTMBeacon, Log,
+	UE_LOG(LogDSTMBeacon, Log,
 		TEXT("DSTM Recv [Client RPC]: ObjectId=%llu, Owner=%u, Physics=%u, Sender=%u, DataSize=%d bytes"),
 		ObjectIdRaw, OwnerServerIdRaw, PhysicsServerIdRaw, SenderServerIdRaw, SerializedData.Num());
 
@@ -61,7 +61,7 @@ void ANyxDSTMBeaconClient::ClientReceiveMigratedObject_Implementation(
 
 // ─── Pull-Migration Request RPCs ──────────────────────────────────
 
-bool ANyxDSTMBeaconClient::ServerRequestMigrateObject_Validate(
+bool ADSTMBeaconClient::ServerRequestMigrateObject_Validate(
 	uint64 ObjectIdRaw,
 	uint32 RequestingServerIdRaw)
 {
@@ -69,11 +69,11 @@ bool ANyxDSTMBeaconClient::ServerRequestMigrateObject_Validate(
 	return ObjectIdRaw != 0;
 }
 
-void ANyxDSTMBeaconClient::ServerRequestMigrateObject_Implementation(
+void ADSTMBeaconClient::ServerRequestMigrateObject_Implementation(
 	uint64 ObjectIdRaw,
 	uint32 RequestingServerIdRaw)
 {
-	UE_LOG(LogNyxDSTMBeacon, Log,
+	UE_LOG(LogDSTMBeacon, Log,
 		TEXT("DSTM Request: ObjectId=%llu requested by server %u"),
 		ObjectIdRaw, RequestingServerIdRaw);
 

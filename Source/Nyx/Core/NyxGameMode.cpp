@@ -9,7 +9,7 @@
 #include "Nyx/Networking/NyxMultiServerSubsystem.h"
 #include "Nyx/World/NyxZoneBoundary.h"
 #include "Nyx/UI/NyxHUD.h"
-#include "NyxDSTMSubsystem.h"
+#include "DSTMSubsystem.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
 #include "Engine/ChildConnection.h"
@@ -426,7 +426,7 @@ void ANyxGameMode::CheckZoneBoundaries()
 			// When DSTM is active, PostMigrate(Send) spawns NoPawnPCs internally
 			// and PostMigrate(Receive) cleans them up. Our manual claim logic
 			// would interfere with the engine's migration pipeline.
-			UNyxDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UNyxDSTMSubsystem>();
+			UDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
 			if (DSTMSub && DSTMSub->IsMeshActive())
 			{
 				continue;
@@ -647,7 +647,7 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 {
 #if UE_WITH_REMOTE_OBJECT_HANDLE
 	// Check if DSTM mesh is active
-	UNyxDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UNyxDSTMSubsystem>();
+	UDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
 	if (DSTMSub && DSTMSub->IsMeshActive())
 	{
 		// Get the destination server's FRemoteServerId
