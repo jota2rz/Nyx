@@ -39,6 +39,10 @@
 			"Enabled": true
 		},
 		{
+			"Name": "NyxDSTMTransport",
+			"Enabled": true
+		},
+		{
 			"Name": "ReplicationGraph",
 			"Enabled": true
 		}

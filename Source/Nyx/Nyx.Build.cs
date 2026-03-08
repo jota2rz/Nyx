@@ -41,6 +41,9 @@ public class Nyx : ModuleRules
 		PrivateDependencyModuleNames.Add("MultiServerReplication");
 		PrivateDependencyModuleNames.Add("OnlineSubsystemUtils"); // AOnlineBeaconClient base class
 
+		// DSTM Transport: seamless cross-server migration via RemoteObject framework
+		PrivateDependencyModuleNames.Add("NyxDSTMTransport");
+
 		// GameplayDebugger (conditional — editor/debug builds only)
 		SetupGameplayDebuggerSupport(Target);
 	}

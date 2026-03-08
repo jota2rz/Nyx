@@ -10,6 +10,7 @@
 #include "NyxGameMode.generated.h"
 
 class ANyxCharacter;
+class UNyxDSTMSubsystem;
 
 /**
  * Nyx game mode — Option 4 architecture.
@@ -135,6 +136,34 @@ private:
 	//
 	//   Proxy finalizes: primary server flips from A to B. RPCs route to B.
 	//   Client sees no interruption — the proxy handles the transition.
+
+	// ──── DSTM Migration (Approach 2 — Recommended) ────
+	//
+	// When UE_WITH_REMOTE_OBJECT_HANDLE is enabled and the DSTM beacon mesh
+	// is active, uses the engine's built-in DSTM framework instead of manual
+	// PC/Pawn swap. This achieves true seamlessness:
+	//
+	//   Server A:
+	//     1. Detects player crossed boundary
+	//     2. Calls TransferObjectOwnershipToRemoteServer(PC, DestServerId)
+	//     3. Engine serializes PC + Pawn, calls PostMigrate(Send)
+	//     4. Transport delegate sends data via beacon RPC to Server B
+	//
+	//   Server B:
+	//     1. Receives migration data via beacon RPC
+	//     2. Calls OnObjectDataReceived() — engine handles everything:
+	//        - Deserializes PC + Pawn (same FRemoteObjectId)
+	//        - PostMigrate(Receive) binds PC to connection
+	//        - Same proxy UObject → same client channel → zero disruption
+	//
+	// See SEAMLESS.md, Approach 2 for full architecture details.
+
+	/**
+	 * Migrate a player to another server using the DSTM framework.
+	 * Called when the player crosses a zone boundary and the DSTM mesh is active.
+	 * Falls back to ReleasePawnAuthority() if DSTM is not available.
+	 */
+	void MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxChar);
 
 	/**
 	 * Server A side: release authority over a proxy player.

@@ -9,6 +9,7 @@
 #include "Nyx/Networking/NyxMultiServerSubsystem.h"
 #include "Nyx/World/NyxZoneBoundary.h"
 #include "Nyx/UI/NyxHUD.h"
+#include "NyxDSTMSubsystem.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
 #include "Engine/ChildConnection.h"
@@ -20,6 +21,11 @@
 #include "Engine/PackageMapClient.h"
 #include "Misc/NetworkGuid.h"
 #include "Misc/CommandLine.h"
+
+#if UE_WITH_REMOTE_OBJECT_HANDLE
+#include "UObject/RemoteObjectTransfer.h"
+#include "UObject/RemoteObjectTypes.h"
+#endif
 
 ANyxGameMode::ANyxGameMode()
 {
@@ -416,6 +422,17 @@ void ANyxGameMode::CheckZoneBoundaries()
 		//   (long enough for the other server to release first).
 		if (PC->IsA(ANoPawnPlayerController::StaticClass()) && bIsChildConnection)
 		{
+			// ── DSTM path: skip NoPawnPC tracking ──
+			// When DSTM is active, PostMigrate(Send) spawns NoPawnPCs internally
+			// and PostMigrate(Receive) cleans them up. Our manual claim logic
+			// would interfere with the engine's migration pipeline.
+			UNyxDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UNyxDSTMSubsystem>();
+			if (DSTMSub && DSTMSub->IsMeshActive())
+			{
+				continue;
+			}
+
+			// ── Manual path: track NoPawnPC positions for claim detection ──
 			// NoPawnPC stores the player's world position via SetActorLocation()
 			// (called from ServerSetViewTargetPosition). Access it through the
 			// view target (returns AActor* where GetActorLocation is public,
@@ -588,7 +605,9 @@ void ANyxGameMode::CheckZoneBoundaries()
 			{
 				UE_LOG(LogNyx, Log, TEXT("Migration RELEASE: %s crossed boundary at X=%.0f — releasing authority"),
 					*PC->GetName(), PlayerX);
-				ReleasePawnAuthority(PC, NyxChar);
+
+				// Use DSTM migration if available, otherwise fall back to manual path
+				MigratePlayerDSTM(PC, NyxChar);
 			}
 			continue;
 		}
@@ -622,6 +641,68 @@ void ANyxGameMode::CheckZoneBoundaries()
 			NyxChar->ClientRPC_TransferToServer(TransferAddress);
 		}
 	}
+}
+
+void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxChar)
+{
+	// Save character state to SpacetimeDB before migration (persistence)
+	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+	if (ServerSub)
+	{
+		ServerSub->SaveCharacterState(NyxChar);
+	}
+
+#if UE_WITH_REMOTE_OBJECT_HANDLE
+	// Check if DSTM mesh is active
+	UNyxDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UNyxDSTMSubsystem>();
+	if (DSTMSub && DSTMSub->IsMeshActive())
+	{
+		// Get the destination server's FRemoteServerId
+		FRemoteServerId DestServerId;
+		if (DSTMSub->GetFirstPeerServerId(DestServerId))
+		{
+			UE_LOG(LogNyx, Log,
+				TEXT("Migration DSTM: Transferring %s + pawn %s to server %u via DSTM"),
+				*PC->GetName(), *NyxChar->GetName(), DestServerId.GetValue());
+
+			PlayersBeingTransferred.Add(PC);
+
+			// Transfer the PlayerController — engine handles everything:
+			// 1. Serializes PC + all subobjects
+			// 2. AActor::PostMigrate(Send) — channel close with Migrated
+			// 3. APlayerController::PostMigrate(Send) — NoPawnPC swap, connection save
+			// 4. RemoteObjectTransferDelegate fires → beacon sends to destination
+			DSTMSub->TransferActorToServer(PC, DestServerId);
+
+			// Transfer the Pawn separately
+			DSTMSub->TransferActorToServer(NyxChar, DestServerId);
+
+			UE_LOG(LogNyx, Log,
+				TEXT("Migration DSTM: Transfer initiated. Engine will handle PostMigrate + delivery."));
+
+			// Clean up server subsystem tracking
+			if (ServerSub)
+			{
+				ServerSub->OnPlayerLeft(NyxChar);
+			}
+
+			return;
+		}
+		else
+		{
+			UE_LOG(LogNyx, Warning,
+				TEXT("Migration DSTM: No peer server connected — falling back to manual path"));
+		}
+	}
+	else
+	{
+		UE_LOG(LogNyx, Log,
+			TEXT("Migration DSTM: DSTM mesh not active — using manual migration path"));
+	}
+#endif
+
+	// Fallback: manual migration path (Approach 1)
+	ReleasePawnAuthority(PC, NyxChar);
 }
 
 void ANyxGameMode::ReleasePawnAuthority(APlayerController* PC, ANyxCharacter* NyxChar)
