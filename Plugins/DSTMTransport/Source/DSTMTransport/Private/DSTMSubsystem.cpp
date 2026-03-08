@@ -418,15 +418,14 @@ void UDSTMSubsystem::HandleIncomingMigrationRequest(
 			"resolving local object and initiating transfer"),
 		ObjectIdRaw, RequestingServerIdRaw);
 
-	// Resolve the FRemoteObjectId to a local UObject and transfer it to
-	// the requesting server. The engine's RemoteObject system tracks all
-	// objects that have been assigned FRemoteObjectHandles via a global
-	// object registry (FRemoteObjectStub).
+	// Resolve the FRemoteObjectId to a local AActor and transfer it to
+	// the requesting server. We iterate all actors in the world and match
+	// against their FRemoteObjectHandle, which is assigned by the engine
+	// to objects participating in DSTM.
 	const FRemoteObjectId ObjectId(ObjectIdRaw);
 	const FRemoteServerId RequestingServerId(RequestingServerIdRaw);
 
 	// Look up the local AActor in the world by matching its FRemoteObjectHandle.
-	// RemoteObjectHandle is assigned by the engine to objects participating in DSTM.
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -440,8 +439,12 @@ void UDSTMSubsystem::HandleIncomingMigrationRequest(
 	for (TActorIterator<AActor> It(World); It; ++It)
 	{
 		AActor* Actor = *It;
-		if (Actor && Actor->GetRemoteObjectHandle().IsValid()
-			&& Actor->GetRemoteObjectHandle().GetRemoteObjectId() == ObjectId)
+		if (!Actor)
+		{
+			continue;
+		}
+		const auto& Handle = Actor->GetRemoteObjectHandle();
+		if (Handle.IsValid() && Handle.GetRemoteObjectId() == ObjectId)
 		{
 			FoundActor = Actor;
 			break;
