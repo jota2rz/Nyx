@@ -37,6 +37,7 @@ A research on how to build an open-world MMO with **Unreal Engine 5.7**, **Space
 | `Source/Nyx/Public/ModuleBindings/` | Auto-generated SpacetimeDB C++ bindings |
 | `Source/Nyx/Private/ModuleBindings/` | Auto-generated SpacetimeDB C++ bindings (impl) |
 | `server/nyx-server/` | SpacetimeDB Rust server module (tables, reducers) |
+| `Plugins/DSTMTransport/` | Beacon-based DSTM transport plugin — cross-server actor migration |
 | `Plugins/SpacetimeDbSdk/` | SpacetimeDB Unreal SDK plugin |
 | `Config/` | UE5 project configuration |
 | `Content/` | UE5 assets and maps |
@@ -73,3 +74,4 @@ Walk east to cross the zone boundary at X=0. Cyan pillars = west/server-1, orang
 | [RESEARCH.md](RESEARCH.md) | Full Phase 0 research log — 21 spikes covering plugin integration, Rust server module, round-trip validation, EOS auth, spatial interest management, client-side prediction, WASM benchmarks, physics sidecar, Docker deployment, cross-server transfer, MultiServer proxy routing, and seamless pawn authority migration |
 | [MULTISERVER.md](MULTISERVER.md) | MultiServer Replication Plugin analysis — GUID coordination, proxy routing, migration protocol, and client-side migration issues |
 | [SEAMLESS.md](SEAMLESS.md) | Seamless cross-server migration analysis — DSTM framework audit, three implementation approaches, and recommended path using beacon-based transport |
+| [DSTM.md](DSTM.md) | DSTMTransport plugin documentation — how it works, command-line arguments, initialization, actor migration API, pull migration, beacon mesh port offset, and troubleshooting |
