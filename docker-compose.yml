@@ -69,8 +69,11 @@ services:
       - "-SpacetimeDB=nyx"
       - "-ServerId=server-1"
       - "-ZoneId=zone-a"
-      - "-NyxMultiServerLocalId=server-1"
-      - "-NyxMultiServerListenPort=15000"
+      - "-DedicatedServerId=server-1"
+      - "-NyxMultiServerLocalId=server-1"       # Game code (NyxMultiServerSubsystem)
+      - "-NyxMultiServerListenPort=15000"        # Game code (NyxMultiServerSubsystem)
+      - "-MultiServerLocalId=server-1"           # DSTMTransport plugin (generic)
+      - "-MultiServerListenPort=15000"           # DSTMTransport plugin (generic)
       - "-MultiServerNumServers=2"
       - "-MultiServerPeers=unreal://nyx-server-2:15000"
       - "-ZoneSide=west"
@@ -104,8 +107,11 @@ services:
       - "-SpacetimeDB=nyx"
       - "-ServerId=server-2"
       - "-ZoneId=zone-a"
-      - "-NyxMultiServerLocalId=server-2"
-      - "-NyxMultiServerListenPort=15000"
+      - "-DedicatedServerId=server-2"
+      - "-NyxMultiServerLocalId=server-2"       # Game code (NyxMultiServerSubsystem)
+      - "-NyxMultiServerListenPort=15000"        # Game code (NyxMultiServerSubsystem)
+      - "-MultiServerLocalId=server-2"           # DSTMTransport plugin (generic)
+      - "-MultiServerListenPort=15000"           # DSTMTransport plugin (generic)
       - "-MultiServerNumServers=2"
       - "-MultiServerPeers=unreal://nyx-server-1:15000"
       - "-ZoneSide=east"

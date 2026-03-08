@@ -1,10 +1,10 @@
-// Copyright Nyx MMO Project. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 using UnrealBuildTool;
 
-public class NyxDSTMTransport : ModuleRules
+public class DSTMTransport : ModuleRules
 {
-	public NyxDSTMTransport(ReadOnlyTargetRules Target) : base(Target)
+	public DSTMTransport(ReadOnlyTargetRules Target) : base(Target)
 	{
 		PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
 

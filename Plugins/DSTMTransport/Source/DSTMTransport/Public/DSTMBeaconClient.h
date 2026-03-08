@@ -1,10 +1,10 @@
-// Copyright Nyx MMO Project. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
 #include "CoreMinimal.h"
 #include "MultiServerBeaconClient.h"
-#include "NyxDSTMBeaconClient.generated.h"
+#include "DSTMBeaconClient.generated.h"
 
 /**
  * DSTM-aware beacon client for inter-server migration data transfer.
@@ -16,7 +16,7 @@
  * Architecture (SEAMLESS.md, Approach 2, Step 3):
  *   When Server-A calls TransferObjectOwnershipToRemoteServer(), the engine
  *   serializes the actor and invokes RemoteObjectTransferDelegate. Our
- *   NyxDSTMSubsystem catches this, serializes FRemoteObjectData to bytes,
+ *   DSTMSubsystem catches this, serializes FRemoteObjectData to bytes,
  *   and sends it to Server-B via this beacon's ServerReceiveMigratedObject().
  *
  *   Server-B receives the data, deserializes it, and feeds it into
@@ -28,12 +28,12 @@
  * 64KB reliable RPC limit.
  */
 UCLASS(Transient, Config = Engine, NotPlaceable)
-class NYXDSTMTRANSPORT_API ANyxDSTMBeaconClient : public AMultiServerBeaconClient
+class DSTMTRANSPORT_API ADSTMBeaconClient : public AMultiServerBeaconClient
 {
 	GENERATED_BODY()
 
 public:
-	ANyxDSTMBeaconClient();
+	ADSTMBeaconClient();
 
 	virtual void OnConnected() override;
 

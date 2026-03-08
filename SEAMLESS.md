@@ -345,15 +345,15 @@ The critical difference: **same `FRemoteObjectId` → same proxy UObject → sam
 
 ### Estimated Effort
 
-| Task | Effort |
-|------|--------|
-| Engine rebuild with `UE_WITH_REMOTE_OBJECT_HANDLE=1` | 2-4 hours (compile time) |
-| `ADSTMBeaconClient` custom plugin implementation | 1-2 days |
-| Delegate binding + `FRemoteObjectData` serialization | 1 day |
-| Server ID initialization | 2 hours |
-| Replace release/claim with `TransferObjectOwnershipToRemoteServer` | 4 hours |
-| Testing + iteration | 2-3 days |
-| **Total** | **~1-2 weeks** |
+| Task | Effort | Status |
+|------|--------|--------|
+| Engine rebuild with `UE_WITH_REMOTE_OBJECT_HANDLE=1` | 2-4 hours (compile time) | ✅ Done |
+| `ADSTMBeaconClient` custom plugin implementation | 1-2 days | ✅ Done (`Plugins/DSTMTransport/`) |
+| Delegate binding + `FRemoteObjectData` serialization | 1 day | ✅ Done |
+| Server ID initialization | 2 hours | ✅ Done |
+| Replace release/claim with `TransferObjectOwnershipToRemoteServer` | 4 hours | ✅ Done (game code integration) |
+| Testing + iteration | 2-3 days | ⏳ Pending runtime testing |
+| **Total** | **~1-2 weeks** | |
 
 ---
 
@@ -470,29 +470,20 @@ This confirms that **Epic has not shipped the transport integration** — it's l
 
 ## Recommended Path Forward
 
-### Phase 1: Validate DSTM with Shared-Disk Transport (1 week)
+### Phase 1: Validate DSTM with Shared-Disk Transport (1 week) — SKIPPED
 
-1. Set `UE_WITH_REMOTE_OBJECT_HANDLE 1` in `CoreMiscDefines.h`
-2. Rebuild engine from source
-3. Initialize `FRemoteServerId` per server from `-DedicatedServerId=`
-4. Override the transport delegates to use a shared temp directory (e.g., a local temp folder when running all servers on one machine)
-5. Replace manual release/claim authority with `TransferObjectOwnershipToRemoteServer(PC, DestServerId)` + `TransferObjectOwnershipToRemoteServer(Pawn, DestServerId)`
-6. On Server-B, add a polling timer that checks for `.remote` files addressed to this server and calls `OnObjectDataReceived()`
-7. Remove all client-side migration workarounds (OnRep_Controller re-bind, camera integrity timers, ghost pawn cleanup)
-8. Test: client should see zero disruption during migration
+> Skipped in favor of going directly to Phase 2 (beacon-based transport).
 
-**Success criteria**: Client camera, input, and HUD remain uninterrupted during cross-server transfer. No ghost pawns, no black screen, no HUD loss.
+### Phase 2: Replace Disk Transport with Beacon RPCs (1 week) — ✅ COMPLETE
 
-### Phase 2: Replace Disk Transport with Beacon RPCs (1 week)
+1. ✅ Create `ADSTMBeaconClient` subclass with migration RPCs (in `Plugins/DSTMTransport/`)
+2. ✅ Set up `UMultiServerNode` on each game server with peer connections (via `UDSTMSubsystem`)
+3. ✅ Bind `RemoteObjectTransferDelegate` to beacon-based transport (in `FDSTMTransportModule`)
+4. ✅ Bind `RequestRemoteObjectDelegate` to beacon-based pull-request
+5. ✅ Game code integration (`NyxGameMode::MigratePlayerDSTM()` calls `UDSTMSubsystem::TransferActorToServer()`)
+6. ⏳ Stress test with rapid back-and-forth boundary crossing — pending runtime testing
 
-1. Create `ADSTMBeaconClient` subclass with migration RPCs (in a custom plugin)
-2. Set up `UMultiServerNode` on each game server with peer connections
-3. Bind `RemoteObjectTransferDelegate` to beacon-based transport
-4. Bind `RequestRemoteObjectDelegate` to beacon-based pull-request
-5. Remove shared-disk transport
-6. Stress test with rapid back-and-forth boundary crossing
-
-### Phase 3: Production Hardening (1-2 weeks)
+### Phase 3: Production Hardening (1-2 weeks) — PENDING
 
 1. Handle edge cases: player disconnects during migration, rapid boundary crossing, network partitions
 2. Integrate with external persistence layer for durable state (save/load on disconnect or crash)
@@ -554,3 +545,13 @@ Based on analysis of the MultiServerReplication plugin architecture, here's why 
 | `Engine/Plugins/Runtime/MultiServerReplication/.../MultiServerProxy.cpp:1538-1655` | `PrepareStateForRelevancy()`, `SetRemoteViewTarget()` |
 | `Engine/Plugins/Runtime/MultiServerReplication/.../MultiServerBeaconClient.cpp` | Beacon connections, `SetUnlimitedBunchSizeAllowed`, `SetUsingRemoteObjectReferences` |
 | `Engine/Plugins/Runtime/MultiServerReplication/.../MultiServerNode.h` | `UMultiServerNode` — peer-to-peer server mesh, beacon management |
+
+### DSTMTransport Plugin (Custom — `Plugins/DSTMTransport/`)
+| File | Key Content |
+|------|-------------|
+| `DSTMTransport.uplugin` | Plugin descriptor — depends on MultiServerReplication |
+| `DSTMTransportModule.h/cpp` | Module: `InitGlobalServerId()` from `-DedicatedServerId=`, pre-binds transport delegates |
+| `DSTMSubsystem.h/cpp` | Subsystem: creates DSTM beacon mesh (port +1000), routes migration data |
+| `DSTMBeaconClient.h/cpp` | Beacon: `ServerReceiveMigratedObject`, `ClientReceiveMigratedObject`, `ServerRequestMigrateObject` RPCs |
+
+**Implementation Status:** Complete. Pending runtime testing with `UE_WITH_REMOTE_OBJECT_HANDLE=1` engine build.
