@@ -40,8 +40,8 @@ public:
 	// ──── Migration Data Transfer RPCs ────
 
 	/**
-	 * Send serialized migration data to the receiving server.
-	 * Called when this beacon is the authority (we initiated the connection).
+	 * Server RPC: send serialized migration data to the server side of the beacon.
+	 * Called from the client side of the beacon connection (HasAuthority() == false).
 	 *
 	 * @param ObjectIdRaw       - FRemoteObjectId serialized as uint64
 	 * @param OwnerServerIdRaw  - FRemoteServerId of the object's owner
@@ -60,8 +60,8 @@ public:
 		const TArray<uint8>& SerializedData);
 
 	/**
-	 * Send serialized migration data in the reverse direction.
-	 * Called when we are the client side of the beacon connection.
+	 * Client RPC: send serialized migration data to the client side of the beacon.
+	 * Called from the server side of the beacon connection (HasAuthority() == true).
 	 */
 	UFUNCTION(Client, Reliable)
 	void ClientReceiveMigratedObject(
@@ -75,7 +75,8 @@ public:
 	// ──── Pull-Migration Request RPCs ────
 
 	/**
-	 * Request a remote server to send us a specific object.
+	 * Server RPC: request a remote server to send us a specific object.
+	 * Called from the client side of the beacon connection (HasAuthority() == false).
 	 * Used for pull-migration: Server-B asks Server-A to migrate an object.
 	 *
 	 * @param ObjectIdRaw          - FRemoteObjectId of the requested object
@@ -87,8 +88,8 @@ public:
 		uint32 RequestingServerIdRaw);
 
 	/**
-	 * Request migration in the reverse direction (server → client beacon side).
-	 * Called when we are the authority side of the beacon connection.
+	 * Client RPC: request migration in the reverse direction.
+	 * Called from the server side of the beacon connection (HasAuthority() == true).
 	 *
 	 * @param ObjectIdRaw          - FRemoteObjectId of the requested object
 	 * @param RequestingServerIdRaw - FRemoteServerId of the requesting server (us)

@@ -116,6 +116,15 @@ void ANyxGameMode::StartPlay()
 				UE_LOG(LogNyx, Log, TEXT("MultiServer mesh initialized from command line"));
 			}
 
+			// ── DSTM mesh: initialize the DSTM beacon transport for seamless migration ──
+			// DSTMSubsystem cannot auto-init in Initialize() because GetWorld() is
+			// null during GameInstance subsystem creation. Init here when World is ready.
+			UDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
+			if (DSTMSub && DSTMSub->InitializeFromCommandLine())
+			{
+				UE_LOG(LogNyx, Log, TEXT("DSTM mesh initialized from command line"));
+			}
+
 			// ── Zone Transfer config (Spike 19) ──
 			FString CmdTransferAddr;
 			if (FParse::Value(FCommandLine::Get(), TEXT("-TransferAddress="), CmdTransferAddr, false))
