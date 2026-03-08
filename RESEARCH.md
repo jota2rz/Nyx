@@ -5530,6 +5530,109 @@ Client (via Proxy)         Server A (primary)        Server B (non-primary)     
 
 ---
 
+## Spike 23 — DSTMTransport Plugin: Beacon-Based DSTM Network Transport (2026-03-08) ✅
+
+**Goal:** Implement the DSTM (Distributed State Transfer Machine) network transport as a standalone, reusable UE5 plugin. This plugin completes the missing transport layer in UE 5.7's RemoteObject framework by binding the `RemoteObjectTransferDelegate` and `RequestRemoteObjectDelegate` to MultiServer beacon RPCs instead of the default disk I/O.
+
+**Status:** COMPLETE — Plugin implemented, reviewed, and renamed from `NyxDSTMTransport` to `DSTMTransport` to ensure project independence.
+
+### Background
+
+Spike 21 implemented seamless proxy-based pawn authority migration using the manual `SwapPlayerControllers` approach (Approach 1 from SEAMLESS.md). While functional, this approach has inherent limitations:
+- The client sees a destroy/create cycle for the PlayerController (different GUIDs → different proxy objects → different client channels)
+- Ghost pawns remain on the client after migration (Migrated-close preserves them but they're never cleaned up)
+- Camera, input, and HUD rebinding is fragile and timing-dependent
+
+SEAMLESS.md documents **Approach 2** as the recommended path: complete the DSTM network transport layer using the existing MultiServer beacon infrastructure. The engine's DSTM framework (`RemoteObjectTransfer.h/cpp`) is architecturally complete — the only missing piece is a network transport binding. This spike implements that binding as a standalone plugin.
+
+### Architecture
+
+The DSTMTransport plugin implements SEAMLESS.md Approach 2, Step 3-4:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                     DSTMTransport Plugin                         │
+│                                                                  │
+│  FDSTMTransportModule (StartupModule)                           │
+│    ├─ InitializeServerIdentity()                                │
+│    │   └─ FRemoteServerId::InitGlobalServerId(hash(ServerId))   │
+│    └─ BindTransportDelegates()                                  │
+│        ├─ RemoteObjectTransferDelegate → OnRemoteObjectTransfer │
+│        └─ RequestRemoteObjectDelegate → OnRequestRemoteObject   │
+│                                                                  │
+│  UDSTMSubsystem (GameInstanceSubsystem)                         │
+│    ├─ Creates separate beacon mesh (port + 1000 offset)         │
+│    ├─ HandleOutgoingMigration() — serialize + send via beacon   │
+│    ├─ HandleIncomingMigrationData() — deserialize + feed engine │
+│    └─ HandleObjectRequest() — forward pull-requests             │
+│                                                                  │
+│  ADSTMBeaconClient (AMultiServerBeaconClient subclass)          │
+│    ├─ ServerReceiveMigratedObject() — Server RPC                │
+│    ├─ ClientReceiveMigratedObject() — Client RPC                │
+│    └─ ServerRequestMigrateObject() — Pull-request RPC           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Key Design Decisions
+
+1. **Standalone plugin** — The plugin has no Nyx-specific naming or dependencies. It depends only on `Core`, `CoreUObject`, `Engine`, `MultiServerReplication`, and `OnlineSubsystemUtils`. Any UE5.7 project with `UE_WITH_REMOTE_OBJECT_HANDLE=1` can use it.
+
+2. **Generic command-line args** — The plugin reads `-MultiServerLocalId=`, `-MultiServerListenIp=`, `-MultiServerListenPort=`, `-MultiServerNumServers=`, `-MultiServerPeers=`, and `-DedicatedServerId=`. Game-specific code can use its own arg names (e.g., `-NyxMultiServer*`) for its own mesh.
+
+3. **Separate beacon mesh** — The DSTM mesh runs on a port offset (+1000) from the main MultiServer mesh. This maintains isolation between game-specific beacon communication and DSTM transport.
+
+4. **Pre-binding delegates in StartupModule()** — The module binds `RemoteObjectTransferDelegate` and `RequestRemoteObjectDelegate` before `InitRemoteObjects()` runs. The engine's `RemoteObject.cpp` checks `!IsBound()` before applying disk defaults, so our bindings win.
+
+5. **HasAuthority() RPC direction** — When sending migration data via a beacon, the subsystem checks `HasAuthority()` to determine whether to use the Server RPC (client→server) or Client RPC (server→client). This matches the MultiServer beacon connection model where one side is the "server" (listener) and the other is the "client" (connector).
+
+6. **GetTypeHash for server identity** — `FRemoteServerId` is derived from `GetTypeHash(ServerIdString)`. The same hash function is used consistently for server identity initialization, peer lookup, and routing.
+
+### Migration Flow (DSTM vs Manual)
+
+**Manual path (Approach 1, Spike 21):**
+```
+Server-A: Destroy pawn → Swap PC → NoPawnPC → Proxy detects → Server-B: Spawn new pawn+PC
+Result: Client sees destroy/create cycle (≈200ms seam)
+```
+
+**DSTM path (Approach 2, this spike):**
+```
+Server-A: TransferObjectOwnership(PC, DestServerId) → Serialize → Beacon RPC → Server-B
+Server-B: OnObjectDataReceived → Deserialize same object → PostMigrate(Receive) → Same GUID
+Result: Client sees zero disruption (same proxy object, same client channel)
+```
+
+### Files Changed
+
+| File | Change |
+|------|--------|
+| `Plugins/DSTMTransport/DSTMTransport.uplugin` | New plugin descriptor (was `NyxDSTMTransport`) |
+| `Plugins/DSTMTransport/Source/DSTMTransport/DSTMTransport.Build.cs` | Build config — depends on MultiServerReplication, OnlineSubsystemUtils |
+| `Plugins/DSTMTransport/Source/DSTMTransport/Public/DSTMTransportModule.h` | Module: server identity init + delegate binding |
+| `Plugins/DSTMTransport/Source/DSTMTransport/Private/DSTMTransportModule.cpp` | Module implementation |
+| `Plugins/DSTMTransport/Source/DSTMTransport/Public/DSTMSubsystem.h` | Subsystem: mesh management + migration API |
+| `Plugins/DSTMTransport/Source/DSTMTransport/Private/DSTMSubsystem.cpp` | Subsystem implementation |
+| `Plugins/DSTMTransport/Source/DSTMTransport/Public/DSTMBeaconClient.h` | Beacon: migration RPCs + delegates |
+| `Plugins/DSTMTransport/Source/DSTMTransport/Private/DSTMBeaconClient.cpp` | Beacon implementation |
+| `Nyx.uproject` | Plugin reference: `NyxDSTMTransport` → `DSTMTransport` |
+| `Source/Nyx/Nyx.Build.cs` | Module dependency: `NyxDSTMTransport` → `DSTMTransport` |
+| `Source/Nyx/Core/NyxGameMode.h` | Forward declaration: `UNyxDSTMSubsystem` → `UDSTMSubsystem` |
+| `Source/Nyx/Core/NyxGameMode.cpp` | Include + usage: `NyxDSTMSubsystem` → `DSTMSubsystem` |
+| `docker-compose.yml` | Added `-DedicatedServerId=`, `-MultiServerLocalId=`, `-MultiServerListenPort=` |
+
+### Prerequisites
+
+- **Engine rebuild required**: `UE_WITH_REMOTE_OBJECT_HANDLE=1` in `CoreMiscDefines.h` (already done in engine source)
+- **MultiServerReplication plugin**: Must be enabled (provides `UMultiServerNode`, `AMultiServerBeaconClient`)
+
+### Next Steps
+
+1. **Runtime testing**: Deploy with 2+ servers and verify end-to-end DSTM migration flow
+2. **Replace manual migration**: Update `NyxGameMode::CheckZoneBoundaries()` to use `MigratePlayerDSTM()` as the primary path (currently falls back to `ReleasePawnAuthority()` if DSTM mesh is not active)
+3. **Production hardening**: Handle edge cases (disconnect during migration, rapid boundary crossing, network partitions)
+
+---
+
 ## References
 
 - SpacetimeDB 2.0 Unreal Reference: https://spacetimedb.com/docs/2.0.0-rc1/clients/unreal
