@@ -222,10 +222,12 @@ void UNyxDSTMSubsystem::HandleOutgoingMigration(
 		Info.OwnerServerId.GetValue(),
 		Info.PhysicsServerId.GetValue());
 
-	// Serialize FRemoteObjectData to a byte array for network transfer
+	// Serialize FRemoteObjectData to a byte array for network transfer.
+	// Make a copy since archive serialization requires a non-const reference.
 	TArray<uint8> SerializedData;
 	FMemoryWriter Writer(SerializedData);
-	Writer << const_cast<UE::RemoteObject::Transfer::FMigrateSendParams&>(Params).ObjectData;
+	FRemoteObjectData ObjectDataCopy = Params.ObjectData;
+	Writer << ObjectDataCopy;
 
 	UE_LOG(LogNyxDSTMSub, Log,
 		TEXT("DSTM Send: Serialized %d bytes of object data"),
@@ -362,8 +364,10 @@ void UNyxDSTMSubsystem::HandleIncomingMigrationData(
 	if (Reader.IsError())
 	{
 		UE_LOG(LogNyxDSTMSub, Error,
-			TEXT("DSTM Recv: Failed to deserialize FRemoteObjectData (%d bytes)!"),
-			SerializedData.Num());
+			TEXT("DSTM Recv: Failed to deserialize FRemoteObjectData — "
+				"ObjectId=%llu, Owner=%u, Sender=%u, DataSize=%d bytes. "
+				"Possible version mismatch or corrupted payload."),
+			ObjectIdRaw, OwnerServerIdRaw, SenderServerIdRaw, SerializedData.Num());
 		return;
 	}
 
@@ -424,9 +428,12 @@ TArray<FString> UNyxDSTMSubsystem::OffsetPeerPorts(
 		}
 		else
 		{
-			// No port specified — append default offset port
+			// No port specified — cannot compute offset, peer will not be reachable
 			UE_LOG(LogNyxDSTMSub, Warning,
-				TEXT("DSTM OffsetPeerPorts: Address '%s' has no port — skipping"), *Addr);
+				TEXT("DSTM OffsetPeerPorts: Address '%s' has no port separator ':' — "
+					"this peer will NOT have a DSTM beacon connection. "
+					"Use 'host:port' format in -MultiServerPeers="),
+				*Addr);
 		}
 	}
 

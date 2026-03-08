@@ -645,13 +645,6 @@ void ANyxGameMode::CheckZoneBoundaries()
 
 void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxChar)
 {
-	// Save character state to SpacetimeDB before migration (persistence)
-	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
-	if (ServerSub)
-	{
-		ServerSub->SaveCharacterState(NyxChar);
-	}
-
 #if UE_WITH_REMOTE_OBJECT_HANDLE
 	// Check if DSTM mesh is active
 	UNyxDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UNyxDSTMSubsystem>();
@@ -664,6 +657,13 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 			UE_LOG(LogNyx, Log,
 				TEXT("Migration DSTM: Transferring %s + pawn %s to server %u via DSTM"),
 				*PC->GetName(), *NyxChar->GetName(), DestServerId.GetValue());
+
+			// Save character state to SpacetimeDB before migration (persistence)
+			UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+			if (ServerSub)
+			{
+				ServerSub->SaveCharacterState(NyxChar);
+			}
 
 			PlayersBeingTransferred.Add(PC);
 
@@ -686,6 +686,12 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 				ServerSub->OnPlayerLeft(NyxChar);
 			}
 
+			// Transfer is synchronous — PostMigrate(Send) has already run,
+			// removing the PC from the world. Clean up our tracking sets.
+			PlayersBeingTransferred.Remove(PC);
+			TransferArrivalTimes.Remove(PC);
+			NoPawnTracking.Remove(PC);
+
 			return;
 		}
 		else
@@ -702,6 +708,7 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 #endif
 
 	// Fallback: manual migration path (Approach 1)
+	// ReleasePawnAuthority handles its own SpacetimeDB save internally.
 	ReleasePawnAuthority(PC, NyxChar);
 }
 
