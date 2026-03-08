@@ -112,6 +112,8 @@ void FDSTMTransportModule::BindTransportDelegates()
  * Find the DSTMSubsystem in any active game instance.
  * Works on dedicated servers where GameViewport may not exist.
  * Caches the result to avoid iterating world contexts on every delegate call.
+ * Note: Called exclusively from the game thread (engine transport delegates).
+ * The TWeakObjectPtr self-invalidates when the subsystem is GC'd.
  */
 static UDSTMSubsystem* FindDSTMSubsystem()
 {
