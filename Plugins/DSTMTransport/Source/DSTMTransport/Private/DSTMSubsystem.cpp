@@ -8,6 +8,7 @@
 #include "Misc/Parse.h"
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/MemoryReader.h"
+#include "EngineUtils.h" // TActorIterator
 
 #if UE_WITH_REMOTE_OBJECT_HANDLE
 #include "UObject/RemoteObjectTransfer.h"
@@ -33,8 +34,10 @@ void UDSTMSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	UE_LOG(LogDSTMSub, Log,
 		TEXT("DSTMSubsystem initialized (inert until DSTM mesh setup)"));
 
-	// Auto-initialize from command line if multi-server mode is configured
-	InitializeFromCommandLine();
+	// Do NOT auto-initialize here — GetWorld() returns nullptr during
+	// GameInstance subsystem initialization because no World has been
+	// created yet. The game mode calls InitializeFromCommandLine()
+	// from StartPlay() when the World is ready.
 }
 
 void UDSTMSubsystem::Deinitialize()
@@ -412,14 +415,59 @@ void UDSTMSubsystem::HandleIncomingMigrationRequest(
 {
 	UE_LOG(LogDSTMSub, Log,
 		TEXT("DSTM Pull-Request: Object %llu requested by server %u — "
-			"engine will initiate transfer if object is local"),
+			"resolving local object and initiating transfer"),
 		ObjectIdRaw, RequestingServerIdRaw);
 
-	// The engine's remote object system handles pull-request resolution internally.
-	// When OnObjectDataReceived or a request comes in, the transfer queue
-	// checks if the object exists locally and initiates a send if appropriate.
-	// No additional handling needed here — the request delegate is primarily
-	// for logging and monitoring.
+	// Resolve the FRemoteObjectId to a local AActor and transfer it to
+	// the requesting server. We iterate all actors in the world and match
+	// against their FRemoteObjectHandle, which is assigned by the engine
+	// to objects participating in DSTM.
+	const FRemoteObjectId ObjectId(ObjectIdRaw);
+	const FRemoteServerId RequestingServerId(RequestingServerIdRaw);
+
+	// Look up the local AActor in the world by matching its FRemoteObjectHandle.
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogDSTMSub, Error,
+			TEXT("DSTM Pull-Request: No World — cannot resolve object %llu"),
+			ObjectIdRaw);
+		return;
+	}
+
+	AActor* FoundActor = nullptr;
+	for (TActorIterator<AActor> It(World); It; ++It)
+	{
+		AActor* Actor = *It;
+		if (!Actor)
+		{
+			continue;
+		}
+		const auto& Handle = Actor->GetRemoteObjectHandle();
+		if (Handle.IsValid() && Handle.GetRemoteObjectId() == ObjectId)
+		{
+			FoundActor = Actor;
+			break;
+		}
+	}
+
+	if (!FoundActor)
+	{
+		UE_LOG(LogDSTMSub, Warning,
+			TEXT("DSTM Pull-Request: Object %llu not found locally — "
+				"it may have already been transferred or destroyed"),
+			ObjectIdRaw);
+		return;
+	}
+
+	UE_LOG(LogDSTMSub, Log,
+		TEXT("DSTM Pull-Request: Resolved object %llu to %s — initiating transfer to server %u"),
+		ObjectIdRaw, *FoundActor->GetName(), RequestingServerIdRaw);
+
+	// Initiate the push transfer. This calls TransferObjectOwnershipToRemoteServer()
+	// which serializes the actor, fires PostMigrate(Send), and invokes
+	// RemoteObjectTransferDelegate → HandleOutgoingMigration() → beacon send.
+	TransferActorToServer(FoundActor, RequestingServerId);
 }
 
 #endif // UE_WITH_REMOTE_OBJECT_HANDLE
