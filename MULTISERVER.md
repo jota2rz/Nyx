@@ -1231,7 +1231,7 @@ Server-1                    Proxy                     Server-2                  
 
 Enables: `PostMigrate()`, `Serialize()` migration, `FRemoteObjectTransferQueue`, ownership tracking, `SetUsingRemoteObjectReferences(true)` on beacons.
 
-### Step 2: Shared-Disk Transport (`NyxDSTMTransport.h/cpp`)
+### Step 2: Shared-Disk Transport (`DSTMTransport.h/cpp`)
 Custom delegate binding using shared directory so both servers read/write to same path.
 
 ### Step 3: Server ID Init

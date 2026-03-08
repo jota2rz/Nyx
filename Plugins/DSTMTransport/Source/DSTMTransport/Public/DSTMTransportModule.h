@@ -1,4 +1,4 @@
-// Copyright Nyx MMO Project. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
@@ -11,7 +11,7 @@
 #endif
 
 /**
- * Module for the Nyx DSTM Transport plugin.
+ * Module for the DSTM Transport plugin.
  *
  * Responsibilities:
  *   1. Initialize FRemoteServerId for this server instance (from -DedicatedServerId=)
@@ -26,13 +26,13 @@
  *
  * See SEAMLESS.md, Approach 2, Steps 2 & 4.
  */
-class FNyxDSTMTransportModule : public IModuleInterface
+class FDSTMTransportModule : public IModuleInterface
 {
 public:
 	virtual void StartupModule() override;
 	virtual void ShutdownModule() override;
 
-	static FNyxDSTMTransportModule& Get();
+	static FDSTMTransportModule& Get();
 
 private:
 	/** Parse -DedicatedServerId= and call FRemoteServerId::InitGlobalServerId(). */
@@ -45,7 +45,7 @@ private:
 	/**
 	 * Static callback for RemoteObjectTransferDelegate.
 	 * Called by the engine when an object is ready to be sent to a remote server.
-	 * Finds the NyxDSTMSubsystem and routes serialized data through the beacon mesh.
+	 * Finds the UDSTMSubsystem and routes serialized data through the beacon mesh.
 	 */
 	static void OnRemoteObjectTransfer(const UE::RemoteObject::Transfer::FMigrateSendParams& Params);
 

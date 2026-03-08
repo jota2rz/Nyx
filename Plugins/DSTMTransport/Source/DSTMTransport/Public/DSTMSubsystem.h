@@ -1,4 +1,4 @@
-// Copyright Nyx MMO Project. All Rights Reserved.
+// Copyright Epic Games, Inc. All Rights Reserved.
 
 #pragma once
 
@@ -10,16 +10,16 @@
 #include "UObject/RemoteObjectTypes.h"
 #endif
 
-#include "NyxDSTMSubsystem.generated.h"
+#include "DSTMSubsystem.generated.h"
 
 class UMultiServerNode;
 class AMultiServerBeaconClient;
-class ANyxDSTMBeaconClient;
+class ADSTMBeaconClient;
 
 /**
  * Manages the DSTM beacon transport mesh for seamless cross-server migration.
  *
- * This subsystem is the runtime counterpart of the NyxDSTMTransportModule.
+ * This subsystem is the runtime counterpart of the DSTMTransportModule.
  * The module binds static delegate callbacks at startup; those callbacks
  * forward to this subsystem for actual routing through the beacon mesh.
  *
@@ -37,18 +37,18 @@ class ANyxDSTMBeaconClient;
  *   │  close]      │       │                      │       │  (Receive)   │
  *   └──────────────┘       └──────────────────────┘       └──────────────┘
  *
- * The mesh is separate from the combat/handoff mesh (NyxMultiServerSubsystem)
- * to maintain plugin isolation. It reads the same command-line peer config
- * with an offset port (+1000).
+ * The mesh is separate from the combat/handoff mesh to maintain plugin
+ * isolation. It reads multi-server command-line peer config with an
+ * offset port (+1000).
  *
  * Lifecycle:
- *   1. NyxDSTMTransportModule::StartupModule() binds transport delegates
+ *   1. DSTMTransportModule::StartupModule() binds transport delegates
  *   2. This subsystem initializes and creates the beacon mesh
  *   3. On peer connection, migration data can flow
  *   4. On shutdown, mesh is torn down gracefully
  */
 UCLASS()
-class NYXDSTMTRANSPORT_API UNyxDSTMSubsystem : public UGameInstanceSubsystem
+class DSTMTRANSPORT_API UDSTMSubsystem : public UGameInstanceSubsystem
 {
 	GENERATED_BODY()
 
@@ -61,12 +61,12 @@ public:
 
 	/**
 	 * Initialize the DSTM beacon mesh from command-line arguments.
-	 * Reads the same -NyxMultiServerLocalId=, -NyxMultiServerListenPort=, -MultiServerPeers=
-	 * as NyxMultiServerSubsystem, but uses an offset port for the DSTM mesh.
+	 * Reads -MultiServerLocalId=, -MultiServerListenPort=, -MultiServerPeers=
+	 * with an offset port for the DSTM mesh.
 	 *
 	 * @return true if DSTM mesh was configured and created
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|DSTM")
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
 	bool InitializeFromCommandLine();
 
 	/**
@@ -78,7 +78,7 @@ public:
 	 * @param NumServers     - Total expected server count
 	 * @param PeerAddresses  - Array of "IP:Port" for DSTM beacons on other servers
 	 */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|DSTM")
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
 	void InitializeDSTMMesh(
 		const FString& LocalPeerId,
 		const FString& ListenIp,
@@ -87,15 +87,15 @@ public:
 		const TArray<FString>& PeerAddresses);
 
 	/** Is the DSTM mesh active and ready for migration? */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|DSTM")
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
 	bool IsMeshActive() const { return DSTMNode != nullptr; }
 
 	/** Are all expected DSTM peer connections established? */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|DSTM")
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
 	bool AreAllPeersConnected() const;
 
 	/** Shut down the DSTM mesh. */
-	UFUNCTION(BlueprintCallable, Category = "Nyx|DSTM")
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
 	void ShutdownMesh();
 
 	// ──── Migration API ────
@@ -173,14 +173,14 @@ private:
 	static TArray<FString> OffsetPeerPorts(const TArray<FString>& PeerAddresses, int32 Offset);
 
 	/** Find the beacon client connected to a specific server. */
-	ANyxDSTMBeaconClient* FindBeaconForServer(uint32 ServerIdHash) const;
+	ADSTMBeaconClient* FindBeaconForServer(uint32 ServerIdHash) const;
 
 	UPROPERTY()
 	TObjectPtr<UMultiServerNode> DSTMNode;
 
 	/** Map from peer DedicatedServerId string → beacon client. */
 	UPROPERTY()
-	TMap<FString, TObjectPtr<ANyxDSTMBeaconClient>> PeerBeacons;
+	TMap<FString, TObjectPtr<ADSTMBeaconClient>> PeerBeacons;
 
 	/** Map from hashed server ID → peer DedicatedServerId string (reverse lookup). */
 	TMap<uint32, FString> ServerIdHashToPeerId;
