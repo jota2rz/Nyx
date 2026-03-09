@@ -5577,9 +5577,9 @@ The DSTMTransport plugin implements SEAMLESS.md Approach 2, Step 3-4:
 
 1. **Standalone plugin** — The plugin has no Nyx-specific naming or dependencies. It depends only on `Core`, `CoreUObject`, `Engine`, `MultiServerReplication`, and `OnlineSubsystemUtils`. Any UE5.7 project with `UE_WITH_REMOTE_OBJECT_HANDLE=1` can use it.
 
-2. **Generic command-line args** — The plugin reads `-MultiServerLocalId=`, `-MultiServerListenIp=`, `-MultiServerListenPort=`, `-MultiServerNumServers=`, `-MultiServerPeers=`, and `-DedicatedServerId=`. Game-specific code can use its own arg names (e.g., `-NyxMultiServer*`) for its own mesh.
+2. **DSTM-specific command-line args** — The plugin reads `-DedicatedServerId=`, `-DSTMListenIp=`, `-DSTMListenPort=`, and `-DSTMPeers=`. These are independent from any game-level mesh args (e.g., `-NyxMultiServer*`, `-MultiServerPeers=`).
 
-3. **Separate beacon mesh** — The DSTM mesh runs on a port offset (+1000) from the main MultiServer mesh. This maintains isolation between game-specific beacon communication and DSTM transport.
+3. **Separate beacon mesh** — The DSTM mesh runs on its own port (default 16000), independent of any game-level MultiServer mesh. This maintains isolation between game-specific beacon communication and DSTM transport.
 
 4. **Pre-binding delegates in StartupModule()** — The module binds `RemoteObjectTransferDelegate` and `RequestRemoteObjectDelegate` before `InitRemoteObjects()` runs. The engine's `RemoteObject.cpp` checks `!IsBound()` before applying disk defaults, so our bindings win.
 

@@ -43,12 +43,12 @@ $ue = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe
 $proj = "C:\UE\Nyx\Nyx.uproject"
 
 # Server-1 (west zone)
-# DSTM mesh: beacon on port 16000 (15000 + 1000 offset), peers with server-2
-Start-Process $ue "$proj -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneSide=west -MultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -abslog=C:\UE\Nyx\server1_log.txt"
+# Game mesh on port 15000, DSTM beacon on port 16000
+Start-Process $ue "$proj -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneSide=west -NyxMultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -DSTMListenPort=16000 -DSTMPeers=127.0.0.1:16001 -abslog=C:\UE\Nyx\server1_log.txt"
 
 # Server-2 (east zone)
-# DSTM mesh: beacon on port 16001 (15001 + 1000 offset), peers with server-1
-Start-Process $ue "$proj -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneSide=east -MultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -abslog=C:\UE\Nyx\server2_log.txt"
+# Game mesh on port 15001, DSTM beacon on port 16001
+Start-Process $ue "$proj -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneSide=east -NyxMultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -DSTMListenPort=16001 -DSTMPeers=127.0.0.1:16000 -abslog=C:\UE\Nyx\server2_log.txt"
 
 # Wait ~15s for servers to start and DSTM beacons to connect
 
