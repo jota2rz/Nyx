@@ -28,7 +28,6 @@ class ANyxMultiServerBeaconClient;
  *
  * Command-line args (parsed by UMultiServerNode):
  *   -MultiServerPeers=IP1:Port1,IP2:Port2,...
- *   -MultiServerNumServers=N
  *   -DedicatedServerId=UniqueServerId
  *   -NyxMultiServerListenPort=PortNum
  */
@@ -49,20 +48,21 @@ public:
 	 * Called by NyxGameMode when SpacetimeDB zone_server table
 	 * indicates this zone has multiple servers.
 	 *
+	 * NumServers is derived automatically as PeerAddresses.Num() + 1 (peers + self).
+	 *
 	 * @param LocalPeerId - This server's unique ID (usually the DedicatedServerId)
 	 * @param ListenIp - IP to listen on for beacon connections
 	 * @param ListenPort - Port for beacon listener
-	 * @param NumServers - Total expected server count in this zone
 	 * @param PeerAddresses - Array of "IP:Port" for other servers in the mesh
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Nyx|MultiServer")
 	void InitializeMultiServerMesh(const FString& LocalPeerId,
 		const FString& ListenIp, int32 ListenPort,
-		int32 NumServers, const TArray<FString>& PeerAddresses);
+		const TArray<FString>& PeerAddresses);
 
 	/**
 	 * Initialize from command-line arguments.
-	 * Reads -MultiServerPeers, -MultiServerNumServers, etc.
+	 * Reads -MultiServerPeers, etc.
 	 * Returns true if multi-server mode was configured.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "Nyx|MultiServer")

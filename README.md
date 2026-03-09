@@ -44,11 +44,11 @@ $proj = "C:\UE\Nyx\Nyx.uproject"
 
 # Server-1 (west zone)
 # DSTM mesh: beacon on port 16000 (15000 + 1000 offset), peers with server-2
-Start-Process $ue "$proj -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneSide=west -DSTMGuidSeed=100000 -MultiServerListenPort=15000 -MultiServerNumServers=2 -MultiServerPeers=127.0.0.1:15001 -abslog=C:\UE\Nyx\server1_log.txt"
+Start-Process $ue "$proj -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneSide=west -DSTMGuidSeed=100000 -MultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -abslog=C:\UE\Nyx\server1_log.txt"
 
 # Server-2 (east zone)
 # DSTM mesh: beacon on port 16001 (15001 + 1000 offset), peers with server-1
-Start-Process $ue "$proj -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneSide=east -DSTMGuidSeed=200000 -MultiServerListenPort=15001 -MultiServerNumServers=2 -MultiServerPeers=127.0.0.1:15000 -abslog=C:\UE\Nyx\server2_log.txt"
+Start-Process $ue "$proj -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneSide=east -DSTMGuidSeed=200000 -MultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -abslog=C:\UE\Nyx\server2_log.txt"
 
 # Wait ~15s for servers to start and DSTM beacons to connect
 

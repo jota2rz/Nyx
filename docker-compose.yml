@@ -72,7 +72,6 @@ services:
       - "-DedicatedServerId=server-1"
       - "-NyxMultiServerListenPort=15000"        # Game code (NyxMultiServerSubsystem)
       - "-MultiServerListenPort=15000"           # DSTMTransport plugin (generic)
-      - "-MultiServerNumServers=2"
       - "-MultiServerPeers=unreal://nyx-server-2:15000"
       - "-DSTMGuidSeed=100000"
       - "-ZoneSide=west"
@@ -109,7 +108,6 @@ services:
       - "-DedicatedServerId=server-2"
       - "-NyxMultiServerListenPort=15000"        # Game code (NyxMultiServerSubsystem)
       - "-MultiServerListenPort=15000"           # DSTMTransport plugin (generic)
-      - "-MultiServerNumServers=2"
       - "-MultiServerPeers=unreal://nyx-server-1:15000"
       - "-DSTMGuidSeed=200000"
       - "-ZoneSide=east"

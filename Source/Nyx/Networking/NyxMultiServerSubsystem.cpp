@@ -37,7 +37,6 @@ void UNyxMultiServerSubsystem::InitializeMultiServerMesh(
 	const FString& LocalPeerId,
 	const FString& ListenIp,
 	int32 ListenPort,
-	int32 NumServers,
 	const TArray<FString>& PeerAddresses)
 {
 	if (MultiServerNode)
@@ -52,6 +51,8 @@ void UNyxMultiServerSubsystem::InitializeMultiServerMesh(
 		UE_LOG(LogNyxMultiServerSub, Error, TEXT("Cannot initialize MultiServer mesh — no World"));
 		return;
 	}
+
+	const int32 NumServers = PeerAddresses.Num() + 1;
 
 	FMultiServerNodeCreateParams Params;
 	Params.World = World;
@@ -93,9 +94,6 @@ bool UNyxMultiServerSubsystem::InitializeFromCommandLine()
 	int32 ListenPort = 15000;
 	FParse::Value(FCommandLine::Get(), TEXT("-NyxMultiServerListenPort="), ListenPort);
 
-	int32 NumServers = 1;
-	FParse::Value(FCommandLine::Get(), TEXT("-MultiServerNumServers="), NumServers);
-
 	FString PeersArg;
 	TArray<FString> PeerAddresses;
 	if (FParse::Value(FCommandLine::Get(), TEXT("-MultiServerPeers="), PeersArg, false))
@@ -104,10 +102,10 @@ bool UNyxMultiServerSubsystem::InitializeFromCommandLine()
 	}
 
 	UE_LOG(LogNyxMultiServerSub, Log,
-		TEXT("MultiServer mode detected from command line: LocalId=%s, ListenPort=%d, NumServers=%d"),
-		*LocalPeerId, ListenPort, NumServers);
+		TEXT("MultiServer mode detected from command line: LocalId=%s, ListenPort=%d, Peers=%d"),
+		*LocalPeerId, ListenPort, PeerAddresses.Num());
 
-	InitializeMultiServerMesh(LocalPeerId, ListenIp, ListenPort, NumServers, PeerAddresses);
+	InitializeMultiServerMesh(LocalPeerId, ListenIp, ListenPort, PeerAddresses);
 	return true;
 }
 
