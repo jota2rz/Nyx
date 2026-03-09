@@ -11,5 +11,9 @@ public class NyxServerTarget : TargetRules
 		DefaultBuildSettings = BuildSettingsVersion.V6;
 		IncludeOrderVersion = EngineIncludeOrderVersion.Unreal5_7;
 		ExtraModuleNames.Add("Nyx");
+
+		// Enable DSTM remote object handles for cross-server actor migration.
+		// This is not supported in editor targets — only set it for packaged server builds.
+		GlobalDefinitions.Add("UE_WITH_REMOTE_OBJECT_HANDLE=1");
 	}
 }
