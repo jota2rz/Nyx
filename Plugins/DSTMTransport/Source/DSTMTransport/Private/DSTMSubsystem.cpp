@@ -9,15 +9,47 @@
 #include "Serialization/MemoryWriter.h"
 #include "Serialization/MemoryReader.h"
 #include "EngineUtils.h" // TActorIterator
+#include "Engine/NetDriver.h"
+#include "Engine/PackageMapClient.h" // FNetGUIDCache
 
 #if UE_WITH_REMOTE_OBJECT_HANDLE
 #include "UObject/RemoteObjectTransfer.h"
 #include "UObject/RemoteObjectTypes.h"
+#include "UObject/RemoteObjectPathName.h" // FRemoteObjectTables, FPackedRemoteObjectPathName operator<<
 #endif
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(DSTMSubsystem)
 
 DEFINE_LOG_CATEGORY_STATIC(LogDSTMSub, Log, All);
+
+#if UE_WITH_REMOTE_OBJECT_HANDLE
+/**
+ * Serialize/deserialize FRemoteObjectData to/from an FArchive.
+ * FRemoteObjectData has no built-in operator<< — we serialize individual members.
+ * Works bidirectionally: FMemoryWriter (save) and FMemoryReader (load).
+ *
+ * - Tables: has exported operator<< in RemoteObjectPathName.h
+ * - PathNames: TArray<FPackedRemoteObjectPathName>, each has exported operator<<
+ * - Bytes: FRemoteObjectBytes only has a file-scoped operator<< in engine internals,
+ *          so we serialize each chunk's TArray<uint8> manually
+ */
+static void ArchiveRemoteObjectData(FArchive& Ar, FRemoteObjectData& Data)
+{
+	Ar << Data.Tables;
+	Ar << Data.PathNames;
+
+	int32 NumChunks = Data.Bytes.Num();
+	Ar << NumChunks;
+	if (Ar.IsLoading())
+	{
+		Data.Bytes.SetNum(NumChunks);
+	}
+	for (FRemoteObjectBytes& Chunk : Data.Bytes)
+	{
+		Ar << Chunk.Bytes;
+	}
+}
+#endif // UE_WITH_REMOTE_OBJECT_HANDLE
 
 // ─── Lifecycle ────────────────────────────────────────────────────
 
@@ -90,6 +122,15 @@ bool UDSTMSubsystem::InitializeFromCommandLine()
 		*LocalPeerId, DSTMListenPort, BaseListenPort, DSTMPortOffset, NumServers, DSTMPeerAddresses.Num());
 
 	InitializeDSTMMesh(LocalPeerId, ListenIp, DSTMListenPort, NumServers, DSTMPeerAddresses);
+
+	// Apply GUID seed if specified (prevents FNetworkGUID collisions between servers)
+	uint64 GuidSeed = 0;
+	FParse::Value(FCommandLine::Get(), TEXT("-DSTMGuidSeed="), GuidSeed);
+	if (GuidSeed > 0)
+	{
+		ApplyGuidSeed(GuidSeed);
+	}
+
 	return DSTMNode != nullptr;
 #endif
 }
@@ -151,6 +192,32 @@ bool UDSTMSubsystem::AreAllPeersConnected() const
 	return DSTMNode && DSTMNode->AreAllServersConnected();
 }
 
+int32 UDSTMSubsystem::GetConnectedPeerCount() const
+{
+	int32 Count = 0;
+	for (const auto& Pair : PeerBeacons)
+	{
+		if (Pair.Value && IsValid(Pair.Value))
+		{
+			Count++;
+		}
+	}
+	return Count;
+}
+
+TArray<FString> UDSTMSubsystem::GetConnectedPeerIds() const
+{
+	TArray<FString> Result;
+	for (const auto& Pair : PeerBeacons)
+	{
+		if (Pair.Value && IsValid(Pair.Value))
+		{
+			Result.Add(Pair.Key);
+		}
+	}
+	return Result;
+}
+
 void UDSTMSubsystem::ShutdownMesh()
 {
 	if (DSTMNode)
@@ -164,6 +231,35 @@ void UDSTMSubsystem::ShutdownMesh()
 }
 
 // ─── Migration API ───────────────────────────────────────────────
+
+void UDSTMSubsystem::ApplyGuidSeed(uint64 GuidSeed)
+{
+	if (GuidSeed == 0)
+	{
+		return;
+	}
+
+	UWorld* World = GetWorld();
+	if (!World)
+	{
+		UE_LOG(LogDSTMSub, Warning,
+			TEXT("ApplyGuidSeed: No World — cannot apply GUID seed"));
+		return;
+	}
+
+	UNetDriver* NetDriver = World->GetNetDriver();
+	if (!NetDriver)
+	{
+		UE_LOG(LogDSTMSub, Warning,
+			TEXT("ApplyGuidSeed: No NetDriver — cannot apply GUID seed"));
+		return;
+	}
+
+	NetDriver->GuidCache = MakeShared<FNetGUIDCache>(NetDriver, GuidSeed);
+
+	UE_LOG(LogDSTMSub, Log,
+		TEXT("DSTM: Applied GUID seed %llu to NetDriver GuidCache"), GuidSeed);
+}
 
 #if UE_WITH_REMOTE_OBJECT_HANDLE
 
@@ -185,7 +281,7 @@ void UDSTMSubsystem::TransferActorToServer(AActor* Actor, FRemoteServerId DestSe
 
 	UE_LOG(LogDSTMSub, Log,
 		TEXT("TransferActorToServer: Initiating DSTM transfer of %s to server %u"),
-		*Actor->GetName(), DestServerId.GetValue());
+		*Actor->GetName(), DestServerId.GetIdNumber());
 
 	// This one call does everything:
 	// 1. Serializes the actor + all subobjects
@@ -197,14 +293,14 @@ void UDSTMSubsystem::TransferActorToServer(AActor* Actor, FRemoteServerId DestSe
 
 FRemoteServerId UDSTMSubsystem::GetRemoteServerIdFromString(const FString& DedicatedServerId)
 {
-	return FRemoteServerId(GetTypeHash(DedicatedServerId));
+	return FRemoteServerId::FromIdNumber(GetTypeHash(DedicatedServerId));
 }
 
 bool UDSTMSubsystem::GetFirstPeerServerId(FRemoteServerId& OutServerId) const
 {
 	for (const auto& Pair : ServerIdHashToPeerId)
 	{
-		OutServerId = FRemoteServerId(Pair.Key);
+		OutServerId = FRemoteServerId::FromIdNumber(Pair.Key);
 		return true;
 	}
 	return false;
@@ -221,17 +317,17 @@ void UDSTMSubsystem::HandleOutgoingMigration(
 
 	UE_LOG(LogDSTMSub, Log,
 		TEXT("DSTM Send: ObjectId=%llu → DestServer=%u (Owner=%u, Physics=%u)"),
-		Info.ObjectId.GetValue(),
-		Info.DestinationServerId.GetValue(),
-		Info.OwnerServerId.GetValue(),
-		Info.PhysicsServerId.GetValue());
+		Info.ObjectId.GetIdNumber(),
+		Info.DestinationServerId.GetIdNumber(),
+		Info.OwnerServerId.GetIdNumber(),
+		Info.PhysicsServerId.GetIdNumber());
 
 	// Serialize FRemoteObjectData to a byte array for network transfer.
 	// Make a copy since archive serialization requires a non-const reference.
 	TArray<uint8> SerializedData;
 	FMemoryWriter Writer(SerializedData);
 	FRemoteObjectData ObjectDataCopy = Params.ObjectData;
-	Writer << ObjectDataCopy;
+	ArchiveRemoteObjectData(Writer, ObjectDataCopy);
 
 	UE_LOG(LogDSTMSub, Log,
 		TEXT("DSTM Send: Serialized %d bytes of object data"),
@@ -239,26 +335,26 @@ void UDSTMSubsystem::HandleOutgoingMigration(
 
 	// Find the beacon connected to the destination server
 	ADSTMBeaconClient* Beacon = FindBeaconForServer(
-		Info.DestinationServerId.GetValue());
+		Info.DestinationServerId.GetIdNumber());
 
 	if (!Beacon)
 	{
 		UE_LOG(LogDSTMSub, Error,
 			TEXT("DSTM Send: No beacon connection to destination server %u! Migration data lost."),
-			Info.DestinationServerId.GetValue());
+			Info.DestinationServerId.GetIdNumber());
 		return;
 	}
 
 	// Send via the appropriate RPC direction based on beacon authority
-	const uint32 LocalServerId = FRemoteServerId::GetLocalServerId().GetValue();
+	const uint32 LocalServerId = FRemoteServerId::GetLocalServerId().GetIdNumber();
 
-	if (Beacon->HasAuthority())
+	if (Beacon->IsAuthorityBeacon())
 	{
 		// We are the server side of this beacon connection → use Client RPC
 		Beacon->ClientReceiveMigratedObject(
-			Info.ObjectId.GetValue(),
-			Info.OwnerServerId.GetValue(),
-			Info.PhysicsServerId.GetValue(),
+			Info.ObjectId.GetIdNumber(),
+			Info.OwnerServerId.GetIdNumber(),
+			Info.PhysicsServerId.GetIdNumber(),
 			Info.PhysicsLocalIslandId,
 			LocalServerId,
 			SerializedData);
@@ -267,9 +363,9 @@ void UDSTMSubsystem::HandleOutgoingMigration(
 	{
 		// We are the client side → use Server RPC
 		Beacon->ServerReceiveMigratedObject(
-			Info.ObjectId.GetValue(),
-			Info.OwnerServerId.GetValue(),
-			Info.PhysicsServerId.GetValue(),
+			Info.ObjectId.GetIdNumber(),
+			Info.OwnerServerId.GetIdNumber(),
+			Info.PhysicsServerId.GetIdNumber(),
 			Info.PhysicsLocalIslandId,
 			LocalServerId,
 			SerializedData);
@@ -277,7 +373,7 @@ void UDSTMSubsystem::HandleOutgoingMigration(
 
 	UE_LOG(LogDSTMSub, Log,
 		TEXT("DSTM Send: Migration data dispatched via %s RPC (%d bytes)"),
-		Beacon->HasAuthority() ? TEXT("Client") : TEXT("Server"),
+		Beacon->IsAuthorityBeacon() ? TEXT("Client") : TEXT("Server"),
 		SerializedData.Num());
 }
 
@@ -289,38 +385,38 @@ void UDSTMSubsystem::HandleObjectRequest(
 {
 	UE_LOG(LogDSTMSub, Log,
 		TEXT("DSTM Request: Object %llu — requesting from server %u for destination %u"),
-		ObjectId.GetValue(),
-		LastKnownServerId.GetValue(),
-		DestServerId.GetValue());
+		ObjectId.GetIdNumber(),
+		LastKnownServerId.GetIdNumber(),
+		DestServerId.GetIdNumber());
 
-	ADSTMBeaconClient* Beacon = FindBeaconForServer(LastKnownServerId.GetValue());
+	ADSTMBeaconClient* Beacon = FindBeaconForServer(LastKnownServerId.GetIdNumber());
 	if (Beacon)
 	{
 		// Send via the appropriate RPC direction based on beacon authority
-		if (Beacon->HasAuthority())
+		if (Beacon->IsAuthorityBeacon())
 		{
 			// We are the server side of this beacon connection → use Client RPC
 			Beacon->ClientRequestMigrateObject(
-				ObjectId.GetValue(),
-				DestServerId.GetValue());
+				ObjectId.GetIdNumber(),
+				DestServerId.GetIdNumber());
 		}
 		else
 		{
 			// We are the client side → use Server RPC
 			Beacon->ServerRequestMigrateObject(
-				ObjectId.GetValue(),
-				DestServerId.GetValue());
+				ObjectId.GetIdNumber(),
+				DestServerId.GetIdNumber());
 		}
 
 		UE_LOG(LogDSTMSub, Log,
 			TEXT("DSTM Request: Dispatched via %s RPC"),
-			Beacon->HasAuthority() ? TEXT("Client") : TEXT("Server"));
+			Beacon->IsAuthorityBeacon() ? TEXT("Client") : TEXT("Server"));
 	}
 	else
 	{
 		UE_LOG(LogDSTMSub, Error,
 			TEXT("DSTM Request: No beacon connection to server %u"),
-			LastKnownServerId.GetValue());
+			LastKnownServerId.GetIdNumber());
 	}
 }
 
@@ -379,7 +475,7 @@ void UDSTMSubsystem::HandleIncomingMigrationData(
 	// Deserialize FRemoteObjectData from the byte array
 	FRemoteObjectData ObjectData;
 	FMemoryReader Reader(SerializedData);
-	Reader << ObjectData;
+	ArchiveRemoteObjectData(Reader, ObjectData);
 
 	if (Reader.IsError())
 	{
@@ -398,11 +494,11 @@ void UDSTMSubsystem::HandleIncomingMigrationData(
 	//   3. AActor::PostMigrate(Receive) → adds to world, starts replicating
 	//   4. APlayerController::PostMigrate(Receive) → finds connection, binds PC
 	UE::RemoteObject::Transfer::OnObjectDataReceived(
-		FRemoteServerId(OwnerServerIdRaw),
-		FRemoteServerId(PhysicsServerIdRaw),
+		FRemoteServerId::FromIdNumber(OwnerServerIdRaw),
+		FRemoteServerId::FromIdNumber(PhysicsServerIdRaw),
 		PhysicsLocalIslandId,
-		FRemoteObjectId(ObjectIdRaw),
-		FRemoteServerId(SenderServerIdRaw),
+		FRemoteObjectId::CreateFromInt(ObjectIdRaw),
+		FRemoteServerId::FromIdNumber(SenderServerIdRaw),
 		ObjectData);
 
 	UE_LOG(LogDSTMSub, Log,
@@ -419,13 +515,13 @@ void UDSTMSubsystem::HandleIncomingMigrationRequest(
 		ObjectIdRaw, RequestingServerIdRaw);
 
 	// Resolve the FRemoteObjectId to a local AActor and transfer it to
-	// the requesting server. We iterate all actors in the world and match
-	// against their FRemoteObjectHandle, which is assigned by the engine
-	// to objects participating in DSTM.
-	const FRemoteObjectId ObjectId(ObjectIdRaw);
-	const FRemoteServerId RequestingServerId(RequestingServerIdRaw);
+	// the requesting server. We construct an FRemoteObjectId from each actor
+	// (which reads the remote ID from the object's internal handle) and match
+	// against the requested ID.
+	const FRemoteObjectId ObjectId = FRemoteObjectId::CreateFromInt(ObjectIdRaw);
+	const FRemoteServerId RequestingServerId = FRemoteServerId::FromIdNumber(RequestingServerIdRaw);
 
-	// Look up the local AActor in the world by matching its FRemoteObjectHandle.
+	// Look up the local AActor in the world by matching its FRemoteObjectId.
 	UWorld* World = GetWorld();
 	if (!World)
 	{
@@ -443,8 +539,9 @@ void UDSTMSubsystem::HandleIncomingMigrationRequest(
 		{
 			continue;
 		}
-		const auto& Handle = Actor->GetRemoteObjectHandle();
-		if (Handle.IsValid() && Handle.GetRemoteObjectId() == ObjectId)
+		// FRemoteObjectId(UObjectBase*) reads the remote ID from the object's handle
+		const FRemoteObjectId ActorRemoteId(Actor);
+		if (ActorRemoteId.IsValid() && ActorRemoteId == ObjectId)
 		{
 			FoundActor = Actor;
 			break;
@@ -513,6 +610,31 @@ ADSTMBeaconClient* UDSTMSubsystem::FindBeaconForServer(uint32 ServerIdHash) cons
 		return nullptr;
 	}
 
-	const TObjectPtr<ADSTMBeaconClient>* Beacon = PeerBeacons.Find(*PeerId);
-	return Beacon ? Beacon->Get() : nullptr;
+	const TObjectPtr<ADSTMBeaconClient>* BeaconPtr = PeerBeacons.Find(*PeerId);
+	if (!BeaconPtr)
+	{
+		return nullptr;
+	}
+
+	ADSTMBeaconClient* Beacon = BeaconPtr->Get();
+	if (!Beacon || !IsValid(Beacon))
+	{
+		// Peer beacon was destroyed (server disconnected/crashed).
+		// Clean up stale map entries so future lookups don't hit dead references.
+		UE_LOG(LogDSTMSub, Warning,
+			TEXT("DSTM: Peer '%s' (hash %u) beacon is no longer valid — "
+				"removing stale connection (peer likely disconnected or crashed)"),
+			**PeerId, ServerIdHash);
+
+		// const_cast is safe here: this is a lazy-cleanup pattern in a const lookup.
+		// The alternative (periodic tick cleanup) would add unnecessary overhead.
+		UDSTMSubsystem* MutableThis = const_cast<UDSTMSubsystem*>(this);
+		FString PeerIdCopy = *PeerId;
+		MutableThis->PeerBeacons.Remove(PeerIdCopy);
+		MutableThis->ServerIdHashToPeerId.Remove(ServerIdHash);
+
+		return nullptr;
+	}
+
+	return Beacon;
 }

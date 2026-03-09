@@ -94,9 +94,34 @@ public:
 	UFUNCTION(BlueprintCallable, Category = "DSTM")
 	bool AreAllPeersConnected() const;
 
+	/** Get the number of currently valid (connected) peers. */
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
+	int32 GetConnectedPeerCount() const;
+
+	/** Get the peer IDs of all currently valid (connected) peers. */
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
+	TArray<FString> GetConnectedPeerIds() const;
+
 	/** Shut down the DSTM mesh. */
 	UFUNCTION(BlueprintCallable, Category = "DSTM")
 	void ShutdownMesh();
+
+	/**
+	 * Apply a GUID seed to prevent FNetworkGUID collisions between backend servers.
+	 * Each server in a multi-server cluster must use a distinct seed value so that
+	 * independently spawned actors (PlayerControllers, Pawns, etc.) get non-overlapping
+	 * GUIDs in the proxy's shared backend GUID cache.
+	 *
+	 * This is a separate concern from DSTM's FRemoteObjectId identity system — GuidSeed
+	 * prevents proxy-level GUID collisions during normal replication, while DSTM handles
+	 * cross-server object identity during migration.
+	 *
+	 * Call this before any clients connect (typically from GameMode::StartPlay()).
+	 *
+	 * @param GuidSeed - Non-zero seed value (e.g. 100000 for server-1, 200000 for server-2)
+	 */
+	UFUNCTION(BlueprintCallable, Category = "DSTM")
+	void ApplyGuidSeed(uint64 GuidSeed);
 
 	// ──── Migration API ────
 

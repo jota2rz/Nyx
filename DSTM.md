@@ -15,6 +15,8 @@ A plugin for Unreal Engine 5.7 that completes the engine's built-in DSTM (Distri
 - [Migration Flow Reference](#migration-flow-reference)
 - [Pull Migration](#pull-migration)
 - [Beacon Mesh and Port Offset](#beacon-mesh-and-port-offset)
+- [GUID Seed](#guid-seed)
+- [Runtime Scaling](#runtime-scaling)
 - [Logging](#logging)
 - [Troubleshooting](#troubleshooting)
 
@@ -108,9 +110,11 @@ The DSTM beacon mesh is a separate `UMultiServerNode` instance from any game-lev
 
 ## Engine Build Requirement
 
-The plugin requires an engine build where `UE_WITH_REMOTE_OBJECT_HANDLE` is set to `1`. Verify this in your engine's build configuration or by checking whether `RemoteObjectTypes.h` and `RemoteObjectTransfer.h` exist under `Engine/Source/Runtime/CoreUObject/Public/UObject/`.
+The plugin requires an engine build where `UE_WITH_REMOTE_OBJECT_HANDLE` is set to `1`. In the UE 5.7 source repository this defaults to `1` (see `CoreMiscDefines.h`), but the pre-built/installed engine may have it set to `0`. Verify by checking `Engine/Source/Runtime/Core/Public/Misc/CoreMiscDefines.h` for the define value.
 
-If the define is absent, the plugin compiles but remains inert: the module logs a warning, skips delegate binding, and the subsystem reports `IsMeshActive() == false`.
+If the define is `0`, the plugin compiles but remains inert: the module logs a warning, skips delegate binding, and the subsystem reports `IsMeshActive() == false`.
+
+> **Important:** Setting `UE_WITH_REMOTE_OBJECT_HANDLE=1` changes `FObjectHandle` from a simple pointer to `FRemoteObjectHandlePrivate` (tagged pointer union). Every `TObjectPtr<>` in the engine changes ABI. All modules (engine, plugins, game) must be compiled against the same setting. A pre-built/installed engine cannot be mixed with a source-built one.
 
 ---
 
@@ -126,6 +130,7 @@ Each server process that participates in the DSTM mesh must receive these argume
 | `-MultiServerListenIp=<ip>` | No | IP address to bind the DSTM beacon listener. Defaults to `0.0.0.0`. |
 | `-MultiServerPeers=<ip:port,...>` | Yes (multi-server) | Comma-separated list of `host:port` pairs for other servers' **main** MultiServer mesh ports. The plugin automatically adds +1000 to each port for the DSTM mesh. |
 | `-MultiServerNumServers=<int>` | No | Total number of servers in the cluster. Used to determine when `AreAllPeersConnected()` returns true. |
+| `-DSTMGuidSeed=<uint64>` | Recommended | GUID allocation seed for the server's `FNetGUIDCache`. Each server must use a distinct value (e.g. `100000`, `200000`) to prevent `FNetworkGUID` collisions in the proxy's shared backend cache. See [GUID Seed](#guid-seed). |
 
 ### Example (two-server cluster)
 
@@ -136,6 +141,7 @@ Each server process that participates in the DSTM mesh must receive these argume
 -MultiServerListenPort=15000
 -MultiServerPeers=127.0.0.1:15001
 -MultiServerNumServers=2
+-DSTMGuidSeed=100000
 
 # Server 2
 -DedicatedServerId=server-2
@@ -143,6 +149,7 @@ Each server process that participates in the DSTM mesh must receive these argume
 -MultiServerListenPort=15001
 -MultiServerPeers=127.0.0.1:15000
 -MultiServerNumServers=2
+-DSTMGuidSeed=200000
 ```
 
 With these arguments:
@@ -327,10 +334,113 @@ If you initialize the mesh explicitly (not via command-line), supply the already
 `FRemoteServerId` is a `uint32`. The plugin derives it from a human-readable string (`DedicatedServerId`) using `GetTypeHash(FString)`:
 
 ```cpp
-FRemoteServerId id = FRemoteServerId(GetTypeHash(TEXT("server-1")));
+FRemoteServerId id = FRemoteServerId::FromIdNumber(GetTypeHash(TEXT("server-1")));
 ```
 
 `GetRemoteServerIdFromString()` performs this hash publicly so your game code can produce the same value when specifying migration targets.
+
+---
+
+## GUID Seed
+
+### Why it's needed
+
+In a multi-server topology with a shared proxy, each backend server allocates `FNetworkGUID` values sequentially starting from the same counter. When Server-1 spawns a `PlayerController` (gets GUID 4) and Server-2 also spawns one (also gets GUID 4), the proxy's shared backend `FNetGUIDCache` encounters a collision — it reassigns the GUID mapping, corrupting replication and potentially crashing.
+
+This is a **separate concern from DSTM**. DSTM uses `FRemoteObjectId` for cross-server object identity during migration. The GUID seed prevents proxy-level `FNetworkGUID` collisions during normal replication, which are equally problematic with or without DSTM.
+
+### How it works
+
+The plugin replaces the `NetDriver`'s `GuidCache` with a new `FNetGUIDCache` initialized with the specified seed. The seed offsets the GUID counter so that servers allocate from disjoint ranges:
+
+| Server | Seed | GUID range |
+|--------|------|-----------|
+| server-1 | 100000 | 100001, 100002, 100003, ... |
+| server-2 | 200000 | 200001, 200002, 200003, ... |
+| server-3 | 300000 | 300001, 300002, 300003, ... |
+
+### Command-line usage
+
+```
+-DSTMGuidSeed=100000   # Server 1
+-DSTMGuidSeed=200000   # Server 2
+```
+
+The `InitializeFromCommandLine()` method reads this argument and calls `ApplyGuidSeed()` automatically.
+
+### Programmatic usage
+
+```cpp
+UDSTMSubsystem* DSTM = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
+DSTM->ApplyGuidSeed(100000);  // Call before any clients connect
+```
+
+### Shipping builds
+
+The engine's built-in `-NetworkGuidSeed=` parameter is gated by `#if !UE_BUILD_SHIPPING` and doesn't work in Shipping builds. The plugin's `ApplyGuidSeed()` replaces the `GuidCache` directly via the public `ENGINE_API` constructor, so it works in **all build configurations** including Shipping.
+
+---
+
+## Runtime Scaling
+
+The DSTM beacon mesh supports adding and removing servers at runtime. This enables dynamic auto-scaling, where an external orchestrator (e.g., Kubernetes, a custom matchmaker, or a monitoring service) manages the server pool while the game seamlessly handles player migration between any pair of connected servers.
+
+### Adding a server at runtime
+
+The MultiServer beacon host listens for incoming connections indefinitely after initialization. A new server can join the mesh at any time by including existing servers in its startup configuration:
+
+```
+# New server (server-3) starts with addresses of existing servers
+-DedicatedServerId=server-3
+-MultiServerLocalId=server-3
+-MultiServerListenPort=15000
+-MultiServerPeers=192.168.1.10:15000,192.168.1.11:15000
+-MultiServerNumServers=3
+-DSTMGuidSeed=300000
+```
+
+**Flow:**
+1. The new server's `UMultiServerNode::Create()` opens outbound beacon connections to existing servers
+2. Existing servers' beacon hosts accept the connections automatically (no reconfiguration needed)
+3. Both sides fire `OnMultiServerConnected` → `HandlePeerConnected()` registers the new peer
+4. Migration RPCs can flow between the new server and all existing servers immediately
+
+**Existing servers do not need to be reconfigured or restarted.** Their beacon hosts accept new inbound connections from any server that connects. The `HandlePeerConnected` callback correctly registers new peers in the routing tables at runtime.
+
+> **Engine limitation:** The UE 5.7 `UMultiServerNode` API does not expose a public method to proactively connect to a new server from an already-running instance. New servers must always initiate the connection (inbound to existing hosts). This means the new server must know at least one existing server's address at startup.
+
+### Removing a server at runtime
+
+When a server shuts down or crashes:
+1. The UE beacon system detects the disconnection
+2. The `TObjectPtr` to the peer's `ADSTMBeaconClient` becomes invalid
+3. On the next migration attempt to the disconnected server, `FindBeaconForServer()` detects the invalid beacon, logs a warning, and cleans up stale entries from the routing tables
+4. The error is logged: `"Peer 'server-X' beacon is no longer valid — removing stale connection"`
+
+Migration attempts to a disconnected server will fail gracefully with a `"No beacon connection to destination server"` error. The remaining mesh continues to function normally for all other connected peers.
+
+### Monitoring peer status
+
+```cpp
+UDSTMSubsystem* DSTM = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
+
+// Check if initial peers are connected
+bool bReady = DSTM->AreAllPeersConnected();
+
+// Get current peer count (valid/connected only)
+int32 PeerCount = DSTM->GetConnectedPeerCount();
+
+// Get the IDs of all currently connected peers
+TArray<FString> PeerIds = DSTM->GetConnectedPeerIds();
+```
+
+### Orchestration notes
+
+The automation of scaling decisions is **out of scope** for this plugin. An external application should handle:
+- When to spin up / tear down server instances
+- Assigning unique `-DedicatedServerId=` and `-DSTMGuidSeed=` values
+- Providing the correct `-MultiServerPeers=` addresses to new servers
+- Deciding which server to migrate players *to* before shutting down a server
 
 ---
 
@@ -380,3 +490,7 @@ A serialization version mismatch between the two servers. Both server binaries m
 ### DSTM mesh created but `AreAllPeersConnected()` never returns `true`
 
 Verify that `-MultiServerNumServers=` matches the actual number of servers minus one (or the number of distinct peers each server should connect to). If you omit this argument, the default is `1`, so a two-server cluster will report all peers connected as soon as one peer connects—even if additional peers are expected.
+
+### `Reassigning NetGUID` warnings / `ObjectReplicatorReceivedBunchFail` crashes
+
+GUID collisions between backend servers. Each server must use a distinct `-DSTMGuidSeed=` value so that independently spawned actors (PlayerControllers, PlayerStates, Pawns, NoPawnPlayerControllers) get non-overlapping GUIDs. Without this, Server-1's GUID 4 → PlayerController and Server-2's GUID 4 → NoPawnPlayerController collide in the proxy's shared `FNetGUIDCache`, causing replication data to be applied to the wrong object type. See [GUID Seed](#guid-seed).

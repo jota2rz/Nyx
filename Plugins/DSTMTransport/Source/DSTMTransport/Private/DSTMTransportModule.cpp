@@ -62,7 +62,7 @@ void FDSTMTransportModule::InitializeServerIdentity()
 
 	// InitGlobalServerId can only be called once — it asserts on re-initialization.
 	// This must happen before any UObjects are allocated with remote object handles.
-	FRemoteServerId::InitGlobalServerId(FRemoteServerId(ServerId));
+	FRemoteServerId::InitGlobalServerId(FRemoteServerId::FromIdNumber(ServerId));
 	bServerIdentityInitialized = true;
 
 	UE_LOG(LogDSTM, Log,
