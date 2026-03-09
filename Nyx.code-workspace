@@ -6,10 +6,18 @@
 		},
 		{
 			"name": "UE5",
-			"path": "C:\\Program Files\\Epic Games\\UE_5.7"
+			"path": "C:\\Program Files\\Epic Games\\UE_5.7",
+			"settings": {
+				"C_Cpp.intelliSenseEngine": "disabled",
+				"C_Cpp.files.exclude": { "**": true }
+			}
 		},
 		{
-			"path": "D:/UnrealEngine"
+			"path": "D:/UnrealEngine",
+			"settings": {
+				"C_Cpp.intelliSenseEngine": "disabled",
+				"C_Cpp.files.exclude": { "**": true }
+			}
 		}
 	],
 	"settings": {
@@ -18,6 +26,42 @@
 		"C_Cpp.intelliSenseEngineFallback": "enabled",
 		"C_Cpp.default.dotConfig": "",
 		"C_Cpp.solutionFile": "C:\\UE\\Nyx\\Nyx.sln",
+
+		// ── Prevent cpptools from crawling non-source directories ──
+		// The tag parser and browse database walk ALL files in all workspace
+		// folders unless excluded. With 2 full engine copies, this causes
+		// sustained high CPU (indexing 50k+ files repeatedly).
+		"C_Cpp.files.exclude": {
+			"**/Intermediate/**": true,
+			"**/DerivedDataCache/**": true,
+			"**/Binaries/**": true,
+			"**/Saved/**": true,
+			"**/Content/**": true,
+			"**/.git/**": true,
+			"**/ThirdParty/**": true,
+			"**/node_modules/**": true
+		},
+		"files.exclude": {
+			"**/Intermediate/**": true,
+			"**/DerivedDataCache/**": true,
+			"**/Saved/**": true
+		},
+		"search.exclude": {
+			"**/Intermediate/**": true,
+			"**/DerivedDataCache/**": true,
+			"**/Binaries/**": true,
+			"**/Saved/**": true,
+			"**/Content/**": true,
+			"**/ThirdParty/**": true
+		},
+
+		// Limit IntelliSense to compile_commands.json only — don't crawl
+		"C_Cpp.intelliSenseEngine": "default",
+		// Cap the tag parser threads to reduce CPU pressure
+		"C_Cpp.maxConcurrentThreads": 2,
+		// Disable auto-formatting on type to avoid constant re-parsing
+		"C_Cpp.formatting": "disabled",
+
 		"terminal.integrated.env.windows": {
 			"PATH": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64;${env:PATH}",
 			"DOTNET_ROOT": "C:\\Program Files\\Epic Games\\UE_5.7\\Engine\\Binaries\\ThirdParty\\DotNet\\8.0.412\\win-x64",
