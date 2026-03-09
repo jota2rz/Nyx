@@ -366,6 +366,7 @@ void ANyxGameMode::CheckZoneBoundaries()
 		// ── Proxy players: check if they should migrate to another server ──
 		if (bIsChildConnection)
 		{
+#if UE_WITH_REMOTE_OBJECT_HANDLE
 			// Has the player crossed OUT of this server's zone?
 			const bool bLeftOurZone =
 				(bOwnsNegativeSide && PlayerX >= ZoneBoundaryX) ||
@@ -378,6 +379,7 @@ void ANyxGameMode::CheckZoneBoundaries()
 
 				MigratePlayerDSTM(PC, NyxChar);
 			}
+#endif
 			continue;
 		}
 
@@ -412,6 +414,7 @@ void ANyxGameMode::CheckZoneBoundaries()
 	}
 }
 
+#if UE_WITH_REMOTE_OBJECT_HANDLE
 void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxChar)
 {
 	UDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
@@ -466,6 +469,7 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 	PlayersBeingTransferred.Remove(PC);
 	TransferArrivalTimes.Remove(PC);
 }
+#endif // UE_WITH_REMOTE_OBJECT_HANDLE
 
 void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)
 {

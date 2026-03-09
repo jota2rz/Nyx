@@ -142,11 +142,13 @@ private:
 	//
 	// See DSTM.md for full architecture details.
 
+#if UE_WITH_REMOTE_OBJECT_HANDLE
 	/**
 	 * Migrate a player to another server using the DSTM framework.
 	 * Called when the player crosses a zone boundary.
 	 */
 	void MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxChar);
+#endif
 
 	/** Tracks players currently being transferred (prevent double-transfer). */
 	TSet<APlayerController*> PlayersBeingTransferred;
