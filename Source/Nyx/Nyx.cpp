@@ -3,6 +3,7 @@
 #include "Nyx.h"
 #include "Modules/ModuleManager.h"
 #include "Misc/CoreDelegates.h"
+#include "Misc/NetworkVersion.h"
 #include "Engine/Engine.h"
 #include "Engine/NetDriver.h"
 
@@ -23,6 +24,15 @@ public:
 	virtual void StartupModule() override
 	{
 		FDefaultGameModuleImpl::StartupModule();
+
+		// Allow mixed-build connections (source-built server + installed editor client)
+		// by skipping the network version CL check during development.
+		FNetworkVersion::IsNetworkCompatibleOverride.BindLambda(
+			[](uint32 LocalVersion, uint32 RemoteVersion) -> bool
+			{
+				UE_LOG(LogNyx, Log, TEXT("Network version check: Local=%u Remote=%u — allowing connection"), LocalVersion, RemoteVersion);
+				return true;
+			});
 
 		if (FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers=")))
 		{
