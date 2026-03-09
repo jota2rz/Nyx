@@ -48,15 +48,15 @@ public:
 		// Add ProxyNetDriver as the GameNetDriver
 		FNetDriverDefinition ProxyDef;
 		ProxyDef.DefName = FName(TEXT("GameNetDriver"));
-		ProxyDef.DriverClassName = FName(TEXT("/Script/MultiServerReplication.ProxyNetDriver"));
-		ProxyDef.DriverClassNameFallback = FName(TEXT("/Script/MultiServerReplication.ProxyNetDriver"));
+		ProxyDef.DriverClassName = FName(TEXT("/Script/MultiServerReplicationEx.ProxyNetDriver"));
+		ProxyDef.DriverClassNameFallback = FName(TEXT("/Script/MultiServerReplicationEx.ProxyNetDriver"));
 		GEngine->NetDriverDefinitions.Add(ProxyDef);
 
 		// Add ProxyBackendNetDriver (created dynamically by the proxy)
 		FNetDriverDefinition BackendDef;
 		BackendDef.DefName = FName(TEXT("ProxyBackendNetDriver"));
-		BackendDef.DriverClassName = FName(TEXT("/Script/MultiServerReplication.ProxyBackendNetDriver"));
-		BackendDef.DriverClassNameFallback = FName(TEXT("/Script/MultiServerReplication.ProxyBackendNetDriver"));
+		BackendDef.DriverClassName = FName(TEXT("/Script/MultiServerReplicationEx.ProxyBackendNetDriver"));
+		BackendDef.DriverClassNameFallback = FName(TEXT("/Script/MultiServerReplicationEx.ProxyBackendNetDriver"));
 		GEngine->NetDriverDefinitions.Add(BackendDef);
 
 		UE_LOG(LogNyx, Log, TEXT("  NetDriverDefinitions reconfigured (%d entries):"), GEngine->NetDriverDefinitions.Num());
@@ -69,7 +69,7 @@ public:
 		// The proxy forwards packets — it must NOT use a custom RepGraph that blocks
 		// RelevantToOwner actors whose backend connections don't match frontend nodes.
 		for (const TCHAR* DriverPath : {
-			TEXT("/Script/MultiServerReplication.ProxyNetDriver"),
+			TEXT("/Script/MultiServerReplicationEx.ProxyNetDriver"),
 			TEXT("/Script/OnlineSubsystemUtils.IpNetDriver") })
 		{
 			UClass* DriverClass = FindObject<UClass>(nullptr, DriverPath);

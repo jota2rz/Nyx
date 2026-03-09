@@ -35,11 +35,7 @@
 			"Enabled": true
 		},
 		{
-			"Name": "MultiServerReplication",
-			"Enabled": true
-		},
-		{
-			"Name": "DSTMTransport",
+			"Name": "MultiServerReplicationEx",
 			"Enabled": true
 		},
 		{

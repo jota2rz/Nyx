@@ -37,12 +37,9 @@ public class Nyx : ModuleRules
 		// MMO-scale spatial relevancy (Spike 14: ReplicationGraph)
 		PrivateDependencyModuleNames.Add("ReplicationGraph");
 
-		// MultiServer mesh for entity-sharded zones (Spike 14: Pattern A)
-		PrivateDependencyModuleNames.Add("MultiServerReplication");
+		// MultiServer mesh + DSTM transport for entity-sharded zones (Spike 14: Pattern A)
+			PrivateDependencyModuleNames.Add("MultiServerReplicationEx");
 		PrivateDependencyModuleNames.Add("OnlineSubsystemUtils"); // AOnlineBeaconClient base class
-
-		// DSTM Transport: seamless cross-server migration via RemoteObject framework
-		PrivateDependencyModuleNames.Add("DSTMTransport");
 
 		// GameplayDebugger (conditional — editor/debug builds only)
 		SetupGameplayDebuggerSupport(Target);
