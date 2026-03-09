@@ -30,8 +30,9 @@ void ANyxGameMode::StartPlay()
 {
 	Super::StartPlay();
 
-	// GuidSeed is now handled by the DSTMTransport plugin via -DSTMGuidSeed=.
-	// No game-level GuidCache replacement needed.
+	// GuidSeed is not needed with DSTM (UE_WITH_REMOTE_OBJECT_HANDLE=1).
+	// FNetworkGUIDs are derived from FRemoteObjectId which embeds each
+	// server's 10-bit ServerId — no seed-based collision avoidance required.
 
 	const bool bServer = IsNyxServer();
 	UE_LOG(LogNyx, Log, TEXT("NyxGameMode::StartPlay (IsNyxServer=%s  NetMode=%d)"),

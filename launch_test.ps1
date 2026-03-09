@@ -12,13 +12,13 @@ Remove-Item "C:\UE\Nyx\server1_log.txt","C:\UE\Nyx\server2_log.txt","C:\UE\Nyx\p
 
 # Server-1: West zone (X < 0), port 7777
 # DSTM mesh: ListenPort=15000, Peer=server-2@127.0.0.1:15001
-Start-Process $ue -ArgumentList "`"$proj`" -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneSide=west -DSTMGuidSeed=100000 -MultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -ABSLOG=`"C:\UE\Nyx\server1_log.txt`""
+Start-Process $ue -ArgumentList "`"$proj`" -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneSide=west -MultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -ABSLOG=`"C:\UE\Nyx\server1_log.txt`""
 Write-Host "[1/4] Server-1 (West) on port 7777, DSTM beacon on 15000"
 Start-Sleep -Seconds 2
 
 # Server-2: East zone (X >= 0), port 7778
 # DSTM mesh: ListenPort=15001, Peer=server-1@127.0.0.1:15000
-Start-Process $ue -ArgumentList "`"$proj`" -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneSide=east -DSTMGuidSeed=200000 -MultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -ABSLOG=`"C:\UE\Nyx\server2_log.txt`""
+Start-Process $ue -ArgumentList "`"$proj`" -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneSide=east -MultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -ABSLOG=`"C:\UE\Nyx\server2_log.txt`""
 Write-Host "[2/4] Server-2 (East) on port 7778, DSTM beacon on 15001"
 
 # Wait for servers
