@@ -1,0 +1,3 @@
+[submodule "Plugins/DSTMTransport"]
+	path = Plugins/DSTMTransport
+	url = https://github.com/jota2rz/DSTMTransport.git
