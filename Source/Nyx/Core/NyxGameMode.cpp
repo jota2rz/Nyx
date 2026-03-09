@@ -434,7 +434,7 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 
 	UE_LOG(LogNyx, Log,
 		TEXT("Migration DSTM: Transferring %s + pawn %s to server %u via DSTM"),
-		*PC->GetName(), *NyxChar->GetName(), DestServerId.GetValue());
+		*PC->GetName(), *NyxChar->GetName(), DestServerId.GetIdNumber());
 
 	// Save character state to SpacetimeDB before migration (persistence)
 	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
@@ -482,3 +482,4 @@ bool ANyxGameMode::IsProxyServer() const
 	// If this flag is present, we're a proxy — not a real game server.
 	return FParse::Param(FCommandLine::Get(), TEXT("ProxyGameServers"))
 		|| FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers="));
+}

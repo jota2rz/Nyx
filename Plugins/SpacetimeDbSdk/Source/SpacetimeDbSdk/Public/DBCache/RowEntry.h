@@ -36,6 +36,9 @@ struct FRowEntry
     /** Reference count for this row */
     int32 RefCount = 0;
 
+    /** Default constructor required by TMap value storage. */
+    FRowEntry() = default;
+
     FRowEntry(const TSharedPtr<RowType>& InRow, int32 InRefCount)
         : Row(InRow), RefCount(InRefCount)
     {
