@@ -417,7 +417,7 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 	if (!DSTMSub || !DSTMSub->IsMeshActive())
 	{
 		UE_LOG(LogNyx, Warning,
-			TEXT("Migration DSTM: Mesh not active — cannot transfer %s. Is -MultiServerLocalId set?"),
+			TEXT("Migration DSTM: Mesh not active — cannot transfer %s. Is -DedicatedServerId set?"),
 			*PC->GetName());
 		return;
 	}

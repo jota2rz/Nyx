@@ -81,7 +81,7 @@ bool UNyxMultiServerSubsystem::InitializeFromCommandLine()
 {
 	// Check if multi-server mode is requested via command line
 	FString LocalPeerId;
-	if (!FParse::Value(FCommandLine::Get(), TEXT("-NyxMultiServerLocalId="), LocalPeerId, false))
+	if (!FParse::Value(FCommandLine::Get(), TEXT("-DedicatedServerId="), LocalPeerId, false))
 	{
 		// Not in multi-server mode
 		return false;

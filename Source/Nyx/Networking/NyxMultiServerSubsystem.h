@@ -29,7 +29,7 @@ class ANyxMultiServerBeaconClient;
  * Command-line args (parsed by UMultiServerNode):
  *   -MultiServerPeers=IP1:Port1,IP2:Port2,...
  *   -MultiServerNumServers=N
- *   -NyxMultiServerLocalId=UniqueServerId
+ *   -DedicatedServerId=UniqueServerId
  *   -NyxMultiServerListenPort=PortNum
  */
 UCLASS()
