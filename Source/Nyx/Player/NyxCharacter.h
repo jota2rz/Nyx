@@ -179,7 +179,7 @@ public:
 
 	/**
 	 * When true, ApplyCharacterStats skips overwriting position/rotation.
-	 * Set by HandleMigratedPlayerArrival — the pawn was already spawned at
+	 * Set by HandleMigratedPlayerArrival — the pawn was already placed at
 	 * the exact migrated position from the DSTM transfer, so SpacetimeDB
 	 * must not clobber it with a stale saved position.
 	 * Cleared after the first ApplyCharacterStats call.

@@ -154,10 +154,11 @@ private:
 
 	/**
 	 * Handle a PlayerController that arrived via DSTM migration.
-	 * The engine's PostMigrate(Receive) binds the PC to the ChildConnection,
-	 * but the Pawn is a separate actor and is NOT included in the transfer.
-	 * This method spawns a new pawn, restores state from SpacetimeDB, and
-	 * sets up zone/server info so the player can continue playing seamlessly.
+	 * The engine's PostMigrate(Receive) binds the PC to the ChildConnection.
+	 * The Pawn was also transferred via DSTM — the PC's Pawn reference may
+	 * already be set from serialization. This method fixes up the bidirectional
+	 * PC↔Pawn relationship WITHOUT calling Possess()/ClientRestart(), re-enables
+	 * movement and collision, sets zone info, and registers with SpacetimeDB.
 	 */
 	void HandleMigratedPlayerArrival(APlayerController* PC);
 #endif

@@ -37,6 +37,11 @@ void ANyxHUD::DrawHUD()
 	FString ZoneInfo = TEXT("N/A");
 	FString PosInfo = TEXT("N/A");
 
+	// Cache: retain last known values across migration gaps
+	static FString CachedServerInfo;
+	static FString CachedZoneInfo;
+	static FString CachedPosInfo;
+
 	ANyxCharacter* NyxChar = nullptr;
 
 	// Strategy 1: Try the owning PC's pawn first (cheapest)
@@ -77,14 +82,24 @@ void ANyxHUD::DrawHUD()
 		if (!NyxChar->ServerName.IsEmpty())
 		{
 			ServerInfo = NyxChar->ServerName;
+			CachedServerInfo = ServerInfo;
 		}
 		if (!NyxChar->ZoneName.IsEmpty())
 		{
 			ZoneInfo = NyxChar->ZoneName;
+			CachedZoneInfo = ZoneInfo;
 		}
 
 		FVector Loc = NyxChar->GetActorLocation();
 		PosInfo = FString::Printf(TEXT("%.0f, %.0f, %.0f"), Loc.X, Loc.Y, Loc.Z);
+		CachedPosInfo = PosInfo;
+	}
+	else
+	{
+		// During migration gap: use cached values instead of N/A
+		if (!CachedServerInfo.IsEmpty()) ServerInfo = CachedServerInfo;
+		if (!CachedZoneInfo.IsEmpty()) ZoneInfo = CachedZoneInfo;
+		if (!CachedPosInfo.IsEmpty()) PosInfo = CachedPosInfo;
 	}
 
 	// ── Draw ──
