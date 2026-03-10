@@ -4,7 +4,7 @@ A research on how to build an open-world MMO with **Unreal Engine 5.7**, **Space
 
 ## Current State
 
-**Working end-to-end:** Client connects through a proxy to two dedicated servers (west/east zones). Player spawns, moves, fights, and crosses the zone boundary — player migration is handled by the [DSTMTransport](https://github.com/jota2rz/DSTMTransport) plugin using the engine's built-in DSTM framework.
+**Working end-to-end:** Client connects through a proxy to two dedicated servers (west/east zones). Player spawns, moves, fights, and crosses the zone boundary — player migration is handled by the [MultiServerReplicationEx](https://github.com/jota2rz/MultiServerReplicationEx) plugin using the engine's built-in DSTM framework.
 
 **Key achievements:**
 - Proxy-based multi-server architecture with DSTM seamless zone migration
@@ -31,7 +31,7 @@ A research on how to build an open-world MMO with **Unreal Engine 5.7**, **Space
 | `Source/Nyx/Private/ModuleBindings/` | Auto-generated SpacetimeDB C++ bindings (impl) |
 | `Source/Nyx/Sidecar/` | *(deprecated)* Physics sidecar subsystem — no longer used |
 | `server/nyx-server/` | *(deprecated)* SpacetimeDB Rust server module — no longer used |
-| `Plugins/DSTMTransport/` | *(submodule)* [DSTMTransport](https://github.com/jota2rz/DSTMTransport) — beacon-based DSTM transport plugin for cross-server actor migration |
+| `Plugins/MultiServerReplicationEx/` | *(submodule)* [MultiServerReplicationEx](https://github.com/jota2rz/MultiServerReplicationEx) — beacon-based DSTM transport plugin for cross-server actor migration |
 | `Plugins/SpacetimeDbSdk/` | SpacetimeDB Unreal SDK plugin |
 | `Config/` | UE5 project configuration |
 | `Content/` | UE5 assets and maps |
@@ -63,7 +63,7 @@ Start-Process $ue "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -abs
 
 Walk east to cross the zone boundary at X=0. The DSTM framework handles the transfer automatically — the engine serializes the PlayerController + Pawn, sends via beacon RPC to the destination server, and rebinds the connection without the client disconnecting.
 
-See the [DSTMTransport plugin documentation](https://github.com/jota2rz/DSTMTransport) for command-line argument reference and architecture details.
+See the [MultiServerReplicationEx plugin documentation](https://github.com/jota2rz/MultiServerReplicationEx) for command-line argument reference and architecture details.
 
 ## Documentation
 
@@ -72,4 +72,4 @@ See the [DSTMTransport plugin documentation](https://github.com/jota2rz/DSTMTran
 | [RESEARCH.md](RESEARCH.md) | Full Phase 0 research log — 21 spikes covering plugin integration, Rust server module, round-trip validation, EOS auth, spatial interest management, client-side prediction, WASM benchmarks, physics sidecar, Docker deployment, cross-server transfer, MultiServer proxy routing, and seamless pawn authority migration |
 | [MULTISERVER.md](MULTISERVER.md) | MultiServer Replication Plugin analysis — GUID coordination, proxy routing, migration protocol |
 | [SEAMLESS.md](SEAMLESS.md) | Seamless cross-server migration analysis — DSTM framework audit, three implementation approaches, and recommended path using beacon-based transport |
-| [DSTM.md](DSTM.md) | Redirect → [DSTMTransport plugin repo](https://github.com/jota2rz/DSTMTransport) |
+| [DSTM.md](DSTM.md) | Redirect → [MultiServerReplicationEx plugin repo](https://github.com/jota2rz/MultiServerReplicationEx) |

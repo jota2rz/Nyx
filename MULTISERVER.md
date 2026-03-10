@@ -1231,10 +1231,10 @@ Server-1                    Proxy                     Server-2                  
 
 Enables: `PostMigrate()`, `Serialize()` migration, `FRemoteObjectTransferQueue`, ownership tracking, `SetUsingRemoteObjectReferences(true)` on beacons.
 
-### Step 2: Beacon-Based Transport (`DSTMTransport` plugin) — DONE
-Custom plugin at `Plugins/DSTMTransport/` binds `RemoteObjectTransferDelegate` and `RequestRemoteObjectDelegate`
+### Step 2: Beacon-Based Transport (`MultiServerReplicationEx` plugin) — DONE
+Custom plugin at `Plugins/MultiServerReplicationEx/` binds `RemoteObjectTransferDelegate` and `RequestRemoteObjectDelegate`
 to MultiServer beacon RPCs. Replaces the shared-disk approach with beacon-based network transport.
-See `Plugins/DSTMTransport/` for implementation.
+See `Plugins/MultiServerReplicationEx/` for implementation.
 
 ### Step 3: Server ID Init — DONE
 `FDSTMTransportModule::InitializeServerIdentity()` calls `FRemoteServerId::InitGlobalServerId()` from `-DedicatedServerId=`.
@@ -1345,13 +1345,13 @@ NyxChar->Destroy();
 - When Server-B's pawn arrives, smooth transition (possession change, not rebuild)
 - No black screen, no HUD loss
 
-### Tier 2B — Full DSTM (Engine Rebuild + DSTMTransport Plugin) — IMPLEMENTED
+### Tier 2B — Full DSTM (Engine Rebuild + MultiServerReplicationEx Plugin) — IMPLEMENTED
 
 The engine source changes at `D:\UnrealEngine` are preserved:
 - `UE_WITH_REMOTE_OBJECT_HANDLE=1` in `CoreMiscDefines.h`
 - `FMigrationRoutingInfo` + `GetMigrationRoutingInfo()` in `RemoteObjectTransfer.h/cpp`
 
-The `DSTMTransport` plugin (`Plugins/DSTMTransport/`) implements the beacon-based network transport:
+The `MultiServerReplicationEx` plugin (`Plugins/MultiServerReplicationEx/`) implements the beacon-based network transport:
 - `FDSTMTransportModule` — binds transport delegates before `InitRemoteObjects()`
 - `UDSTMSubsystem` — manages DSTM beacon mesh, handles migration routing
 - `ADSTMBeaconClient` — Server/Client RPCs for serialized migration data

@@ -5530,11 +5530,11 @@ Client (via Proxy)         Server A (primary)        Server B (non-primary)     
 
 ---
 
-## Spike 23 — DSTMTransport Plugin: Beacon-Based DSTM Network Transport (2026-03-08) ✅
+## Spike 23 — MultiServerReplicationEx Plugin: Beacon-Based DSTM Network Transport (2026-03-08) ✅
 
 **Goal:** Implement the DSTM (Distributed State Transfer Machine) network transport as a standalone, reusable UE5 plugin. This plugin completes the missing transport layer in UE 5.7's RemoteObject framework by binding the `RemoteObjectTransferDelegate` and `RequestRemoteObjectDelegate` to MultiServer beacon RPCs instead of the default disk I/O.
 
-**Status:** COMPLETE — Plugin implemented, reviewed, and renamed from `NyxDSTMTransport` to `DSTMTransport` to ensure project independence.
+**Status:** COMPLETE — Plugin implemented, reviewed, and renamed from `NyxDSTMTransport` to `MultiServerReplicationEx` to ensure project independence.
 
 ### Background
 
@@ -5547,11 +5547,11 @@ SEAMLESS.md documents **Approach 2** as the recommended path: complete the DSTM 
 
 ### Architecture
 
-The DSTMTransport plugin implements SEAMLESS.md Approach 2, Step 3-4:
+The MultiServerReplicationEx plugin implements SEAMLESS.md Approach 2, Step 3-4:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                     DSTMTransport Plugin                         │
+│                  MultiServerReplicationEx Plugin                 │
 │                                                                  │
 │  FDSTMTransportModule (StartupModule)                           │
 │    ├─ InitializeServerIdentity()                                │
@@ -5606,16 +5606,16 @@ Result: Client sees zero disruption (same proxy object, same client channel)
 
 | File | Change |
 |------|--------|
-| `Plugins/DSTMTransport/DSTMTransport.uplugin` | New plugin descriptor (was `NyxDSTMTransport`) |
-| `Plugins/DSTMTransport/Source/DSTMTransport/DSTMTransport.Build.cs` | Build config — depends on MultiServerReplication, OnlineSubsystemUtils |
-| `Plugins/DSTMTransport/Source/DSTMTransport/Public/DSTMTransportModule.h` | Module: server identity init + delegate binding |
-| `Plugins/DSTMTransport/Source/DSTMTransport/Private/DSTMTransportModule.cpp` | Module implementation |
-| `Plugins/DSTMTransport/Source/DSTMTransport/Public/DSTMSubsystem.h` | Subsystem: mesh management + migration API |
-| `Plugins/DSTMTransport/Source/DSTMTransport/Private/DSTMSubsystem.cpp` | Subsystem implementation |
-| `Plugins/DSTMTransport/Source/DSTMTransport/Public/DSTMBeaconClient.h` | Beacon: migration RPCs + delegates |
-| `Plugins/DSTMTransport/Source/DSTMTransport/Private/DSTMBeaconClient.cpp` | Beacon implementation |
-| `Nyx.uproject` | Plugin reference: `NyxDSTMTransport` → `DSTMTransport` |
-| `Source/Nyx/Nyx.Build.cs` | Module dependency: `NyxDSTMTransport` → `DSTMTransport` |
+| `Plugins/MultiServerReplicationEx/MultiServerReplicationEx.uplugin` | New plugin descriptor (was `NyxDSTMTransport`) |
+| `Plugins/MultiServerReplicationEx/Source/MultiServerReplicationEx/MultiServerReplicationEx.Build.cs` | Build config — depends on MultiServerReplication, OnlineSubsystemUtils |
+| `Plugins/MultiServerReplicationEx/Source/MultiServerReplicationEx/Public/DSTMTransportModule.h` | Module: server identity init + delegate binding |
+| `Plugins/MultiServerReplicationEx/Source/MultiServerReplicationEx/Private/DSTMTransportModule.cpp` | Module implementation |
+| `Plugins/MultiServerReplicationEx/Source/MultiServerReplicationEx/Public/DSTMSubsystem.h` | Subsystem: mesh management + migration API |
+| `Plugins/MultiServerReplicationEx/Source/MultiServerReplicationEx/Private/DSTMSubsystem.cpp` | Subsystem implementation |
+| `Plugins/MultiServerReplicationEx/Source/MultiServerReplicationEx/Public/DSTMBeaconClient.h` | Beacon: migration RPCs + delegates |
+| `Plugins/MultiServerReplicationEx/Source/MultiServerReplicationEx/Private/DSTMBeaconClient.cpp` | Beacon implementation |
+| `Nyx.uproject` | Plugin reference: `NyxDSTMTransport` → `MultiServerReplicationEx` |
+| `Source/Nyx/Nyx.Build.cs` | Module dependency: `NyxDSTMTransport` → `MultiServerReplicationEx` |
 | `Source/Nyx/Core/NyxGameMode.h` | Forward declaration: `UNyxDSTMSubsystem` → `UDSTMSubsystem` |
 | `Source/Nyx/Core/NyxGameMode.cpp` | Include + usage: `NyxDSTMSubsystem` → `DSTMSubsystem` |
 | `docker-compose.yml` | Added `-DedicatedServerId=`, `-MultiServerLocalId=`, `-MultiServerListenPort=` |

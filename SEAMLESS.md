@@ -177,7 +177,7 @@ Note: `InitGlobalServerId` can only be called once (it asserts on re-initializat
 In a custom plugin, subclass `AMultiServerBeaconClient` with RPCs for sending/receiving serialized object data:
 
 ```cpp
-// Custom plugin: DSTMTransport/Source/DSTMTransport/Public/DSTMBeaconClient.h
+// Custom plugin: MultiServerReplicationEx/Source/MultiServerReplicationEx/Public/DSTMBeaconClient.h
 UCLASS()
 class ADSTMBeaconClient : public AMultiServerBeaconClient
 {
@@ -348,7 +348,7 @@ The critical difference: **same `FRemoteObjectId` → same proxy UObject → sam
 | Task | Effort | Status |
 |------|--------|--------|
 | Engine rebuild with `UE_WITH_REMOTE_OBJECT_HANDLE=1` | 2-4 hours (compile time) | ✅ Done |
-| `ADSTMBeaconClient` custom plugin implementation | 1-2 days | ✅ Done (`Plugins/DSTMTransport/`) |
+| `ADSTMBeaconClient` custom plugin implementation | 1-2 days | ✅ Done (`Plugins/MultiServerReplicationEx/`) |
 | Delegate binding + `FRemoteObjectData` serialization | 1 day | ✅ Done |
 | Server ID initialization | 2 hours | ✅ Done |
 | Replace release/claim with `TransferObjectOwnershipToRemoteServer` | 4 hours | ✅ Done (game code integration) |
@@ -476,7 +476,7 @@ This confirms that **Epic has not shipped the transport integration** — it's l
 
 ### Phase 2: Replace Disk Transport with Beacon RPCs (1 week) — ✅ COMPLETE
 
-1. ✅ Create `ADSTMBeaconClient` subclass with migration RPCs (in `Plugins/DSTMTransport/`)
+1. ✅ Create `ADSTMBeaconClient` subclass with migration RPCs (in `Plugins/MultiServerReplicationEx/`)
 2. ✅ Set up `UMultiServerNode` on each game server with peer connections (via `UDSTMSubsystem`)
 3. ✅ Bind `RemoteObjectTransferDelegate` to beacon-based transport (in `FDSTMTransportModule`)
 4. ✅ Bind `RequestRemoteObjectDelegate` to beacon-based pull-request
@@ -546,10 +546,10 @@ Based on analysis of the MultiServerReplication plugin architecture, here's why 
 | `Engine/Plugins/Runtime/MultiServerReplication/.../MultiServerBeaconClient.cpp` | Beacon connections, `SetUnlimitedBunchSizeAllowed`, `SetUsingRemoteObjectReferences` |
 | `Engine/Plugins/Runtime/MultiServerReplication/.../MultiServerNode.h` | `UMultiServerNode` — peer-to-peer server mesh, beacon management |
 
-### DSTMTransport Plugin (Custom — `Plugins/DSTMTransport/`)
+### MultiServerReplicationEx Plugin (Custom — `Plugins/MultiServerReplicationEx/`)
 | File | Key Content |
 |------|-------------|
-| `DSTMTransport.uplugin` | Plugin descriptor — depends on MultiServerReplication |
+| `MultiServerReplicationEx.uplugin` | Plugin descriptor — depends on MultiServerReplication |
 | `DSTMTransportModule.h/cpp` | Module: `InitGlobalServerId()` from `-DedicatedServerId=`, pre-binds transport delegates |
 | `DSTMSubsystem.h/cpp` | Subsystem: creates DSTM beacon mesh (port +1000), routes migration data |
 | `DSTMBeaconClient.h/cpp` | Beacon: `ServerReceiveMigratedObject`, `ClientReceiveMigratedObject`, `ServerRequestMigrateObject` RPCs |
