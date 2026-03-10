@@ -518,25 +518,36 @@ void ANyxCharacter::ApplyCharacterStats(const FCharacterStatsType& Stats)
 	MagicDefense = static_cast<int32>(Stats.MagicDefense);
 	SpacetimeIdentity = Stats.Identity;
 
-	// Restore saved position and rotation from SpacetimeDB (critical for cross-server transfer)
-	const FVector SavedPos(Stats.SavedPosX, Stats.SavedPosY, Stats.SavedPosZ);
-	if (!SavedPos.IsNearlyZero())
+	// Restore saved position and rotation from SpacetimeDB.
+	// Skip if we arrived via DSTM migration — the pawn was already spawned
+	// at the exact migrated position, no DB roundtrip needed.
+	if (bSkipPositionRestore)
 	{
-		SetActorLocation(SavedPos);
-		UE_LOG(LogNyx, Log, TEXT("Restored %s position to (%.0f, %.0f, %.0f)"),
-			*DisplayName, SavedPos.X, SavedPos.Y, SavedPos.Z);
+		UE_LOG(LogNyx, Log, TEXT("Skipping position restore for %s — already at DSTM migrated position (%.0f, %.0f, %.0f)"),
+			*DisplayName, GetActorLocation().X, GetActorLocation().Y, GetActorLocation().Z);
+		bSkipPositionRestore = false; // one-shot: allow future non-migration loads
 	}
-
-	// Restore rotation yaw
-	if (!FMath::IsNearlyZero(Stats.SavedRotYaw, 0.1f) || !SavedPos.IsNearlyZero())
+	else
 	{
-		SetActorRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
-		if (Controller)
+		const FVector SavedPos(Stats.SavedPosX, Stats.SavedPosY, Stats.SavedPosZ);
+		if (!SavedPos.IsNearlyZero())
 		{
-			Controller->SetControlRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
+			SetActorLocation(SavedPos);
+			UE_LOG(LogNyx, Log, TEXT("Restored %s position to (%.0f, %.0f, %.0f)"),
+				*DisplayName, SavedPos.X, SavedPos.Y, SavedPos.Z);
 		}
-		UE_LOG(LogNyx, Log, TEXT("Restored %s rotation yaw to %.1f"),
-			*DisplayName, Stats.SavedRotYaw);
+
+		// Restore rotation yaw
+		if (!FMath::IsNearlyZero(Stats.SavedRotYaw, 0.1f) || !SavedPos.IsNearlyZero())
+		{
+			SetActorRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
+			if (Controller)
+			{
+				Controller->SetControlRotation(FRotator(0.f, Stats.SavedRotYaw, 0.f));
+			}
+			UE_LOG(LogNyx, Log, TEXT("Restored %s rotation yaw to %.1f"),
+				*DisplayName, Stats.SavedRotYaw);
+		}
 	}
 
 	UE_LOG(LogNyx, Log, TEXT("Applied stats for %s: Level=%d HP=%d/%d MP=%d/%d ATK=%d DEF=%d"),

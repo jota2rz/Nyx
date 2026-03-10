@@ -8,18 +8,22 @@ $editor = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor
 Get-Process -Name "NyxServer","UnrealEditor" -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 3
 
-# Clean logs
+# Clean logs — NyxServer ignores -ABSLOG so we redirect stdout instead
 Remove-Item "C:\UE\Nyx\server1_log.txt","C:\UE\Nyx\server2_log.txt","C:\UE\Nyx\proxy1_log.txt","C:\UE\Nyx\client1_log.txt" -ErrorAction SilentlyContinue
+
+$commonArgs = "-log -NOSTEAM -DisableGarbageElimination -NOSPLASH -NOSOUND"
 
 # Server-1: West zone (X < 0), port 7777
 # Game mesh: port 15000, DSTM beacon: port 16000
-Start-Process $server -ArgumentList "`"$proj`" -port=7777 -log -NOSTEAM -DisableGarbageElimination -DedicatedServerId=server-1 -ZoneSide=west -NyxMultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -DSTMListenPort=16000 -DSTMPeers=127.0.0.1:16001 -ABSLOG=`"C:\UE\Nyx\server1_log.txt`""
+$s1Args = "`"$proj`" -port=7777 $commonArgs -DedicatedServerId=server-1 -ZoneSide=west -NyxMultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -DSTMListenPort=16000 -DSTMPeers=127.0.0.1:16001"
+Start-Process $server -ArgumentList $s1Args -RedirectStandardOutput "C:\UE\Nyx\server1_log.txt" -RedirectStandardError "C:\UE\Nyx\server1_err.txt"
 Write-Host "[1/4] Server-1 (West) on port 7777, game mesh 15000, DSTM beacon 16000"
 Start-Sleep -Seconds 2
 
 # Server-2: East zone (X >= 0), port 7778
 # Game mesh: port 15001, DSTM beacon: port 16001
-Start-Process $server -ArgumentList "`"$proj`" -port=7778 -log -NOSTEAM -DisableGarbageElimination -DedicatedServerId=server-2 -ZoneSide=east -NyxMultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -DSTMListenPort=16001 -DSTMPeers=127.0.0.1:16000 -ABSLOG=`"C:\UE\Nyx\server2_log.txt`""
+$s2Args = "`"$proj`" -port=7778 $commonArgs -DedicatedServerId=server-2 -ZoneSide=east -NyxMultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -DSTMListenPort=16001 -DSTMPeers=127.0.0.1:16000"
+Start-Process $server -ArgumentList $s2Args -RedirectStandardOutput "C:\UE\Nyx\server2_log.txt" -RedirectStandardError "C:\UE\Nyx\server2_err.txt"
 Write-Host "[2/4] Server-2 (East) on port 7778, game mesh 15001, DSTM beacon 16001"
 
 # Wait for servers
@@ -27,7 +31,8 @@ Write-Host "Waiting 15s for servers..."
 Start-Sleep -Seconds 15
 
 # Proxy: uses -ProxyGameServers= to activate via NyxGameInstance
-Start-Process $server -ArgumentList "`"$proj`" -port=7780 -log -NOSTEAM -DisableGarbageElimination -DedicatedServerId=proxy-1 -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778 -ABSLOG=`"C:\UE\Nyx\proxy1_log.txt`""
+$proxyArgs = "`"$proj`" -port=7780 $commonArgs -DedicatedServerId=proxy-1 -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778"
+Start-Process $server -ArgumentList $proxyArgs -RedirectStandardOutput "C:\UE\Nyx\proxy1_log.txt" -RedirectStandardError "C:\UE\Nyx\proxy1_err.txt"
 Write-Host "[3/4] Proxy on port 7780"
 
 # Wait for proxy

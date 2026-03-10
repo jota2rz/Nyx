@@ -177,6 +177,15 @@ public:
 	UPROPERTY(Replicated, BlueprintReadOnly, Category = "Nyx|Network")
 	FString ZoneName;
 
+	/**
+	 * When true, ApplyCharacterStats skips overwriting position/rotation.
+	 * Set by HandleMigratedPlayerArrival — the pawn was already spawned at
+	 * the exact migrated position from the DSTM transfer, so SpacetimeDB
+	 * must not clobber it with a stale saved position.
+	 * Cleared after the first ApplyCharacterStats call.
+	 */
+	bool bSkipPositionRestore = false;
+
 private:
 	void HandleMove(const FInputActionValue& Value);
 	void HandleLook(const FInputActionValue& Value);

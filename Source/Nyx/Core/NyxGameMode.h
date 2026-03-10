@@ -135,10 +135,13 @@ private:
 	//
 	//   Server B:
 	//     1. Receives migration data via beacon RPC
-	//     2. Calls OnObjectDataReceived() — engine handles everything:
-	//        - Deserializes PC + Pawn (same FRemoteObjectId)
+	//     2. Calls OnObjectDataReceived() — engine handles:
+	//        - Deserializes PC (same FRemoteObjectId)
 	//        - PostMigrate(Receive) binds PC to connection
 	//        - Same proxy UObject → same client channel → zero disruption
+	//     3. CheckZoneBoundaries detects pawnless migrated PC
+	//     4. HandleMigratedPlayerArrival spawns a fresh Pawn,
+	//        loads saved state from SpacetimeDB (position, stats)
 	//
 	// See DSTM.md for full architecture details.
 
@@ -148,6 +151,15 @@ private:
 	 * Called when the player crosses a zone boundary.
 	 */
 	void MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxChar);
+
+	/**
+	 * Handle a PlayerController that arrived via DSTM migration.
+	 * The engine's PostMigrate(Receive) binds the PC to the ChildConnection,
+	 * but the Pawn is a separate actor and is NOT included in the transfer.
+	 * This method spawns a new pawn, restores state from SpacetimeDB, and
+	 * sets up zone/server info so the player can continue playing seamlessly.
+	 */
+	void HandleMigratedPlayerArrival(APlayerController* PC);
 #endif
 
 	/** Tracks players currently being transferred (prevent double-transfer). */

@@ -343,7 +343,21 @@ void ANyxGameMode::CheckZoneBoundaries()
 
 		// ── Regular PlayerController with a pawn ──
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
-		if (!NyxChar) continue;
+		if (!NyxChar)
+		{
+#if UE_WITH_REMOTE_OBJECT_HANDLE
+			// A PC with a valid connection but no pawn is a migrated player
+			// that arrived via DSTM. The engine's PostMigrate(Receive) bound
+			// the PC to the ChildConnection, but the Pawn is a separate actor
+			// and was NOT included in the DSTM transfer. Spawn one now.
+			if (PC->Player && !PC->IsA(ANoPawnPlayerController::StaticClass()))
+			{
+				HandleMigratedPlayerArrival(PC);
+				NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
+			}
+#endif
+			if (!NyxChar) continue;
+		}
 
 		const float PlayerX = NyxChar->GetActorLocation().X;
 		const bool bPlayerInNegativeSide = (PlayerX < ZoneBoundaryX);
@@ -448,27 +462,117 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 
 	PlayersBeingTransferred.Add(PC);
 
-	// Transfer the PlayerController — engine handles everything:
-	// 1. Serializes PC + all subobjects (including the possessed Pawn)
-	// 2. AActor::PostMigrate(Send) — channel close with Migrated
-	// 3. APlayerController::PostMigrate(Send) — NoPawnPC swap, connection save
-	// 4. RemoteObjectTransferDelegate fires → beacon sends to destination
-	DSTMSub->TransferActorToServer(PC, DestServerId);
+	// ── 1. Capture the pawn's exact world transform ──
+	const FVector PawnLocation = NyxChar->GetActorLocation();
+	const FRotator PawnRotation = NyxChar->GetActorRotation();
 
-	UE_LOG(LogNyx, Log,
-		TEXT("Migration DSTM: Transfer initiated. Engine will handle PostMigrate + delivery."));
-
-	// Clean up server subsystem tracking
+	// ── 2. Clean up SpacetimeDB tracking while we still have the character ──
 	if (ServerSub)
 	{
 		ServerSub->OnPlayerLeft(NyxChar);
 	}
 
-	// Transfer is synchronous — PostMigrate(Send) has already run,
-	// removing the PC from the world. Clean up our tracking sets.
+	// ── 3. UnPossess + Destroy the pawn ──
+	// The pawn is a separate actor NOT included in the DSTM transfer.
+	// We MUST destroy it here to prevent:
+	//   a) Ghost pawn left visible on the sending server
+	//   b) Infinite ping-pong when the PC arrives back — the old pawn
+	//      would still exist at a drifted position past the boundary
+	PC->UnPossess();
+	NyxChar->Destroy();
+
+	UE_LOG(LogNyx, Log,
+		TEXT("Migration DSTM: Destroyed pawn at (%.0f, %.0f, %.0f) on sending server"),
+		PawnLocation.X, PawnLocation.Y, PawnLocation.Z);
+
+	// ── 4. Stamp the pawn's position onto the PC's root component ──
+	// The DSTM serializes the PC and its components — this carries the
+	// exact position across to the receiving server.
+	if (USceneComponent* Root = PC->GetRootComponent())
+	{
+		Root->SetWorldLocationAndRotation(PawnLocation, PawnRotation);
+	}
+
+	UE_LOG(LogNyx, Log,
+		TEXT("Migration DSTM: Stamped pawn position (%.0f, %.0f, %.0f) onto PC root component"),
+		PawnLocation.X, PawnLocation.Y, PawnLocation.Z);
+
+	// ── 5. Transfer the pawnless PC via DSTM ──
+	// The receiving server's HandleMigratedPlayerArrival() will detect the
+	// pawnless PC, spawn a fresh pawn at the stamped position, and restore
+	// stats from SpacetimeDB.
+	DSTMSub->TransferActorToServer(PC, DestServerId);
+
+	UE_LOG(LogNyx, Log,
+		TEXT("Migration DSTM: Transfer initiated. Engine will handle PostMigrate + delivery."));
+
+	// PostMigrate(Send) has already run — the engine replaced the PC with
+	// a NoPawnPlayerController for this connection. Clean up tracking.
 	PlayersBeingTransferred.Remove(PC);
 	TransferArrivalTimes.Remove(PC);
 }
+
+void ANyxGameMode::HandleMigratedPlayerArrival(APlayerController* PC)
+{
+	// The DSTM transfer serializes the PC's root component transform — the
+	// sending server stamps the pawn's position onto it before transfer.
+	// AController hides GetActorLocation() as private, so read via root component.
+	USceneComponent* Root = PC->GetRootComponent();
+	const FVector MigratedPos = Root ? Root->GetComponentLocation() : FVector::ZeroVector;
+	const FRotator MigratedRot = Root ? Root->GetComponentRotation() : FRotator::ZeroRotator;
+
+	UE_LOG(LogNyx, Log,
+		TEXT("HandleMigratedPlayerArrival: %s at (%.0f, %.0f, %.0f) rot=(%.1f) — spawning pawn at migrated position"),
+		*PC->GetName(), MigratedPos.X, MigratedPos.Y, MigratedPos.Z, MigratedRot.Yaw);
+
+	// Spawn pawn directly at the migrated position (skip FindPlayerStart)
+	const FTransform SpawnTransform(MigratedRot, MigratedPos);
+	APawn* NewPawn = SpawnDefaultPawnAtTransform(PC, SpawnTransform);
+	if (!NewPawn)
+	{
+		UE_LOG(LogNyx, Error, TEXT("HandleMigratedPlayerArrival: SpawnDefaultPawnAtTransform failed for %s"),
+			*PC->GetName());
+		return;
+	}
+
+	PC->Possess(NewPawn);
+
+	ANyxCharacter* NyxChar = Cast<ANyxCharacter>(NewPawn);
+	if (!NyxChar)
+	{
+		UE_LOG(LogNyx, Error, TEXT("HandleMigratedPlayerArrival: Spawned pawn is not ANyxCharacter"));
+		return;
+	}
+
+	// Set server/zone info for HUD
+	NyxChar->ServerName = DedicatedServerId;
+	NyxChar->ZoneName = (MigratedPos.X < ZoneBoundaryX)
+		? TEXT("Zone-1 (West)")
+		: TEXT("Zone-2 (East)");
+
+	// Grant grace period to prevent immediate bounce-back
+	TransferArrivalTimes.Add(PC, GetWorld()->GetTimeSeconds());
+
+	// Tell the character to skip position restore when SpacetimeDB stats arrive —
+	// we already placed it at the exact migrated position.
+	NyxChar->bSkipPositionRestore = true;
+
+	// Register with SpacetimeDB for stats (HP, MP, level, etc.) but NOT position.
+	// The position was already set from the DSTM transfer above.
+	UNyxServerSubsystem* ServerSub = GetGameInstance()->GetSubsystem<UNyxServerSubsystem>();
+	if (ServerSub)
+	{
+		FString PlayerName = PC->PlayerState
+			? PC->PlayerState->GetPlayerName()
+			: PC->GetName();
+		ServerSub->OnPlayerJoined(NyxChar, PlayerName);
+	}
+
+	UE_LOG(LogNyx, Log,
+		TEXT("HandleMigratedPlayerArrival: %s — pawn %s at (%.0f, %.0f, %.0f), stats loading from SpacetimeDB"),
+		*PC->GetName(), *NyxChar->GetName(), MigratedPos.X, MigratedPos.Y, MigratedPos.Z);
+}
+
 #endif // UE_WITH_REMOTE_OBJECT_HANDLE
 
 void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)
