@@ -76,4 +76,25 @@ bool UNyxCharacterMovementComponent::VerifyClientTimeStamp(
 	return false;
 }
 
+void UNyxCharacterMovementComponent::SimulatedTick(float DeltaSeconds)
+{
+	Super::SimulatedTick(DeltaSeconds);
+
+	// Synthesize acceleration for simulated proxies so AnimBP locomotion works.
+	// ABP_Unarmed checks GetCurrentAcceleration().Size() > 0 to decide ShouldMove.
+	// Without this, simulated proxies slide in idle animation.
+	if (CharacterOwner && CharacterOwner->GetLocalRole() == ROLE_SimulatedProxy)
+	{
+		const float SpeedSq = Velocity.SizeSquared2D();
+		if (SpeedSq > 9.0f) // GroundSpeed > 3.0
+		{
+			Acceleration = Velocity.GetSafeNormal2D() * GetMaxAcceleration();
+		}
+		else
+		{
+			Acceleration = FVector::ZeroVector;
+		}
+	}
+}
+
 

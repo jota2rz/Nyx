@@ -1,4 +1,4 @@
-# Launch test: 2 dedicated servers + 1 proxy + 1 client
+# Launch test: 2 dedicated servers + 1 proxy + 2 clients
 # Usage: powershell -ExecutionPolicy Bypass -File C:\UE\Nyx\launch_test.ps1
 $proj   = "C:\UE\Nyx\Nyx.uproject"
 $server = "C:\UE\Nyx\Binaries\Win64\NyxServer.exe"
@@ -9,7 +9,7 @@ Get-Process -Name "NyxServer","UnrealEditor" -ErrorAction SilentlyContinue | Sto
 Start-Sleep -Seconds 3
 
 # Clean logs — NyxServer ignores -ABSLOG so we redirect stdout instead
-Remove-Item "C:\UE\Nyx\server1_log.txt","C:\UE\Nyx\server2_log.txt","C:\UE\Nyx\proxy1_log.txt","C:\UE\Nyx\client1_log.txt" -ErrorAction SilentlyContinue
+Remove-Item "C:\UE\Nyx\server1_log.txt","C:\UE\Nyx\server2_log.txt","C:\UE\Nyx\proxy1_log.txt","C:\UE\Nyx\client1_log.txt","C:\UE\Nyx\client2_log.txt" -ErrorAction SilentlyContinue
 
 $commonArgs = "-log -NOSTEAM -DisableGarbageElimination -NOSPLASH -NOSOUND"
 
@@ -39,11 +39,17 @@ Write-Host "[3/4] Proxy on port 7780"
 Write-Host "Waiting 25s for proxy..."
 Start-Sleep -Seconds 25
 
-# Client: windowed game connecting to proxy
+# Client 1: windowed game connecting to proxy
 Start-Process $editor -ArgumentList "`"$proj`" 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -WinX=50 -WinY=50 -NOSTEAM -ABSLOG=`"C:\UE\Nyx\client1_log.txt`""
-Write-Host "[4/4] Client connecting to 127.0.0.1:7780"
+Write-Host "[4/5] Client 1 connecting to 127.0.0.1:7780"
+
+Start-Sleep -Seconds 5
+
+# Client 2: windowed game connecting to proxy (offset window)
+Start-Process $editor -ArgumentList "`"$proj`" 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -WinX=900 -WinY=50 -NOSTEAM -ABSLOG=`"C:\UE\Nyx\client2_log.txt`""
+Write-Host "[5/5] Client 2 connecting to 127.0.0.1:7780"
 
 Start-Sleep -Seconds 3
 $serverCount = @(Get-Process -Name "NyxServer" -ErrorAction SilentlyContinue).Count
 $editorCount = @(Get-Process -Name "UnrealEditor" -ErrorAction SilentlyContinue).Count
-Write-Host "All launched ($serverCount server(s) + $editorCount editor(s)). Logs in C:\UE\Nyx\"
+Write-Host "All launched ($serverCount server(s) + $editorCount editor(s))."

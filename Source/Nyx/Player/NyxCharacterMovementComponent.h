@@ -35,6 +35,20 @@ public:
 	 */
 	virtual bool VerifyClientTimeStamp(float TimeStamp, FNetworkPredictionData_Server_Character& ServerData) override;
 
+	/**
+	 * Override SimulatedTick to synthesize acceleration for simulated proxies.
+	 *
+	 * Problem: The standard ABP_Unarmed AnimBP checks GetCurrentAcceleration() > 0
+	 * to decide if the character should play walk/run animations. For simulated proxies
+	 * (other players visible on a client), the CMC has no input, so Acceleration is
+	 * always zero — the character appears to slide in T-pose/idle.
+	 *
+	 * Fix: After the base SimulatedTick runs, set Acceleration to match the velocity
+	 * direction when the character is moving. This gives the AnimBP the signal it needs
+	 * to transition out of idle into locomotion.
+	 */
+	virtual void SimulatedTick(float DeltaSeconds) override;
+
 private:
 	/** Last client timestamp we successfully accepted (either via Super or our proxy fix). */
 	float ProxyLastAcceptedTimeStamp = 0.f;
