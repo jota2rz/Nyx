@@ -39,26 +39,32 @@ A research on how to build an open-world MMO with **Unreal Engine 5.7**, **Space
 ## Test Launch
 
 ```powershell
-$ue = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe"
+# Use launch_test.ps1 for a ready-to-run 5-process test (proxy + 2 servers + 2 clients):
+powershell -ExecutionPolicy Bypass -File "C:\UE\Nyx\launch_test.ps1"
+```
+
+Or launch manually:
+
+```powershell
+$server = "C:\UE\Nyx\Binaries\Win64\NyxServer.exe"
+$editor = "C:\Program Files\Epic Games\UE_5.7\Engine\Binaries\Win64\UnrealEditor.exe"
 $proj = "C:\UE\Nyx\Nyx.uproject"
 
-# Server-1 (west zone)
-# Game mesh on port 15000, DSTM beacon on port 16000
-Start-Process $ue "$proj -server -port=7777 -log -NOSTEAM -DedicatedServerId=server-1 -ZoneSide=west -NyxMultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -DSTMListenPort=16000 -DSTMPeers=127.0.0.1:16001 -abslog=C:\UE\Nyx\server1_log.txt"
+# Proxy (registration beacon on 17000, clients connect on 7780)
+Start-Process $server "`"$proj`" -server -port=7780 -log -NOSTEAM -DisableGarbageElimination -DedicatedServerId=proxy-1 -ProxyRegistrationPort=17000"
 
-# Server-2 (east zone)
-# Game mesh on port 15001, DSTM beacon on port 16001
-Start-Process $ue "$proj -server -port=7778 -log -NOSTEAM -DedicatedServerId=server-2 -ZoneSide=east -NyxMultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -DSTMListenPort=16001 -DSTMPeers=127.0.0.1:16000 -abslog=C:\UE\Nyx\server2_log.txt"
+# Wait ~10s for proxy to start
 
-# Wait ~15s for servers to start and DSTM beacons to connect
+# Server-1 (west zone) — registers with proxy via beacon
+Start-Process $server "`"$proj`" -server -port=7777 -log -NOSTEAM -DisableGarbageElimination -DedicatedServerId=server-1 -ZoneSide=west -NyxMultiServerListenPort=15000 -DSTMListenPort=16000 -JoinProxy=127.0.0.1:17000"
 
-# Proxy (connects to both servers)
-Start-Process $ue "$proj -server -port=7780 -log -NOSTEAM -ProxyGameServers=127.0.0.1:7777,127.0.0.1:7778 -abslog=C:\UE\Nyx\proxy1_log.txt"
+# Server-2 (east zone) — registers with proxy via beacon
+Start-Process $server "`"$proj`" -server -port=7778 -log -NOSTEAM -DisableGarbageElimination -DedicatedServerId=server-2 -ZoneSide=east -NyxMultiServerListenPort=15001 -DSTMListenPort=16001 -JoinProxy=127.0.0.1:17000"
 
-# Wait ~20s for proxy to connect to backends
+# Wait ~25s for servers to register and meshes to connect
 
 # Client
-Start-Process $ue "$proj 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -abslog=C:\UE\Nyx\client1_log.txt -NOSTEAM"
+Start-Process $editor "`"$proj`" 127.0.0.1:7780 -game -WINDOWED -ResX=800 -ResY=600 -NOSTEAM"
 ```
 
 Walk east to cross the zone boundary at X=0. The DSTM framework handles the transfer automatically — the engine serializes the PlayerController + Pawn, sends via beacon RPC to the destination server, and rebinds the connection without the client disconnecting.

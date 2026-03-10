@@ -14,6 +14,7 @@
 #include "ModuleBindings/SpacetimeDBClient.g.h"
 #include "Engine/Engine.h"
 #include "Engine/NetDriver.h"
+#include "MultiServerProxy.h"
 
 void UNyxGameInstance::Init()
 {
@@ -22,14 +23,16 @@ void UNyxGameInstance::Init()
 	UE_LOG(LogNyx, Log, TEXT("NyxGameInstance::Init() — CmdLine: %s"), FCommandLine::Get());
 
 	// ── Proxy NetDriver Override ──
-	// If -ProxyGameServers= is on the command line, this process should run as
+	// If -ProxyRegistrationPort= is on the command line, this process should run as
 	// a MultiServer proxy.  Swap the GameNetDriver definition from IpNetDriver
 	// to ProxyNetDriver BEFORE UWorld::Listen() creates the NetDriver.
 	// We must modify GEngine->NetDriverDefinitions directly because it's a
 	// UPROPERTY(Config) array cached at engine startup — modifying GConfig is too late.
-	if (FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers=")))
+	const FString CmdLine(FCommandLine::Get());
+	const bool bIsProxy = CmdLine.Contains(TEXT("-ProxyRegistrationPort="));
+	if (bIsProxy)
 	{
-		UE_LOG(LogNyx, Log, TEXT("Detected -ProxyGameServers — configuring as PROXY server"));
+		UE_LOG(LogNyx, Log, TEXT("Detected proxy args — configuring as PROXY server"));
 
 		if (GEngine)
 		{
@@ -747,7 +750,99 @@ void UNyxGameInstance::RegisterConsoleCommands()
 		}),
 		ECVF_Default));
 
-	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset, Nyx.JoinServer, Nyx.SmokeTest, Nyx.ForceCorrection"));
+	// ── Dynamic Proxy Management Commands ──
+
+	// Nyx.Proxy.AddServer <host:port> — dynamically register a new game server with the proxy
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Proxy.AddServer"),
+		TEXT("Add a game server to the proxy at runtime. Usage: Nyx.Proxy.AddServer <host:port>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			if (Args.Num() < 1)
+			{
+				UE_LOG(LogNyx, Warning, TEXT("Usage: Nyx.Proxy.AddServer <host:port>"));
+				return;
+			}
+
+			UWorld* World = GetWorld();
+			if (!World || !World->GetNetDriver()) { UE_LOG(LogNyx, Error, TEXT("No NetDriver")); return; }
+
+			UProxyNetDriver* Proxy = Cast<UProxyNetDriver>(World->GetNetDriver());
+			if (!Proxy) { UE_LOG(LogNyx, Error, TEXT("NetDriver is not UProxyNetDriver — not running as proxy")); return; }
+
+			FURL GameServerURL{ nullptr, *Args[0], ETravelType::TRAVEL_Absolute };
+			if (!GameServerURL.Valid)
+			{
+				UE_LOG(LogNyx, Error, TEXT("Invalid URL: %s"), *Args[0]);
+				return;
+			}
+
+			UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Proxy.AddServer %s"), *Args[0]);
+			Proxy->RegisterGameServerAndConnectClients(GameServerURL);
+		}),
+		ECVF_Default));
+
+	// Nyx.Proxy.RemoveServer <index|host:port> — permanently remove a game server (no reconnection)
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Proxy.RemoveServer"),
+		TEXT("Remove a game server from the proxy. Usage: Nyx.Proxy.RemoveServer <index|host:port>"),
+		FConsoleCommandWithArgsDelegate::CreateLambda([this](const TArray<FString>& Args)
+		{
+			if (Args.Num() < 1)
+			{
+				UE_LOG(LogNyx, Warning, TEXT("Usage: Nyx.Proxy.RemoveServer <index|host:port>"));
+				return;
+			}
+
+			UWorld* World = GetWorld();
+			if (!World || !World->GetNetDriver()) { UE_LOG(LogNyx, Error, TEXT("No NetDriver")); return; }
+
+			UProxyNetDriver* Proxy = Cast<UProxyNetDriver>(World->GetNetDriver());
+			if (!Proxy) { UE_LOG(LogNyx, Error, TEXT("NetDriver is not UProxyNetDriver")); return; }
+
+			// Try numeric index first
+			if (Args[0].IsNumeric())
+			{
+				const int32 Index = FCString::Atoi(*Args[0]);
+				UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Proxy.RemoveServer index=%d"), Index);
+				Proxy->RemoveGameServer(Index);
+			}
+			else
+			{
+				UE_LOG(LogNyx, Log, TEXT("Console: Nyx.Proxy.RemoveServer address=%s"), *Args[0]);
+				Proxy->RemoveGameServerByAddress(Args[0]);
+			}
+		}),
+		ECVF_Default));
+
+	// Nyx.Proxy.ListServers — list all registered + pending-reconnection servers
+	ConsoleCommands.Add(IConsoleManager::Get().RegisterConsoleCommand(
+		TEXT("Nyx.Proxy.ListServers"),
+		TEXT("List all game servers known to the proxy (active + pending reconnection)"),
+		FConsoleCommandDelegate::CreateLambda([this]()
+		{
+			UWorld* World = GetWorld();
+			if (!World || !World->GetNetDriver()) { UE_LOG(LogNyx, Error, TEXT("No NetDriver")); return; }
+
+			UProxyNetDriver* Proxy = Cast<UProxyNetDriver>(World->GetNetDriver());
+			if (!Proxy) { UE_LOG(LogNyx, Error, TEXT("NetDriver is not UProxyNetDriver")); return; }
+
+			UE_LOG(LogNyx, Log, TEXT("=== Active Game Servers (%d) ==="), Proxy->GetGameServerConnectionCount());
+			for (int32 i = 0; i < Proxy->GetGameServerConnectionCount(); ++i)
+			{
+				FGameServerConnectionState* State = Proxy->GetGameServerConnection(i);
+				const bool bConnected = State && State->NetDriver && State->NetDriver->ServerConnection
+					&& State->NetDriver->ServerConnection->GetConnectionState() == USOCK_Open;
+				UE_LOG(LogNyx, Log, TEXT("  [%d] %s  %s"), i,
+					*State->GameServerURL.ToString(),
+					bConnected ? TEXT("CONNECTED") : TEXT("CONNECTING"));
+			}
+
+			UE_LOG(LogNyx, Log, TEXT("=== Proxy Client Connections: %d ==="), Proxy->ClientConnections.Num());
+		}),
+		ECVF_Default));
+
+	UE_LOG(LogNyx, Log, TEXT("Registered console commands: Nyx.Connect, Nyx.ConnectMock, Nyx.Disconnect, Nyx.StartGame, Nyx.Seed, Nyx.ClearEntities, Nyx.Move, Nyx.Walk, Nyx.EnterWorld, Nyx.Bench, Nyx.BenchSeed, Nyx.BenchReset, Nyx.BenchTick, Nyx.BenchTickStop, Nyx.BenchMem, Nyx.StartSidecar, Nyx.StopSidecar, Nyx.Shoot, Nyx.PhysicsReset, Nyx.JoinServer, Nyx.SmokeTest, Nyx.ForceCorrection, Nyx.Proxy.AddServer, Nyx.Proxy.RemoveServer, Nyx.Proxy.ListServers"));
 }
 
 void UNyxGameInstance::UnregisterConsoleCommands()

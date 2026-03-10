@@ -62,7 +62,7 @@ void UNyxMultiServerSubsystem::InitializeMultiServerMesh(
 	Params.NumServers = static_cast<uint32>(NumServers);
 	Params.PeerAddresses = PeerAddresses;
 	Params.UserBeaconClass = ANyxMultiServerBeaconClient::StaticClass();
-	Params.OnMultiServerConnected.BindUObject(this, &UNyxMultiServerSubsystem::HandlePeerConnected);
+	Params.OnMultiServerConnected.AddUObject(this, &UNyxMultiServerSubsystem::HandlePeerConnected);
 
 	MultiServerNode = UMultiServerNode::Create(Params);
 
@@ -76,37 +76,6 @@ void UNyxMultiServerSubsystem::InitializeMultiServerMesh(
 	{
 		UE_LOG(LogNyxMultiServerSub, Error, TEXT("Failed to create MultiServer mesh"));
 	}
-}
-
-bool UNyxMultiServerSubsystem::InitializeFromCommandLine()
-{
-	// Check if multi-server mode is requested via command line
-	FString LocalPeerId;
-	if (!FParse::Value(FCommandLine::Get(), TEXT("-DedicatedServerId="), LocalPeerId, false))
-	{
-		// Not in multi-server mode
-		return false;
-	}
-
-	FString ListenIp = TEXT("0.0.0.0");
-	FParse::Value(FCommandLine::Get(), TEXT("-NyxMultiServerListenIp="), ListenIp, false);
-
-	int32 ListenPort = 15000;
-	FParse::Value(FCommandLine::Get(), TEXT("-NyxMultiServerListenPort="), ListenPort);
-
-	FString PeersArg;
-	TArray<FString> PeerAddresses;
-	if (FParse::Value(FCommandLine::Get(), TEXT("-MultiServerPeers="), PeersArg, false))
-	{
-		PeersArg.ParseIntoArray(PeerAddresses, TEXT(","), true);
-	}
-
-	UE_LOG(LogNyxMultiServerSub, Log,
-		TEXT("MultiServer mode detected from command line: LocalId=%s, ListenPort=%d, Peers=%d"),
-		*LocalPeerId, ListenPort, PeerAddresses.Num());
-
-	InitializeMultiServerMesh(LocalPeerId, ListenIp, ListenPort, PeerAddresses);
-	return true;
 }
 
 bool UNyxMultiServerSubsystem::AreAllPeersConnected() const

@@ -3,11 +3,15 @@
 # Architecture: Option 4 — Hybrid A + C + D
 #   SpacetimeDB (persistence/combat compute) + UE5 Dedicated Servers (real-time gameplay)
 #
+# All game servers register with the proxy dynamically via -JoinProxy=.
+# The proxy broadcasts peer addresses for automatic mesh discovery.
+#
 # Usage:
-#   docker compose up -d                     # Start full stack (SpacetimeDB + 2 servers)
+#   docker compose up -d                     # Start full stack (SpacetimeDB + proxy + 2 servers)
 #   docker compose up -d spacetimedb         # Start SpacetimeDB only
 #   docker compose up -d nyx-server-1        # Start single server
 #   docker compose logs -f spacetimedb       # Watch SpacetimeDB logs
+#   docker compose logs -f nyx-proxy         # Watch proxy logs
 #   docker compose logs -f nyx-server-1      # Watch server 1 logs
 #   docker compose logs -f nyx-server-2      # Watch server 2 logs
 #   docker compose down                      # Stop everything
@@ -41,6 +45,34 @@ services:
       retries: 3
       start_period: 15s
 
+  # ── MultiServer Proxy ────────────────────────────────────────────
+  # Routes client traffic to backend game servers.
+  # Game servers register dynamically via beacon on port 17000.
+  nyx-proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: nyx-proxy
+    ports:
+      - "7780:7780/udp"    # Client connections (proxy frontend)
+      - "17000:17000/tcp"  # Registration beacon (servers → proxy)
+    depends_on:
+      spacetimedb:
+        condition: service_healthy
+    restart: unless-stopped
+    command:
+      - "Nyx"
+      - "-server"
+      - "-log"
+      - "-unattended"
+      - "-nosplash"
+      - "-nosound"
+      - "-NullRHI"
+      - "-port=7780"
+      - "-DisableGarbageElimination"
+      - "-DedicatedServerId=proxy-1"
+      - "-ProxyRegistrationPort=17000"
+
   # ── UE5 Dedicated Server 1 (Zone A primary) ────────────────────
   # Real-time gameplay: physics, movement replication, client connections.
   # Cross-compiled from Windows → Linux, cooked for LinuxServer platform.
@@ -55,6 +87,8 @@ services:
     depends_on:
       spacetimedb:
         condition: service_healthy
+      nyx-proxy:
+        condition: service_started
     restart: unless-stopped
     command:
       - "Nyx"
@@ -65,17 +99,17 @@ services:
       - "-nosound"
       - "-NullRHI"
       - "-port=7777"
+      - "-DisableGarbageElimination"
       - "-SpacetimeHost=spacetimedb:3000"
       - "-SpacetimeDB=nyx"
       - "-ServerId=server-1"
       - "-ZoneId=zone-a"
       - "-DedicatedServerId=server-1"
-      - "-NyxMultiServerListenPort=15000"        # Game code (NyxMultiServerSubsystem)
-      - "-MultiServerPeers=unreal://nyx-server-2:15000"
-      - "-DSTMListenPort=16000"                  # DSTMTransport plugin
-      - "-DSTMPeers=nyx-server-2:16000"
+      - "-GameHost=nyx-server-1"
+      - "-NyxMultiServerListenPort=15000"
+      - "-DSTMListenPort=16000"
+      - "-JoinProxy=nyx-proxy:17000"
       - "-ZoneSide=west"
-      - "-TransferAddress=127.0.0.1:7778"
 
   # ── UE5 Dedicated Server 2 (Zone A secondary / entity shard) ───
   # Second server managing the east zone (X >= 0).
@@ -91,6 +125,8 @@ services:
     depends_on:
       spacetimedb:
         condition: service_healthy
+      nyx-proxy:
+        condition: service_started
     restart: unless-stopped
     command:
       - "Nyx"
@@ -101,17 +137,17 @@ services:
       - "-nosound"
       - "-NullRHI"
       - "-port=7777"
+      - "-DisableGarbageElimination"
       - "-SpacetimeHost=spacetimedb:3000"
       - "-SpacetimeDB=nyx"
       - "-ServerId=server-2"
       - "-ZoneId=zone-a"
       - "-DedicatedServerId=server-2"
-      - "-NyxMultiServerListenPort=15000"        # Game code (NyxMultiServerSubsystem)
-      - "-MultiServerPeers=unreal://nyx-server-1:15000"
-      - "-DSTMListenPort=16000"                  # DSTMTransport plugin
-      - "-DSTMPeers=nyx-server-1:16000"
+      - "-GameHost=nyx-server-2"
+      - "-NyxMultiServerListenPort=15000"
+      - "-DSTMListenPort=16000"
+      - "-JoinProxy=nyx-proxy:17000"
       - "-ZoneSide=east"
-      - "-TransferAddress=127.0.0.1:7777"
 
 volumes:
   stdb-data:

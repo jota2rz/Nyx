@@ -5,10 +5,12 @@
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
 #include "Nyx/Data/NyxTypes.h"
+#include "ProxyRegistrationTypes.h"
 #include "NyxGameMode.generated.h"
 
 class ANyxCharacter;
 class UDSTMSubsystem;
+class AProxyRegistrationBeaconClient;
 
 /**
  * Nyx game mode — Option 4 architecture.
@@ -120,6 +122,25 @@ private:
 
 	/** Timer-based zone boundary check for all connected players. */
 	void CheckZoneBoundaries();
+
+	// ──── Proxy Registration (-JoinProxy=) ────
+	//
+	// When -JoinProxy=<host:port> is on the command line, this server registers
+	// with the proxy via a beacon, receives peer discovery, and dynamically
+	// initializes the DSTM and MultiServer meshes from the peer list.
+
+	/** Connect to the proxy's registration beacon and register this server. */
+	void ConnectToProxy(const FString& ProxyAddress);
+
+	/** Called when the proxy sends us an updated peer list. */
+	void HandleProxyPeerListReceived(const TArray<FProxyPeerInfo>& Peers);
+
+	/** The registration beacon client connected to the proxy. */
+	UPROPERTY()
+	TObjectPtr<AProxyRegistrationBeaconClient> ProxyRegistrationBeacon;
+
+	/** True if meshes have already been initialized from a peer list. */
+	bool bMeshesInitializedFromProxy = false;
 
 	// ──── DSTM Migration ────
 	//

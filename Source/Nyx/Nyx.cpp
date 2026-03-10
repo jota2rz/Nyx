@@ -34,7 +34,7 @@ public:
 				return true;
 			});
 
-		if (FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers=")))
+		if (FString(FCommandLine::Get()).Contains(TEXT("-ProxyRegistrationPort=")))
 		{
 			FCoreDelegates::OnPostEngineInit.AddStatic(&FNyxModule::ConfigureProxyNetDrivers);
 		}
