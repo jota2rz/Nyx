@@ -14,7 +14,6 @@
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
 #include "Engine/ChildConnection.h"
-#include "GameFramework/CharacterMovementComponent.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
 #include "Engine/NetDriver.h"
@@ -139,6 +138,16 @@ void ANyxGameMode::StartPlay()
 				0.5f, true);
 			UE_LOG(LogNyx, Log, TEXT("Zone boundary checking started (0.5s interval). TransferAddr=%s"),
 				TransferAddress.IsEmpty() ? TEXT("(none - proxy mode)") : *TransferAddress);
+
+#if UE_WITH_REMOTE_OBJECT_HANDLE
+			// Subscribe to DSTM arrival delegate so HandleMigratedPlayerArrival
+			// fires immediately when the PC lands — no 0.5s polling delay.
+			if (DSTMSub && DSTMSub->IsMeshActive())
+			{
+				DSTMSub->OnActorArrived.AddUObject(this, &ANyxGameMode::OnDSTMActorArrived);
+				UE_LOG(LogNyx, Log, TEXT("Subscribed to DSTM OnActorArrived delegate"));
+			}
+#endif
 		}
 		else
 		{
@@ -349,16 +358,10 @@ void ANyxGameMode::CheckZoneBoundaries()
 		ANyxCharacter* NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
 
 #if UE_WITH_REMOTE_OBJECT_HANDLE
-		// Detect a migrated PC that needs setup on this server.
-		// Two cases:
-		//   A) PC has no pawn — pawn ref didn't survive DSTM serialization
-		//   B) PC has a pawn but it's still frozen — pawn ref DID survive but
-		//      HandleMigratedPlayerArrival hasn't run yet to re-enable movement
-		const bool bNeedsArrivalSetup =
-			(PC->Player && !PC->IsA(ANoPawnPlayerController::StaticClass())) &&
-			(!NyxChar || !NyxChar->GetActorEnableCollision());
-
-		if (bNeedsArrivalSetup)
+		// Fallback: if the delegate-based arrival didn't fully process this PC
+		// (e.g. pawn wasn't ready yet), retry here.
+		if (!NyxChar && PC->Player && !PC->IsA(ANoPawnPlayerController::StaticClass())
+			&& bIsChildConnection && !TransferArrivalTimes.Contains(PC))
 		{
 			HandleMigratedPlayerArrival(PC);
 			NyxChar = Cast<ANyxCharacter>(PC->GetPawn());
@@ -480,22 +483,16 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 		ServerSub->OnPlayerLeft(NyxChar);
 	}
 
-	// ── 3. Freeze the pawn (but keep it possessed) ──
-	// Freeze movement and disable collision so the pawn is inert during transit.
-	// We do NOT call UnPossess — keeping the PC→Pawn relationship intact means
-	// the DSTM serialization carries the Pawn reference across. The receiving
-	// server's PC already has GetPawn() == NyxChar, so no re-possession (and
-	// crucially no ClientRestart RPC) is needed. The transfer is invisible
-	// to the client — zero flicker, zero animation reset.
-	if (UCharacterMovementComponent* MoveComp = NyxChar->GetCharacterMovement())
-	{
-		MoveComp->StopMovementImmediately();
-		MoveComp->DisableMovement();
-	}
-	NyxChar->SetActorEnableCollision(false);
+	// ── 3. Keep possession intact — do NOT freeze ──
+	// We transfer the pawn as-is (MOVE_Walking, collision on, current velocity).
+	// Freezing via DisableMovement() would set MOVE_None which REPLICATES
+	// to the client, causing the character to stop responding to input.
+	// By keeping MOVE_Walking, the DSTM serializes the pawn in its natural
+	// state — the client's CMC keeps predicting locally during the brief
+	// transit gap, so the player sees zero interruption.
 
 	UE_LOG(LogNyx, Log,
-		TEXT("Migration DSTM: Froze pawn at (%.0f, %.0f, %.0f) — transferring pawn + PC via DSTM (possession kept)"),
+		TEXT("Migration DSTM: Pawn at (%.0f, %.0f, %.0f) — transferring pawn + PC via DSTM (no freeze, possession kept)"),
 		PawnLocation.X, PawnLocation.Y, PawnLocation.Z);
 
 	// ── 4. Stamp the pawn's position onto the PC's root component ──
@@ -534,6 +531,23 @@ void ANyxGameMode::MigratePlayerDSTM(APlayerController* PC, ANyxCharacter* NyxCh
 	TransferArrivalTimes.Remove(PC);
 }
 
+void ANyxGameMode::OnDSTMActorArrived(AActor* ArrivedActor)
+{
+	// Only interested in PlayerControllers (not pawns or other actors).
+	// The pawn arrives first, then the PC — we act when the PC lands.
+	APlayerController* PC = Cast<APlayerController>(ArrivedActor);
+	if (!PC || PC->IsA(ANoPawnPlayerController::StaticClass()))
+	{
+		return;
+	}
+
+	UE_LOG(LogNyx, Log,
+		TEXT("OnDSTMActorArrived: PC %s arrived via DSTM — triggering immediate arrival setup"),
+		*PC->GetName());
+
+	HandleMigratedPlayerArrival(PC);
+}
+
 void ANyxGameMode::HandleMigratedPlayerArrival(APlayerController* PC)
 {
 	UWorld* World = GetWorld();
@@ -560,10 +574,11 @@ void ANyxGameMode::HandleMigratedPlayerArrival(APlayerController* PC)
 
 	if (!NyxChar)
 	{
-		// Pawn hasn't arrived yet (still in transit) — CheckZoneBoundaries
-		// will call us again next tick. This is normal for the first 1-2 ticks.
-		UE_LOG(LogNyx, Log,
-			TEXT("HandleMigratedPlayerArrival: %s — transferred pawn not yet arrived, will retry next tick"),
+		// Pawn hasn't arrived yet — it transfers before the PC but network
+		// timing can vary. The delegate will fire again when the pawn arrives,
+		// but since we only trigger on PC arrival, schedule a deferred retry.
+		UE_LOG(LogNyx, Warning,
+			TEXT("HandleMigratedPlayerArrival: %s — pawn not found yet, will retry via CheckZoneBoundaries"),
 			*PC->GetName());
 		return;
 	}
@@ -595,14 +610,7 @@ void ANyxGameMode::HandleMigratedPlayerArrival(APlayerController* PC)
 		PC->SetControlRotation(NyxChar->GetActorRotation());
 	}
 
-	// ── 3. Re-enable movement and collision (frozen on sending server) ──
-	if (UCharacterMovementComponent* MoveComp = NyxChar->GetCharacterMovement())
-	{
-		MoveComp->SetMovementMode(MOVE_Walking);
-	}
-	NyxChar->SetActorEnableCollision(true);
-
-	// ── 4. Set server/zone info for HUD ──
+	// ── 3. Set server/zone info for HUD ──
 	NyxChar->ServerName = DedicatedServerId;
 	NyxChar->ZoneName = (PawnPos.X < ZoneBoundaryX)
 		? TEXT("Zone-1 (West)")

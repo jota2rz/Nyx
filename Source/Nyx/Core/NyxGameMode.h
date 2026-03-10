@@ -139,9 +139,9 @@ private:
 	//        - Deserializes PC (same FRemoteObjectId)
 	//        - PostMigrate(Receive) binds PC to connection
 	//        - Same proxy UObject → same client channel → zero disruption
-	//     3. CheckZoneBoundaries detects pawnless migrated PC
-	//     4. HandleMigratedPlayerArrival spawns a fresh Pawn,
-	//        loads saved state from SpacetimeDB (position, stats)
+	//     3. OnDSTMActorArrived fires immediately (delegate, no polling)
+	//     4. HandleMigratedPlayerArrival fixes possession, sets zone info,
+	//        registers SpacetimeDB, grants grace period
 	//
 	// See DSTM.md for full architecture details.
 
@@ -157,10 +157,17 @@ private:
 	 * The engine's PostMigrate(Receive) binds the PC to the ChildConnection.
 	 * The Pawn was also transferred via DSTM — the PC's Pawn reference may
 	 * already be set from serialization. This method fixes up the bidirectional
-	 * PC↔Pawn relationship WITHOUT calling Possess()/ClientRestart(), re-enables
-	 * movement and collision, sets zone info, and registers with SpacetimeDB.
+	 * PC↔Pawn relationship WITHOUT calling Possess()/ClientRestart(), sets
+	 * zone info, and registers with SpacetimeDB.
 	 */
 	void HandleMigratedPlayerArrival(APlayerController* PC);
+
+	/**
+	 * Delegate callback from DSTMSubsystem::OnActorArrived.
+	 * Fires immediately when a migrated actor is received — no polling delay.
+	 * Filters for PlayerControllers and routes to HandleMigratedPlayerArrival.
+	 */
+	void OnDSTMActorArrived(AActor* ArrivedActor);
 #endif
 
 	/** Tracks players currently being transferred (prevent double-transfer). */
