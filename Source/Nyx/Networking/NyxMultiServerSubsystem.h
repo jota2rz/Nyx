@@ -26,7 +26,8 @@ class ANyxMultiServerBeaconClient;
  *   4. On each peer connection, wires up cross-server combat/handoff delegates
  *   5. On shutdown, tears down mesh gracefully
  *
- * Command-line args (parsed by UMultiServerNode internally):
+ * Command-line args (parsed by UMultiServerNode):
+ *   -MultiServerPeers=IP1:Port1,IP2:Port2,...
  *   -DedicatedServerId=UniqueServerId
  *   -NyxMultiServerListenPort=PortNum
  */
@@ -58,6 +59,14 @@ public:
 	void InitializeMultiServerMesh(const FString& LocalPeerId,
 		const FString& ListenIp, int32 ListenPort,
 		const TArray<FString>& PeerAddresses);
+
+	/**
+	 * Initialize from command-line arguments.
+	 * Reads -MultiServerPeers, etc.
+	 * Returns true if multi-server mode was configured.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "Nyx|MultiServer")
+	bool InitializeFromCommandLine();
 
 	/** Is the multi-server mesh active? */
 	UFUNCTION(BlueprintCallable, Category = "Nyx|MultiServer")

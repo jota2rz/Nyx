@@ -5,7 +5,6 @@
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
 #include "Nyx/Data/NyxTypes.h"
-#include "ProxyRegistrationTypes.h"
 #include "NyxGameMode.generated.h"
 
 class ANyxCharacter;
@@ -123,26 +122,8 @@ private:
 	/** Timer-based zone boundary check for all connected players. */
 	void CheckZoneBoundaries();
 
-	// ──── Proxy Registration ────
-	//
-	// When -JoinProxy=<host:port> is on the command line, this server registers
-	// with the proxy via a beacon on startup. ConnectToProxy() can also be
-	// called later (e.g., by an orchestrator) if the server starts without
-	// -JoinProxy=. Once connected, the proxy broadcasts peer discovery and
-	// the meshes are initialized dynamically from the peer list.
-
-	/** Connect to the proxy's registration beacon and register this server. */
-	void ConnectToProxy(const FString& ProxyAddress);
-
-	/** Called when the proxy sends us an updated peer list. */
-	void HandleProxyPeerListReceived(const TArray<FProxyPeerInfo>& Peers);
-
-	/** The registration beacon client connected to the proxy. */
-	UPROPERTY()
-	TObjectPtr<AProxyRegistrationBeaconClient> ProxyRegistrationBeacon;
-
-	/** True if meshes have already been initialized from a peer list. */
-	bool bMeshesInitializedFromProxy = false;
+	/** Connect to the proxy's registration beacon (game server side, -JoinProxy=). */
+	void ConnectToProxy();
 
 	// ──── DSTM Migration ────
 	//
@@ -203,4 +184,8 @@ private:
 	static constexpr float TransferGracePeriodSeconds = 5.0f;
 
 	FTimerHandle ZoneCheckTimerHandle;
+
+	/** Beacon client for proxy registration (game server side). */
+	UPROPERTY()
+	TObjectPtr<AProxyRegistrationBeaconClient> ProxyRegistrationClient;
 };

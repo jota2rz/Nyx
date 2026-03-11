@@ -12,6 +12,7 @@
 #include "InputActionValue.h"
 #include "InputMappingContext.h"
 #include "InputAction.h"
+#include "InputModifiers.h"
 #include "Net/UnrealNetwork.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Nyx/Server/NyxServerSubsystem.h"
@@ -91,60 +92,19 @@ ANyxCharacter::ANyxCharacter(const FObjectInitializer& ObjectInitializer)
 		UE_LOG(LogNyx, Error, TEXT("FAILED to load ABP_Unarmed!"));
 	}
 
-	// ──── Enhanced Input assets ────
-	static ConstructorHelpers::FObjectFinder<UInputMappingContext> IMCFinder(
-		TEXT("/Game/Input/IMC_Default"));
-	if (IMCFinder.Succeeded())
-	{
-		DefaultMappingContext = IMCFinder.Object;
-	}
+	// ──── Enhanced Input actions (fully programmatic — no content dependency) ────
+	MoveAction = CreateDefaultSubobject<UInputAction>(TEXT("IA_Move"));
+	MoveAction->ValueType = EInputActionValueType::Axis2D;
 
-	static ConstructorHelpers::FObjectFinder<UInputMappingContext> IMCMouseLookFinder(
-		TEXT("/Game/Input/IMC_MouseLook"));
-	if (IMCMouseLookFinder.Succeeded())
-	{
-		MouseLookMappingContext = IMCMouseLookFinder.Object;
-		UE_LOG(LogNyx, Log, TEXT("IMC_MouseLook loaded successfully"));
-	}
-	else
-	{
-		UE_LOG(LogNyx, Warning, TEXT("FAILED to load IMC_MouseLook"));
-	}
+	LookAction = CreateDefaultSubobject<UInputAction>(TEXT("IA_Look"));
+	LookAction->ValueType = EInputActionValueType::Axis2D;
 
-	static ConstructorHelpers::FObjectFinder<UInputAction> MoveFinder(
-		TEXT("/Game/Input/Actions/IA_Move"));
-	if (MoveFinder.Succeeded())
-	{
-		MoveAction = MoveFinder.Object;
-	}
+	JumpAction = CreateDefaultSubobject<UInputAction>(TEXT("IA_Jump"));
+	JumpAction->ValueType = EInputActionValueType::Boolean;
 
-	static ConstructorHelpers::FObjectFinder<UInputAction> LookFinder(
-		TEXT("/Game/Input/Actions/IA_Look"));
-	if (LookFinder.Succeeded())
-	{
-		LookAction = LookFinder.Object;
-	}
+	MouseLookAction = CreateDefaultSubobject<UInputAction>(TEXT("IA_MouseLook"));
+	MouseLookAction->ValueType = EInputActionValueType::Axis2D;
 
-	static ConstructorHelpers::FObjectFinder<UInputAction> JumpFinder(
-		TEXT("/Game/Input/Actions/IA_Jump"));
-	if (JumpFinder.Succeeded())
-	{
-		JumpAction = JumpFinder.Object;
-	}
-
-	static ConstructorHelpers::FObjectFinder<UInputAction> MouseLookFinder(
-		TEXT("/Game/Input/Actions/IA_MouseLook"));
-	if (MouseLookFinder.Succeeded())
-	{
-		MouseLookAction = MouseLookFinder.Object;
-		UE_LOG(LogNyx, Log, TEXT("IA_MouseLook loaded successfully"));
-	}
-	else
-	{
-		UE_LOG(LogNyx, Warning, TEXT("FAILED to load IA_MouseLook — mouse camera will not work"));
-	}
-
-	// Attack action — create programmatically (Digital/bool trigger)
 	AttackAction = CreateDefaultSubobject<UInputAction>(TEXT("IA_Attack"));
 	AttackAction->ValueType = EInputActionValueType::Boolean;
 }
@@ -369,6 +329,72 @@ void ANyxCharacter::OnRep_PlayerState()
 
 void ANyxCharacter::SetupInputMappingContexts()
 {
+	// ── Create the Input Mapping Context once (no content dependency) ──
+	// All key→action mappings are defined here in code so there is no
+	// chance of a stale or mis-referenced content asset breaking input.
+	if (!DefaultMappingContext)
+	{
+		DefaultMappingContext = NewObject<UInputMappingContext>(this, TEXT("IMC_Runtime"));
+
+		// WASD → MoveAction (Axis2D)
+		if (MoveAction)
+		{
+			// D → +X (no modifiers)
+			DefaultMappingContext->MapKey(MoveAction, EKeys::D);
+
+			// A → −X
+			{
+				FEnhancedActionKeyMapping& M = DefaultMappingContext->MapKey(MoveAction, EKeys::A);
+				UInputModifierNegate* Neg = NewObject<UInputModifierNegate>(this);
+				Neg->bX = true; Neg->bY = false; Neg->bZ = false;
+				M.Modifiers.Add(Neg);
+			}
+
+			// W → +Y (swizzle X↔Y so key value 1.0 lands on Y)
+			{
+				FEnhancedActionKeyMapping& M = DefaultMappingContext->MapKey(MoveAction, EKeys::W);
+				UInputModifierSwizzleAxis* Swz = NewObject<UInputModifierSwizzleAxis>(this);
+				Swz->Order = EInputAxisSwizzle::YXZ;
+				M.Modifiers.Add(Swz);
+			}
+
+			// S → −Y (swizzle then negate)
+			{
+				FEnhancedActionKeyMapping& M = DefaultMappingContext->MapKey(MoveAction, EKeys::S);
+				UInputModifierSwizzleAxis* Swz = NewObject<UInputModifierSwizzleAxis>(this);
+				Swz->Order = EInputAxisSwizzle::YXZ;
+				UInputModifierNegate* Neg = NewObject<UInputModifierNegate>(this);
+				M.Modifiers.Add(Swz);
+				M.Modifiers.Add(Neg);
+			}
+		}
+
+		// Mouse → MouseLookAction (Axis2D)  — negate Y so mouse-up = look-up
+		if (MouseLookAction)
+		{
+			FEnhancedActionKeyMapping& M = DefaultMappingContext->MapKey(MouseLookAction, EKeys::Mouse2D);
+			UInputModifierNegate* Neg = NewObject<UInputModifierNegate>(this);
+			Neg->bX = false; Neg->bY = true; Neg->bZ = false;
+			M.Modifiers.Add(Neg);
+		}
+
+		// Space → JumpAction (Boolean)
+		if (JumpAction)
+		{
+			DefaultMappingContext->MapKey(JumpAction, EKeys::SpaceBar);
+		}
+
+		// Left Mouse Button → AttackAction (Boolean)
+		if (AttackAction)
+		{
+			DefaultMappingContext->MapKey(AttackAction, EKeys::LeftMouseButton);
+		}
+
+		UE_LOG(LogNyx, Log, TEXT("Created programmatic IMC with %d key mappings"),
+			DefaultMappingContext->GetMappings().Num());
+	}
+
+	// ── Add the IMC to the local player's Enhanced Input subsystem ──
 	APlayerController* PC = Cast<APlayerController>(GetController());
 	if (!PC || !PC->IsLocalController()) return;
 
@@ -376,20 +402,10 @@ void ANyxCharacter::SetupInputMappingContexts()
 		ULocalPlayer::GetSubsystem<UEnhancedInputLocalPlayerSubsystem>(PC->GetLocalPlayer());
 	if (!InputSub) return;
 
-	if (DefaultMappingContext)
-	{
-		// Inject left-click → AttackAction into the shared IMC (idempotent)
-		if (AttackAction)
-		{
-			DefaultMappingContext->MapKey(AttackAction, EKeys::LeftMouseButton);
-		}
-		InputSub->AddMappingContext(DefaultMappingContext, 0);
-	}
+	InputSub->AddMappingContext(DefaultMappingContext, 0);
 
-	if (MouseLookMappingContext)
-	{
-		InputSub->AddMappingContext(MouseLookMappingContext, 1);
-	}
+	// Ensure game viewport captures keyboard + mouse (not UI mode)
+	PC->SetInputMode(FInputModeGameOnly());
 
 	UE_LOG(LogNyx, Log, TEXT("Input mapping contexts applied for %s"), *GetName());
 }
@@ -965,6 +981,15 @@ void ANyxCharacter::HandleMove(const FInputActionValue& Value)
 {
 	const FVector2D MoveInput = Value.Get<FVector2D>();
 
+	// One-shot diagnostic log
+	static bool bMoveDiag = false;
+	if (!bMoveDiag)
+	{
+		UE_LOG(LogNyx, Log, TEXT("HandleMove FIRST CALL for %s  Input=(%f,%f)  Controller=%s"),
+			*GetName(), MoveInput.X, MoveInput.Y, *GetNameSafe(Controller));
+		bMoveDiag = true;
+	}
+
 	// Use whatever controller is available — on proxy clients GetController()
 	// may return NoPawnPlayerController, but movement math only needs a rotation.
 	AController* MoveController = Controller;
@@ -993,6 +1018,15 @@ void ANyxCharacter::HandleMove(const FInputActionValue& Value)
 void ANyxCharacter::HandleLook(const FInputActionValue& Value)
 {
 	const FVector2D LookInput = Value.Get<FVector2D>();
+
+	// One-shot diagnostic log
+	static bool bLookDiag = false;
+	if (!bLookDiag)
+	{
+		UE_LOG(LogNyx, Log, TEXT("HandleLook FIRST CALL for %s  Input=(%f,%f)  Controller=%s"),
+			*GetName(), LookInput.X, LookInput.Y, *GetNameSafe(Controller));
+		bLookDiag = true;
+	}
 
 	// AddControllerYawInput/Pitch work on the pawn's Controller member.
 	// If Controller is null but we have a local PC, use it directly.
