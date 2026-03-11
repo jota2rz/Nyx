@@ -109,8 +109,12 @@ void ANyxGameMode::StartPlay()
 			// ── DSTM mesh: initialize the DSTM beacon transport for seamless migration ──
 			// DSTMSubsystem cannot auto-init in Initialize() because GetWorld() is
 			// null during GameInstance subsystem creation. Init here when World is ready.
+			// When using the proxy (-JoinProxy=), mesh creation is deferred until the
+			// proxy sends the DSTM peer list via the registration beacon RPC.
+			FString JoinProxyCheck;
+			const bool bUsingProxy = FParse::Value(FCommandLine::Get(), TEXT("-JoinProxy="), JoinProxyCheck, false);
 			UDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
-			if (DSTMSub && DSTMSub->InitializeFromCommandLine())
+			if (!bUsingProxy && DSTMSub && DSTMSub->InitializeFromCommandLine())
 			{
 				UE_LOG(LogNyx, Log, TEXT("DSTM mesh initialized from command line"));
 			}
@@ -162,7 +166,9 @@ void ANyxGameMode::StartPlay()
 #if UE_WITH_REMOTE_OBJECT_HANDLE
 			// Subscribe to DSTM arrival delegate so HandleMigratedPlayerArrival
 			// fires immediately when the PC lands — no 0.5s polling delay.
-			if (DSTMSub && DSTMSub->IsMeshActive())
+			// Subscribe even if the mesh isn't active yet — when using the proxy,
+			// the mesh is created later by the beacon RPC.
+			if (DSTMSub)
 			{
 				DSTMSub->OnActorArrived.AddUObject(this, &ANyxGameMode::OnDSTMActorArrived);
 				UE_LOG(LogNyx, Log, TEXT("Subscribed to DSTM OnActorArrived delegate"));
@@ -724,13 +730,20 @@ void ANyxGameMode::ConnectToProxy()
 		GameServerAddr = FString::Printf(TEXT("127.0.0.1:%d"), Port);
 	}
 
-	UE_LOG(LogNyx, Log, TEXT("Connecting to proxy registration beacon at %s (advertising address: %s)"),
-		*JoinProxyAddr, *GameServerAddr);
+	// DSTM info: the proxy derives each server's DSTM address from
+	// the game-server host + DSTMListenPort.
+	int32 DSTMPort = 16000;
+	FParse::Value(FCommandLine::Get(), TEXT("-DSTMListenPort="), DSTMPort);
+
+	UE_LOG(LogNyx, Log,
+		TEXT("Connecting to proxy registration beacon at %s (addr: %s, serverId: %s, DSTMPort: %d)"),
+		*JoinProxyAddr, *GameServerAddr, *DedicatedServerId, DSTMPort);
 
 	ProxyRegistrationClient = GetWorld()->SpawnActor<AProxyRegistrationBeaconClient>();
 	if (ProxyRegistrationClient)
 	{
 		ProxyRegistrationClient->SetGameServerAddress(GameServerAddr);
+		ProxyRegistrationClient->SetDSTMInfo(DedicatedServerId, DSTMPort);
 
 		FURL ConnectURL(nullptr, *JoinProxyAddr, ETravelType::TRAVEL_Absolute);
 		ProxyRegistrationClient->InitClient(ConnectURL);

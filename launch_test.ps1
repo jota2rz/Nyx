@@ -26,7 +26,7 @@ Start-Sleep -Seconds 20
 # Server-1: West zone (X < 0), port 7777
 # Connects to proxy beacon at 127.0.0.1:17000 to register itself
 # Game mesh: port 15000, DSTM beacon: port 16000
-$s1Args = "`"$proj`" -port=7777 $commonArgs -DedicatedServerId=server-1 -ZoneSide=west -JoinProxy=127.0.0.1:17000 -GameServerAddress=127.0.0.1:7777 -NyxMultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -DSTMListenPort=16000 -DSTMPeers=127.0.0.1:16001"
+$s1Args = "`"$proj`" -port=7777 $commonArgs -DedicatedServerId=server-1 -ZoneSide=west -JoinProxy=127.0.0.1:17000 -GameServerAddress=127.0.0.1:7777 -NyxMultiServerListenPort=15000 -MultiServerPeers=127.0.0.1:15001 -DSTMListenPort=16000"
 Start-Process $server -ArgumentList $s1Args -RedirectStandardOutput "C:\UE\Nyx\server1_log.txt" -RedirectStandardError "C:\UE\Nyx\server1_err.txt"
 Write-Host "[2/4] Server-1 (West) on port 7777, joining proxy beacon"
 Start-Sleep -Seconds 2
@@ -34,7 +34,7 @@ Start-Sleep -Seconds 2
 # Server-2: East zone (X >= 0), port 7778
 # Connects to proxy beacon at 127.0.0.1:17000 to register itself
 # Game mesh: port 15001, DSTM beacon: port 16001
-$s2Args = "`"$proj`" -port=7778 $commonArgs -DedicatedServerId=server-2 -ZoneSide=east -JoinProxy=127.0.0.1:17000 -GameServerAddress=127.0.0.1:7778 -NyxMultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -DSTMListenPort=16001 -DSTMPeers=127.0.0.1:16000"
+$s2Args = "`"$proj`" -port=7778 $commonArgs -DedicatedServerId=server-2 -ZoneSide=east -JoinProxy=127.0.0.1:17000 -GameServerAddress=127.0.0.1:7778 -NyxMultiServerListenPort=15001 -MultiServerPeers=127.0.0.1:15000 -DSTMListenPort=16001"
 Start-Process $server -ArgumentList $s2Args -RedirectStandardOutput "C:\UE\Nyx\server2_log.txt" -RedirectStandardError "C:\UE\Nyx\server2_err.txt"
 Write-Host "[3/4] Server-2 (East) on port 7778, joining proxy beacon"
 
