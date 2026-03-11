@@ -123,11 +123,13 @@ private:
 	/** Timer-based zone boundary check for all connected players. */
 	void CheckZoneBoundaries();
 
-	// ──── Proxy Registration (-JoinProxy=) ────
+	// ──── Proxy Registration ────
 	//
 	// When -JoinProxy=<host:port> is on the command line, this server registers
-	// with the proxy via a beacon, receives peer discovery, and dynamically
-	// initializes the DSTM and MultiServer meshes from the peer list.
+	// with the proxy via a beacon on startup. ConnectToProxy() can also be
+	// called later (e.g., by an orchestrator) if the server starts without
+	// -JoinProxy=. Once connected, the proxy broadcasts peer discovery and
+	// the meshes are initialized dynamically from the peer list.
 
 	/** Connect to the proxy's registration beacon and register this server. */
 	void ConnectToProxy(const FString& ProxyAddress);

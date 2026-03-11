@@ -80,11 +80,13 @@ void ANyxGameMode::StartPlay()
 
 			ServerSub->ConnectAndRegister(SpacetimeDBHost, DatabaseName, ZoneId, DedicatedServerId, 500);
 
-			// ── Mesh initialization: connect to proxy and receive peer list ──
+			// ── Optional: auto-join proxy on startup ──
+			// If -JoinProxy= is provided, connect immediately. Otherwise the
+			// server starts standalone and can be told to join a proxy later.
 			FString JoinProxyArg;
 			if (FParse::Value(FCommandLine::Get(), TEXT("-JoinProxy="), JoinProxyArg, false))
 			{
-				UE_LOG(LogNyx, Log, TEXT("JoinProxy mode: connecting to proxy at %s"), *JoinProxyArg);
+				UE_LOG(LogNyx, Log, TEXT("JoinProxy: auto-connecting to proxy at %s"), *JoinProxyArg);
 				ConnectToProxy(JoinProxyArg);
 			}
 
@@ -166,7 +168,7 @@ void ANyxGameMode::StartPlay()
 	}
 }
 
-// ─── Proxy Registration (-JoinProxy=) ─────────────────────────────
+// ─── Proxy Registration ───────────────────────────────────────────
 
 void ANyxGameMode::ConnectToProxy(const FString& ProxyAddress)
 {
