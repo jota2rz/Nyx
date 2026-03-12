@@ -2,6 +2,12 @@
 
 A research on how to build an open-world MMO with **Unreal Engine 5.7**, **SpacetimeDB 2.0**, and **Epic Online Services (EOS)**.
 
+## ARCHIVED
+
+This repository is now **ARCHIVED** and effort has been moved to implement the new **[MultiServerReplicationEx](https://github.com/jota2rz/MultiServerReplicationEx)** plugin (outcome of this research) into my fork of **[HubWorldMMO](https://github.com/jota2rz/HubWorldMMO)** which uses **[OWS](https://github.com/SabreDartStudios/OWS)**.
+
+Documentation on this repository may not reflect latest changes and probably requires manual code investigation.
+
 ## Current State
 
 **Working end-to-end:** Client connects through a proxy to two dedicated servers (west/east zones). Player spawns, moves, fights, and crosses the zone boundary — player migration is handled by the [MultiServerReplicationEx](https://github.com/jota2rz/MultiServerReplicationEx) plugin using the engine's built-in DSTM framework.
