@@ -9,7 +9,6 @@
 
 class ANyxCharacter;
 class UDSTMSubsystem;
-class AProxyRegistrationBeaconClient;
 
 /**
  * Nyx game mode — Option 4 architecture.
@@ -122,8 +121,7 @@ private:
 	/** Timer-based zone boundary check for all connected players. */
 	void CheckZoneBoundaries();
 
-	/** Connect to the proxy's registration beacon (game server side, -JoinProxy=). */
-	void ConnectToProxy();
+
 
 	// ──── DSTM Migration ────
 	//
@@ -184,8 +182,4 @@ private:
 	static constexpr float TransferGracePeriodSeconds = 5.0f;
 
 	FTimerHandle ZoneCheckTimerHandle;
-
-	/** Beacon client for proxy registration (game server side). */
-	UPROPERTY()
-	TObjectPtr<AProxyRegistrationBeaconClient> ProxyRegistrationClient;
 };

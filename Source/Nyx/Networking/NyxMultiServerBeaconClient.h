@@ -1,4 +1,8 @@
 // Copyright Nyx MMO Project. All Rights Reserved.
+//
+// NOTE: This file is currently DORMANT — unimplemented example/scaffold code.
+// Custom beacon RPCs for cross-server combat hits, entity handoff, and load
+// metrics. Not yet called from production code. See NyxMultiServerSubsystem.h.
 
 #pragma once
 

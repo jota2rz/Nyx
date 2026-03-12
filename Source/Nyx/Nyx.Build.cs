@@ -39,7 +39,7 @@ public class Nyx : ModuleRules
 
 		// MultiServer mesh + DSTM transport for entity-sharded zones (Spike 14: Pattern A)
 			PrivateDependencyModuleNames.Add("MultiServerReplicationEx");
-		PrivateDependencyModuleNames.Add("OnlineSubsystemUtils"); // AOnlineBeaconClient base class
+		PrivateDependencyModuleNames.Add("OnlineSubsystemUtils"); // DSTM beacon mesh (AMultiServerBeaconClient)
 
 		// GameplayDebugger (conditional — editor/debug builds only)
 		SetupGameplayDebuggerSupport(Target);

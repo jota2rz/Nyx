@@ -1,4 +1,9 @@
 // Copyright Nyx MMO Project. All Rights Reserved.
+//
+// NOTE: This file is currently DORMANT — unimplemented example/scaffold code.
+// The game-level multi-server beacon mesh (cross-server combat, entity handoff,
+// load-balancing) is not yet active. The engine-level DSTM mesh handles object
+// migration today. When game RPCs between servers are needed, wire this up.
 
 #pragma once
 

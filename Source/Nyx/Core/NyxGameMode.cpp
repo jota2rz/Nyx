@@ -12,9 +12,7 @@
 #include "Nyx/World/NyxZoneBoundary.h"
 #include "Nyx/UI/NyxHUD.h"
 #include "DSTMSubsystem.h"
-#include "MultiServerProxy.h"
-#include "ProxyRegistrationBeaconClient.h"
-#include "OnlineBeaconHost.h"
+
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/PlayerState.h"
 #include "Engine/ChildConnection.h"
@@ -46,25 +44,10 @@ void ANyxGameMode::StartPlay()
 		bServer ? TEXT("true") : TEXT("false"), static_cast<int32>(GetNetMode()));
 
 	// ── Proxy Server: skip all game logic (proxy only forwards replication) ──
+	// HTTP registration listener is started by UProxyRegistrationSubsystem (plugin).
 	if (bServer && IsProxyServer())
 	{
 		UE_LOG(LogNyx, Log, TEXT("Running as PROXY server — skipping SpacetimeDB, zone transfer, and game logic"));
-
-		// Start registration beacon for dynamic game server discovery
-		int32 RegistrationPort = 0;
-		if (FParse::Value(FCommandLine::Get(), TEXT("-ProxyRegistrationPort="), RegistrationPort))
-		{
-			UProxyNetDriver* ProxyDriver = Cast<UProxyNetDriver>(GetWorld()->GetNetDriver());
-			if (ProxyDriver)
-			{
-				ProxyDriver->StartRegistrationBeacon(RegistrationPort);
-			}
-			else
-			{
-				UE_LOG(LogNyx, Error, TEXT("Net driver is not UProxyNetDriver — cannot start registration beacon"));
-			}
-		}
-
 		return;
 	}
 
@@ -99,20 +82,14 @@ void ANyxGameMode::StartPlay()
 
 			ServerSub->ConnectAndRegister(SpacetimeDBHost, DatabaseName, ZoneId, DedicatedServerId, 500);
 
-			// ── MultiServer mesh: if cmd-line specifies peers, join the mesh ──
-			UNyxMultiServerSubsystem* MultiSub = GetGameInstance()->GetSubsystem<UNyxMultiServerSubsystem>();
-			if (MultiSub && MultiSub->InitializeFromCommandLine())
-			{
-				UE_LOG(LogNyx, Log, TEXT("MultiServer mesh initialized from command line"));
-			}
+			FString JoinProxyCheck;
+			const bool bUsingProxy = FParse::Value(FCommandLine::Get(), TEXT("-JoinProxy="), JoinProxyCheck, false);
 
 			// ── DSTM mesh: initialize the DSTM beacon transport for seamless migration ──
 			// DSTMSubsystem cannot auto-init in Initialize() because GetWorld() is
 			// null during GameInstance subsystem creation. Init here when World is ready.
 			// When using the proxy (-JoinProxy=), mesh creation is deferred until the
-			// proxy sends the DSTM peer list via the registration beacon RPC.
-			FString JoinProxyCheck;
-			const bool bUsingProxy = FParse::Value(FCommandLine::Get(), TEXT("-JoinProxy="), JoinProxyCheck, false);
+			// proxy sends the DSTM peer list via the HTTP registration response.
 			UDSTMSubsystem* DSTMSub = GetGameInstance()->GetSubsystem<UDSTMSubsystem>();
 			if (!bUsingProxy && DSTMSub && DSTMSub->InitializeFromCommandLine())
 			{
@@ -175,8 +152,7 @@ void ANyxGameMode::StartPlay()
 			}
 #endif
 
-			// Connect to proxy for dynamic server registration
-			ConnectToProxy();
+			// Proxy registration (HTTP POST) is handled by UProxyRegistrationSubsystem (plugin).
 		}
 		else
 		{
@@ -206,12 +182,6 @@ void ANyxGameMode::EndPlay(const EEndPlayReason::Type EndPlayReason)
 	if (IsNyxServer())
 	{
 		GetWorld()->GetTimerManager().ClearTimer(ZoneCheckTimerHandle);
-
-		if (ProxyRegistrationClient)
-		{
-			ProxyRegistrationClient->DestroyBeacon();
-			ProxyRegistrationClient = nullptr;
-		}
 
 		UNyxMultiServerSubsystem* MultiSub = GetGameInstance()->GetSubsystem<UNyxMultiServerSubsystem>();
 		if (MultiSub)
@@ -707,49 +677,10 @@ void ANyxGameMode::OnAuthStateChanged(ENyxAuthState NewState)
 bool ANyxGameMode::IsProxyServer() const
 {
 	// The proxy process is launched with -ProxyGameServers= (static mode)
-	// or -ProxyRegistrationPort= (dynamic mode, beacon-based).
+	// or -ProxyRegistrationPort= (dynamic mode, HTTP registration).
 	return FParse::Param(FCommandLine::Get(), TEXT("ProxyGameServers"))
 		|| FString(FCommandLine::Get()).Contains(TEXT("-ProxyGameServers="))
 		|| FString(FCommandLine::Get()).Contains(TEXT("-ProxyRegistrationPort="));
 }
 
-void ANyxGameMode::ConnectToProxy()
-{
-	FString JoinProxyAddr;
-	if (!FParse::Value(FCommandLine::Get(), TEXT("-JoinProxy="), JoinProxyAddr, false))
-	{
-		return;
-	}
 
-	// Determine the address this game server is reachable at.
-	// Explicit -GameServerAddress= takes priority; otherwise construct from port.
-	FString GameServerAddr;
-	if (!FParse::Value(FCommandLine::Get(), TEXT("-GameServerAddress="), GameServerAddr, false))
-	{
-		const int32 Port = GetWorld()->URL.Port;
-		GameServerAddr = FString::Printf(TEXT("127.0.0.1:%d"), Port);
-	}
-
-	// DSTM info: the proxy derives each server's DSTM address from
-	// the game-server host + DSTMListenPort.
-	int32 DSTMPort = 16000;
-	FParse::Value(FCommandLine::Get(), TEXT("-DSTMListenPort="), DSTMPort);
-
-	UE_LOG(LogNyx, Log,
-		TEXT("Connecting to proxy registration beacon at %s (addr: %s, serverId: %s, DSTMPort: %d)"),
-		*JoinProxyAddr, *GameServerAddr, *DedicatedServerId, DSTMPort);
-
-	ProxyRegistrationClient = GetWorld()->SpawnActor<AProxyRegistrationBeaconClient>();
-	if (ProxyRegistrationClient)
-	{
-		ProxyRegistrationClient->SetGameServerAddress(GameServerAddr);
-		ProxyRegistrationClient->SetDSTMInfo(DedicatedServerId, DSTMPort);
-
-		FURL ConnectURL(nullptr, *JoinProxyAddr, ETravelType::TRAVEL_Absolute);
-		ProxyRegistrationClient->InitClient(ConnectURL);
-	}
-	else
-	{
-		UE_LOG(LogNyx, Error, TEXT("Failed to spawn ProxyRegistrationBeaconClient"));
-	}
-}

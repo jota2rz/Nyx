@@ -1,4 +1,7 @@
 // Copyright Nyx MMO Project. All Rights Reserved.
+//
+// NOTE: This file is currently DORMANT — unimplemented example/scaffold code.
+// See NyxMultiServerSubsystem.h for details.
 
 #include "NyxMultiServerSubsystem.h"
 #include "NyxMultiServerBeaconClient.h"
